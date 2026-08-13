@@ -1,0 +1,226 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  ADMIN
+  TECHNICIAN
+  CUSTOMER
+}
+
+enum ServiceOrderStatus {
+  DRAFT
+  DIAGNOSTICO
+  AGUARDANDO_APROVACAO
+  EM_EXECUCAO
+  PRONTO
+  ENTREGUE
+  CANCELADO
+}
+
+enum OperationType {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(TECHNICIAN)
+  customerId   String?  @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  customer              Customer?                   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  assignedOrders        ServiceOrder[]               @relation("TechnicianOrders")
+  statusHistoryChanges  ServiceOrderStatusHistory[] @relation("UserStatusChanges")
+
+  @@map("users")
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  document  String?  @unique
+  email     String?
+  phone     String?
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User?
+  equipments    Equipment[]
+  serviceOrders ServiceOrder[]
+  payments      Payment[]
+
+  @@map("customers")
+}
+
+model Equipment {
+  id           String   @id @default(uuid())
+  customerId   String
+  brand        String
+  model        String
+  serialNumber String?
+  type         String
+  notes        String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  serviceOrders ServiceOrder[]
+
+  @@map("equipments")
+}
+
+model ServiceOrder {
+  id                 String             @id @default(uuid())
+  friendlyId         Int                @unique @default(autoincrement())
+  customerId         String
+  equipmentId        String
+  technicianId       String?
+  status             ServiceOrderStatus @default(DIAGNOSTICO)
+  problemDescription String             @db.Text
+  diagnosis          String?            @db.Text
+  solution           String?            @db.Text
+  totalAmount        Decimal            @default(0.00) @db.Decimal(10, 2)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  customer       Customer                    @relation(fields: [customerId], references: [id])
+  equipment      Equipment                   @relation(fields: [equipmentId], references: [id])
+  technician     User?                       @relation("TechnicianOrders", fields: [technicianId], references: [id])
+  statusHistory  ServiceOrderStatusHistory[]
+  items          ServiceOrderItem[]
+  payments       Payment[]
+
+  @@map("service_orders")
+}
+
+model ServiceOrderStatusHistory {
+  id             String             @id @default(uuid())
+  serviceOrderId String
+  previousStatus ServiceOrderStatus?
+  newStatus      ServiceOrderStatus
+  changedById    String
+  notes          String?            @db.Text
+  createdAt      DateTime           @default(now())
+
+  serviceOrder ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Cascade)
+  changedBy    User         @relation("UserStatusChanges", fields: [changedById], references: [id])
+
+  @@map("service_order_status_history")
+}
+
+model Part {
+  id            String   @id @default(uuid())
+  name          String
+  sku           String   @unique
+  price         Decimal  @db.Decimal(10, 2)
+  costPrice     Decimal  @db.Decimal(10, 2)
+  stockQuantity Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orderItems ServiceOrderItem[]
+
+  @@map("parts")
+}
+
+model ServiceOrderItem {
+  id             String   @id @default(uuid())
+  serviceOrderId String
+  partId         String?
+  description    String
+  quantity       Int      @default(1)
+  unitPrice      Decimal  @db.Decimal(10, 2)
+  totalPrice     Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+
+  serviceOrder ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Cascade)
+  part         Part?        @relation(fields: [partId], references: [id])
+
+  @@map("service_order_items")
+}
+
+model SyncChangeLog {
+  id            BigInt        @id @default(autoincrement())
+  cursor        String        @unique
+  entityType    String
+  entityId      String
+  operationType OperationType
+  data          Json
+  createdAt     DateTime      @default(now())
+
+  @@index([cursor])
+  @@map("sync_change_logs")
+}
+
+model OperationIdempotency {
+  operationId    String   @id
+  userId         String?
+  deviceId       String?
+  endpoint       String
+  requestHash    String
+  responseStatus Int
+  responseBody   Json
+  createdAt      DateTime @default(now())
+
+  @@map("operation_idempotency")
+}
+
+model FileMetadata {
+  id             String   @id @default(uuid())
+  entityType     String
+  entityId       String
+  filename       String
+  mimeType       String
+  sizeBytes      BigInt
+  hashSha256     String
+  remoteLocation String
+  createdAt      DateTime @default(now())
+
+  @@map("file_metadata")
+}
+
+enum PaymentMethod {
+  DINHEIRO
+  CARTAO_CREDITO
+  CARTAO_DEBITO
+  PIX
+  TRANSFERENCIA
+  BOLETO
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  REFUNDED
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  serviceOrderId String
+  customerId     String
+  amount         Decimal       @db.Decimal(10, 2)
+  method         PaymentMethod
+  status         PaymentStatus @default(PENDING)
+  notes          String?       @db.Text
+  paidAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  customer     Customer     @relation(fields: [customerId], references: [id])
+  serviceOrder ServiceOrder @relation(fields: [serviceOrderId], references: [id])
+
+  @@map("payments")
+}
