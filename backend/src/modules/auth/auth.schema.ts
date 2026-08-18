@@ -1,13 +1,10 @@
 import { z } from 'zod';
 
 export const registerSchema = z.object({
-  name: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(8),
-  role: z.enum(['TECHNICIAN', 'CUSTOMER']).default('TECHNICIAN'),
-  // Optional: link a CUSTOMER user to an existing Customer record by ID.
-  // If not provided for CUSTOMER role, a new Customer record is auto-provisioned.
-  customerId: z.string().uuid().optional(),
+  name: z.string().min(2).max(120),
+  email: z.string().email().max(191),
+  password: z.string().min(8).max(128),
+  phone: z.string().max(20).optional(),
 });
 
 export const loginSchema = z.object({

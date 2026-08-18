@@ -1,11 +1,25 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
+import {
+  FastifyRequest,
+  FastifyReply,
+} from 'fastify';
+
 import { z } from 'zod';
 import { ServiceOrderStatus } from '@prisma/client';
-import { prisma } from '../../core/database/prisma.js';
-import { getAuthUser } from '../../core/middleware/auth.middleware.js';
-import { ForbiddenError } from '../../core/utils/errors.js';
 
-import { ALLOWED_TRANSITIONS, isValidStatusTransition } from './service_order_state_machine.js';
+import { prisma } from '../../core/database/prisma.js';
+
+import {
+  getAuthUser,
+} from '../../core/middleware/auth.middleware.js';
+
+import {
+  ForbiddenError,
+} from '../../core/utils/errors.js';
+
+import {
+  ALLOWED_TRANSITIONS,
+  isValidStatusTransition,
+} from './service_order_state_machine.js';
 
 const createOrderSchema = z.object({
   customerId: z.string().uuid(),
@@ -14,108 +28,273 @@ const createOrderSchema = z.object({
   problemDescription: z.string().min(1),
 });
 
-// P0.4: changedById removed — identity must come from the authenticated JWT (request.user.sub).
-// Accepting changedById from the client would allow forging audit history.
 const updateStatusSchema = z.object({
   newStatus: z.nativeEnum(ServiceOrderStatus),
   notes: z.string().optional(),
 });
 
-// P0.2: CUSTOMER role receives only their own orders; ADMIN/TECH receive all.
-export async function listServiceOrdersHandler(request: FastifyRequest, reply: FastifyReply) {
+export async function listServiceOrdersHandler(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
   const authUser = getAuthUser(request);
 
   const whereClause =
     authUser.role === 'CUSTOMER'
-      ? { customerId: authUser.customerId! }
-      : {};
+      ? {
+        organizationId: authUser.organizationId,
+        customerId: authUser.customerId!,
+      }
+      : {
+        organizationId: authUser.organizationId,
+      };
 
   const orders = await prisma.serviceOrder.findMany({
     where: whereClause,
-    include: { customer: true, equipment: true, technician: true },
-    orderBy: { createdAt: 'desc' },
-  });
-  return reply.send({ orders });
-}
-
-// P0.2: GET /:id — CUSTOMER can only access their own service order.
-export async function getServiceOrderHandler(request: FastifyRequest, reply: FastifyReply) {
-  const { id } = request.params as { id: string };
-  const authUser = getAuthUser(request);
-
-  const order = await prisma.serviceOrder.findUnique({
-    where: { id },
-    include: { customer: true, equipment: true, technician: true },
-  });
-
-  if (!order) {
-    return reply.status(404).send({ error: 'Service Order not found' });
-  }
-
-  // P0.2: CUSTOMER must only see orders belonging to their own customerId.
-  if (authUser.role === 'CUSTOMER') {
-    if (!authUser.customerId || order.customerId !== authUser.customerId) {
-      throw new ForbiddenError('Access denied: you can only access your own Service Orders');
-    }
-  }
-
-  return reply.send({ order });
-}
-
-// ADMIN / TECHNICIAN only
-export async function createServiceOrderHandler(request: FastifyRequest, reply: FastifyReply) {
-  const body = createOrderSchema.parse(request.body);
-  const order = await prisma.serviceOrder.create({
-    data: {
-      customerId: body.customerId,
-      equipmentId: body.equipmentId,
-      technicianId: body.technicianId,
-      problemDescription: body.problemDescription,
-      status: ServiceOrderStatus.DIAGNOSTICO,
+    include: {
+      customer: true,
+      equipment: true,
+      technician: true,
+    },
+    orderBy: {
+      createdAt: 'desc',
     },
   });
-  return reply.status(201).send({ order });
+
+  return reply.send({
+    orders,
+  });
 }
 
-// ADMIN / TECHNICIAN only
-export async function updateServiceOrderStatusHandler(request: FastifyRequest, reply: FastifyReply) {
-  const { id } = request.params as { id: string };
-  const body = updateStatusSchema.parse(request.body);
+export async function getServiceOrderHandler(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const { id } = request.params as {
+    id: string;
+  };
 
-  // P0.4: changedById is derived from the authenticated user — never from client payload.
   const authUser = getAuthUser(request);
-  const changedById = authUser.sub;
 
-  const order = await prisma.serviceOrder.findUnique({ where: { id } });
-  if (!order) {
-    return reply.status(404).send({ error: 'Service Order not found' });
-  }
-
-  if (!isValidStatusTransition(order.status, body.newStatus)) {
-    return reply.status(409).send({
-      error: `Invalid status transition from ${order.status} to ${body.newStatus}`,
-      allowedTransitions: ALLOWED_TRANSITIONS[order.status] || [],
-    });
-  }
-
-  const updatedOrder = await prisma.$transaction(async (tx) => {
-    const updated = await tx.serviceOrder.update({
-      where: { id },
-      data: { status: body.newStatus },
-    });
-
-    await tx.serviceOrderStatusHistory.create({
-      data: {
-        serviceOrderId: id,
-        previousStatus: order.status,
-        newStatus: body.newStatus,
-        changedById, // P0.4: Always set from authenticated user, never from client body
-        notes: body.notes,
+  const order =
+    await prisma.serviceOrder.findFirst({
+      where: {
+        id,
+        organizationId: authUser.organizationId,
+      },
+      include: {
+        customer: true,
+        equipment: true,
+        technician: true,
       },
     });
 
-    return updated;
-  });
+  if (!order) {
+    return reply.status(404).send({
+      error: 'Service Order not found',
+    });
+  }
 
-  return reply.send({ order: updatedOrder });
+  if (authUser.role === 'CUSTOMER') {
+    if (
+      !authUser.customerId ||
+      order.customerId !== authUser.customerId
+    ) {
+      throw new ForbiddenError(
+        'Access denied: you can only access your own Service Orders'
+      );
+    }
+  }
+
+  return reply.send({
+    order,
+  });
+}
+
+export async function createServiceOrderHandler(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const body = createOrderSchema.parse(
+    request.body
+  );
+
+  const authUser = getAuthUser(request);
+
+  /**
+   * Verifica se o cliente pertence à organização
+   * atualmente autenticada.
+   */
+  const customerOrganization =
+    await prisma.customerOrganization.findUnique({
+      where: {
+        customerId_organizationId: {
+          customerId: body.customerId,
+          organizationId: authUser.organizationId,
+        },
+      },
+    });
+
+  if (!customerOrganization) {
+    throw new ForbiddenError(
+      'Customer does not belong to the current organization'
+    );
+  }
+
+  /**
+   * Verifica se o equipamento pertence ao cliente.
+   */
+  const equipment =
+    await prisma.equipment.findFirst({
+      where: {
+        id: body.equipmentId,
+        customerId: body.customerId,
+      },
+    });
+
+  if (!equipment) {
+    throw new ForbiddenError(
+      'Equipment does not belong to the specified customer'
+    );
+  }
+
+  /**
+   * Se um técnico foi informado, verifica se ele
+   * pertence à mesma organização.
+   */
+  if (body.technicianId) {
+    const technician =
+      await prisma.membership.findUnique({
+        where: {
+          userId_organizationId: {
+            userId: body.technicianId,
+            organizationId: authUser.organizationId,
+          },
+        },
+      });
+
+    if (
+      !technician ||
+      !['ADMIN', 'TECHNICIAN'].includes(
+        technician.role
+      )
+    ) {
+      throw new ForbiddenError(
+        'Technician does not belong to the current organization'
+      );
+    }
+  }
+
+  const order =
+    await prisma.serviceOrder.create({
+      data: {
+        organizationId:
+          authUser.organizationId,
+
+        customerId: body.customerId,
+
+        equipmentId: body.equipmentId,
+
+        technicianId:
+          body.technicianId,
+
+        problemDescription:
+          body.problemDescription,
+
+        status:
+          ServiceOrderStatus.DIAGNOSTICO,
+      },
+    });
+
+  return reply.status(201).send({
+    order,
+  });
+}
+
+export async function updateServiceOrderStatusHandler(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const { id } = request.params as {
+    id: string;
+  };
+
+  const body = updateStatusSchema.parse(
+    request.body
+  );
+
+  const authUser = getAuthUser(request);
+
+  const changedById = authUser.sub;
+
+  const order =
+    await prisma.serviceOrder.findFirst({
+      where: {
+        id,
+        organizationId: authUser.organizationId,
+      },
+    });
+
+  if (!order) {
+    return reply.status(404).send({
+      error: 'Service Order not found',
+    });
+  }
+
+  if (
+    !isValidStatusTransition(
+      order.status,
+      body.newStatus
+    )
+  ) {
+    return reply.status(409).send({
+      error:
+        `Invalid status transition from ` +
+        `${order.status} to ${body.newStatus}`,
+
+      allowedTransitions:
+        ALLOWED_TRANSITIONS[
+        order.status
+        ] || [],
+    });
+  }
+
+  const updatedOrder =
+    await prisma.$transaction(
+      async (tx) => {
+        const updated =
+          await tx.serviceOrder.update({
+            where: {
+              id,
+            },
+
+            data: {
+              status:
+                body.newStatus,
+            },
+          });
+
+        await tx.serviceOrderStatusHistory.create({
+          data: {
+            serviceOrderId: id,
+
+            previousStatus:
+              order.status,
+
+            newStatus:
+              body.newStatus,
+
+            changedById,
+
+            notes: body.notes,
+          },
+        });
+
+        return updated;
+      }
+    );
+
+  return reply.send({
+    order: updatedOrder,
+  });
 }
