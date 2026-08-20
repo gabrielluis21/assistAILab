@@ -211,10 +211,10 @@ model Organization {
   accessGrants          AccessGrant[]
   serviceOrders         ServiceOrder[]
   customerEvents        CustomerEvent[]
-  Campaigns             Campaign[]
-  MediaAssets           MediaAsset[]
-  AIAnalyses            AIAnalysis[]
-  CustomerFeedbacks     CustomerFeedback[]
+  campaigns             Campaign[]
+  mediaAssets           MediaAsset[]
+  aiAnalyses            AIAnalysis[]
+  customerFeedbacks     CustomerFeedback[]
 
   @@index([name])
   @@map("organizations")
@@ -249,16 +249,14 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user              User?
-  organizations     CustomerOrganization[]
-  equipments        Equipment[]
-  serviceOrders     ServiceOrder[]
-  payments          Payment[]
-  profile           CustomerProfile?       @relation(fields: [customerProfileId], references: [id])
-  events            CustomerEvent[]
-  CustomerFeedback  CustomerFeedback[]
-  MediaAsset        MediaAsset[]
-  customerProfileId String?
+  user             User?
+  organizations    CustomerOrganization[]
+  equipments       Equipment[]
+  serviceOrders    ServiceOrder[]
+  payments         Payment[]
+  events           CustomerEvent[]
+  CustomerFeedback CustomerFeedback[]
+  MediaAsset       MediaAsset[]
 
   @@index([name])
   @@index([email])
@@ -292,7 +290,6 @@ model CustomerProfile {
   updatedAt DateTime @updatedAt
 
   customerOrganization CustomerOrganization @relation(fields: [customerOrganizationId], references: [id], onDelete: Cascade)
-  Customer             Customer[]
 
   @@index([riskLevel])
   @@index([lastServiceAt])

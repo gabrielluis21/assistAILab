@@ -3,63 +3,117 @@ import {
   FastifyReply,
 } from 'fastify';
 
-import { z } from 'zod';
-import { ServiceOrderStatus } from '@prisma/client';
+import {
+  z,
+} from 'zod';
 
-import { prisma } from '../../core/database/prisma.js';
+import {
+  CustomerEventType,
+  ServiceOrderStatus,
+} from '@prisma/client';
+
+import {
+  prisma,
+} from '../../core/database/prisma.js';
 
 import {
   getAuthUser,
 } from '../../core/middleware/auth.middleware.js';
 
 import {
+  ConflictError,
   ForbiddenError,
 } from '../../core/utils/errors.js';
+
+import {
+  serviceOrderCustomerRelationshipService,
+} from '../customer_relationship/service_order_customer_relationship.service.js';
 
 import {
   ALLOWED_TRANSITIONS,
   isValidStatusTransition,
 } from './service_order_state_machine.js';
 
-const createOrderSchema = z.object({
-  customerId: z.string().uuid(),
-  equipmentId: z.string().uuid(),
-  technicianId: z.string().uuid().optional(),
-  problemDescription: z.string().min(1),
-});
+const createOrderSchema =
+  z.object({
+    customerId:
+      z.string().uuid(),
 
-const updateStatusSchema = z.object({
-  newStatus: z.nativeEnum(ServiceOrderStatus),
-  notes: z.string().optional(),
-});
+    equipmentId:
+      z.string().uuid(),
+
+    technicianId:
+      z.string()
+        .uuid()
+        .optional(),
+
+    problemDescription:
+      z.string().min(1),
+  });
+
+const updateStatusSchema =
+  z.object({
+    newStatus:
+      z.nativeEnum(
+        ServiceOrderStatus
+      ),
+
+    notes:
+      z.string().optional(),
+  });
+
+const notApprovedSchema =
+  z.object({
+    reason:
+      z.string()
+        .trim()
+        .min(1)
+        .max(1000)
+        .optional(),
+  });
 
 export async function listServiceOrdersHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const authUser = getAuthUser(request);
+  const authUser =
+    getAuthUser(
+      request
+    );
 
   const whereClause =
-    authUser.role === 'CUSTOMER'
+    authUser.role ===
+      'CUSTOMER'
       ? {
-        organizationId: authUser.organizationId,
-        customerId: authUser.customerId!,
+        organizationId:
+          authUser.organizationId,
+
+        customerId:
+          authUser.customerId!,
       }
       : {
-        organizationId: authUser.organizationId,
+        organizationId:
+          authUser.organizationId,
       };
 
-  const orders = await prisma.serviceOrder.findMany({
-    where: whereClause,
-    include: {
-      customer: true,
-      equipment: true,
-      technician: true,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  });
+  const orders =
+    await prisma
+      .serviceOrder
+      .findMany({
+        where:
+          whereClause,
+
+        include: {
+          customer: true,
+          equipment: true,
+          technician: true,
+        },
+
+        orderBy: {
+          createdAt:
+            'desc',
+        },
+      });
 
   return reply.send({
     orders,
@@ -70,35 +124,51 @@ export async function getServiceOrderHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const { id } = request.params as {
-    id: string;
-  };
+  const { id } =
+    request.params as {
+      id: string;
+    };
 
-  const authUser = getAuthUser(request);
+  const authUser =
+    getAuthUser(
+      request
+    );
 
   const order =
-    await prisma.serviceOrder.findFirst({
-      where: {
-        id,
-        organizationId: authUser.organizationId,
-      },
-      include: {
-        customer: true,
-        equipment: true,
-        technician: true,
-      },
-    });
+    await prisma
+      .serviceOrder
+      .findFirst({
+        where: {
+          id,
+
+          organizationId:
+            authUser.organizationId,
+        },
+
+        include: {
+          customer: true,
+          equipment: true,
+          technician: true,
+        },
+      });
 
   if (!order) {
-    return reply.status(404).send({
-      error: 'Service Order not found',
-    });
+    return reply
+      .status(404)
+      .send({
+        error:
+          'Service Order not found',
+      });
   }
 
-  if (authUser.role === 'CUSTOMER') {
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
     if (
       !authUser.customerId ||
-      order.customerId !== authUser.customerId
+      order.customerId !==
+      authUser.customerId
     ) {
       throw new ForbiddenError(
         'Access denied: you can only access your own Service Orders'
@@ -115,42 +185,60 @@ export async function createServiceOrderHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const body = createOrderSchema.parse(
-    request.body
-  );
+  const body =
+    createOrderSchema.parse(
+      request.body
+    );
 
-  const authUser = getAuthUser(request);
+  const authUser =
+    getAuthUser(
+      request
+    );
 
-  /**
-   * Verifica se o cliente pertence à organização
-   * atualmente autenticada.
-   */
   const customerOrganization =
-    await prisma.customerOrganization.findUnique({
-      where: {
-        customerId_organizationId: {
-          customerId: body.customerId,
-          organizationId: authUser.organizationId,
-        },
-      },
-    });
+    await prisma
+      .customerOrganization
+      .findUnique({
+        where: {
+          customerId_organizationId: {
+            customerId:
+              body.customerId,
 
-  if (!customerOrganization) {
+            organizationId:
+              authUser.organizationId,
+          },
+        },
+      });
+
+  if (
+    !customerOrganization
+  ) {
     throw new ForbiddenError(
       'Customer does not belong to the current organization'
     );
   }
 
-  /**
-   * Verifica se o equipamento pertence ao cliente.
-   */
+  if (
+    customerOrganization.status !==
+    'ACTIVE'
+  ) {
+    throw new ForbiddenError(
+      'Customer relationship with the current organization is not active'
+    );
+  }
+
   const equipment =
-    await prisma.equipment.findFirst({
-      where: {
-        id: body.equipmentId,
-        customerId: body.customerId,
-      },
-    });
+    await prisma
+      .equipment
+      .findFirst({
+        where: {
+          id:
+            body.equipmentId,
+
+          customerId:
+            body.customerId,
+        },
+      });
 
   if (!equipment) {
     throw new ForbiddenError(
@@ -158,24 +246,30 @@ export async function createServiceOrderHandler(
     );
   }
 
-  /**
-   * Se um técnico foi informado, verifica se ele
-   * pertence à mesma organização.
-   */
-  if (body.technicianId) {
+  if (
+    body.technicianId
+  ) {
     const technician =
-      await prisma.membership.findUnique({
-        where: {
-          userId_organizationId: {
-            userId: body.technicianId,
-            organizationId: authUser.organizationId,
+      await prisma
+        .membership
+        .findUnique({
+          where: {
+            userId_organizationId: {
+              userId:
+                body.technicianId,
+
+              organizationId:
+                authUser.organizationId,
+            },
           },
-        },
-      });
+        });
 
     if (
       !technician ||
-      !['ADMIN', 'TECHNICIAN'].includes(
+      ![
+        'ADMIN',
+        'TECHNICIAN',
+      ].includes(
         technician.role
       )
     ) {
@@ -186,58 +280,117 @@ export async function createServiceOrderHandler(
   }
 
   const order =
-    await prisma.serviceOrder.create({
-      data: {
-        organizationId:
-          authUser.organizationId,
+    await prisma
+      .$transaction(
+        async (tx) => {
+          const createdOrder =
+            await tx
+              .serviceOrder
+              .create({
+                data: {
+                  organizationId:
+                    authUser.organizationId,
 
-        customerId: body.customerId,
+                  customerId:
+                    body.customerId,
 
-        equipmentId: body.equipmentId,
+                  equipmentId:
+                    body.equipmentId,
 
-        technicianId:
-          body.technicianId,
+                  technicianId:
+                    body.technicianId,
 
-        problemDescription:
-          body.problemDescription,
+                  problemDescription:
+                    body.problemDescription,
 
-        status:
-          ServiceOrderStatus.DIAGNOSTICO,
-      },
+                  status:
+                    ServiceOrderStatus
+                      .DIAGNOSTICO,
+                },
+              });
+
+          await serviceOrderCustomerRelationshipService
+            .registerCreated(
+              {
+                serviceOrderId:
+                  createdOrder.id,
+
+                customerId:
+                  createdOrder.customerId,
+
+                organizationId:
+                  createdOrder.organizationId,
+
+                status:
+                  createdOrder.status,
+              },
+
+              tx
+            );
+
+          return createdOrder;
+        }
+      );
+
+  return reply
+    .status(201)
+    .send({
+      order,
     });
-
-  return reply.status(201).send({
-    order,
-  });
 }
 
 export async function updateServiceOrderStatusHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const { id } = request.params as {
-    id: string;
-  };
+  const { id } =
+    request.params as {
+      id: string;
+    };
 
-  const body = updateStatusSchema.parse(
-    request.body
-  );
+  const body =
+    updateStatusSchema.parse(
+      request.body
+    );
 
-  const authUser = getAuthUser(request);
+  const authUser =
+    getAuthUser(
+      request
+    );
 
-  const changedById = authUser.sub;
+  const changedById =
+    authUser.sub;
 
   const order =
-    await prisma.serviceOrder.findFirst({
-      where: {
-        id,
-        organizationId: authUser.organizationId,
-      },
-    });
+    await prisma
+      .serviceOrder
+      .findFirst({
+        where: {
+          id,
+
+          organizationId:
+            authUser.organizationId,
+        },
+      });
 
   if (!order) {
-    return reply.status(404).send({
-      error: 'Service Order not found',
+    return reply
+      .status(404)
+      .send({
+        error:
+          'Service Order not found',
+      });
+  }
+
+  /**
+   * Retry/idempotência.
+   */
+  if (
+    order.status ===
+    body.newStatus
+  ) {
+    return reply.send({
+      order,
     });
   }
 
@@ -247,54 +400,317 @@ export async function updateServiceOrderStatusHandler(
       body.newStatus
     )
   ) {
-    return reply.status(409).send({
-      error:
-        `Invalid status transition from ` +
-        `${order.status} to ${body.newStatus}`,
+    return reply
+      .status(409)
+      .send({
+        error:
+          `Invalid status transition from ` +
+          `${order.status} to ${body.newStatus}`,
 
-      allowedTransitions:
-        ALLOWED_TRANSITIONS[
-        order.status
-        ] || [],
-    });
+        allowedTransitions:
+          ALLOWED_TRANSITIONS[
+          order.status
+          ] || [],
+      });
   }
 
   const updatedOrder =
-    await prisma.$transaction(
-      async (tx) => {
-        const updated =
-          await tx.serviceOrder.update({
-            where: {
-              id,
-            },
+    await prisma
+      .$transaction(
+        async (tx) => {
+          /**
+           * Optimistic locking.
+           */
+          const updateResult =
+            await tx
+              .serviceOrder
+              .updateMany({
+                where: {
+                  id,
 
-            data: {
-              status:
-                body.newStatus,
-            },
-          });
+                  organizationId:
+                    authUser.organizationId,
 
-        await tx.serviceOrderStatusHistory.create({
-          data: {
-            serviceOrderId: id,
+                  status:
+                    order.status,
+                },
 
-            previousStatus:
-              order.status,
+                data: {
+                  status:
+                    body.newStatus,
+                },
+              });
 
-            newStatus:
-              body.newStatus,
+          if (
+            updateResult.count !==
+            1
+          ) {
+            throw new ConflictError(
+              'Service Order status changed concurrently. Reload the order and try again.'
+            );
+          }
 
-            changedById,
+          await tx
+            .serviceOrderStatusHistory
+            .create({
+              data: {
+                serviceOrderId:
+                  id,
 
-            notes: body.notes,
-          },
-        });
+                previousStatus:
+                  order.status,
 
-        return updated;
-      }
-    );
+                newStatus:
+                  body.newStatus,
+
+                changedById,
+
+                notes:
+                  body.notes,
+              },
+            });
+
+          const updated =
+            await tx
+              .serviceOrder
+              .findUniqueOrThrow({
+                where: {
+                  id,
+                },
+              });
+
+          await serviceOrderCustomerRelationshipService
+            .registerStatusTransition(
+              {
+                serviceOrderId:
+                  updated.id,
+
+                customerId:
+                  updated.customerId,
+
+                organizationId:
+                  updated.organizationId,
+
+                previousStatus:
+                  order.status,
+
+                newStatus:
+                  updated.status,
+              },
+
+              tx
+            );
+
+          return updated;
+        }
+      );
 
   return reply.send({
-    order: updatedOrder,
+    order:
+      updatedOrder,
+  });
+}
+
+/**
+ * Cliente recusou explicitamente
+ * o orçamento apresentado.
+ */
+export async function markServiceOrderNotApprovedHandler(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const { id } =
+    request.params as {
+      id: string;
+    };
+
+  const body =
+    notApprovedSchema.parse(
+      request.body ?? {}
+    );
+
+  const authUser =
+    getAuthUser(
+      request
+    );
+
+  const order =
+    await prisma
+      .serviceOrder
+      .findFirst({
+        where: {
+          id,
+
+          organizationId:
+            authUser.organizationId,
+        },
+      });
+
+  if (!order) {
+    return reply
+      .status(404)
+      .send({
+        error:
+          'Service Order not found',
+      });
+  }
+
+  /**
+   * Retry idempotente.
+   */
+  const existingEvent =
+    await prisma
+      .customerEvent
+      .findFirst({
+        where: {
+          organizationId:
+            authUser.organizationId,
+
+          serviceOrderId:
+            order.id,
+
+          type:
+            CustomerEventType
+              .SERVICE_ORDER_NOT_APPROVED,
+        },
+      });
+
+  if (existingEvent) {
+    return reply.send({
+      order,
+
+      alreadyProcessed:
+        true,
+    });
+  }
+
+  /**
+   * Uma recusa só pode ocorrer quando
+   * o orçamento aguarda aprovação.
+   */
+  if (
+    order.status !==
+    ServiceOrderStatus
+      .AGUARDANDO_APROVACAO
+  ) {
+    return reply
+      .status(409)
+      .send({
+        error:
+          'Service Order is not awaiting approval',
+
+        currentStatus:
+          order.status,
+
+        requiredStatus:
+          ServiceOrderStatus
+            .AGUARDANDO_APROVACAO,
+      });
+  }
+
+  const updatedOrder =
+    await prisma
+      .$transaction(
+        async (tx) => {
+          const result =
+            await tx
+              .serviceOrder
+              .updateMany({
+                where: {
+                  id:
+                    order.id,
+
+                  organizationId:
+                    authUser.organizationId,
+
+                  status:
+                    ServiceOrderStatus
+                      .AGUARDANDO_APROVACAO,
+                },
+
+                data: {
+                  status:
+                    ServiceOrderStatus
+                      .CANCELADO,
+                },
+              });
+
+          if (
+            result.count !==
+            1
+          ) {
+            throw new ConflictError(
+              'Service Order status changed concurrently. Reload the order and try again.'
+            );
+          }
+
+          await tx
+            .serviceOrderStatusHistory
+            .create({
+              data: {
+                serviceOrderId:
+                  order.id,
+
+                previousStatus:
+                  ServiceOrderStatus
+                    .AGUARDANDO_APROVACAO,
+
+                newStatus:
+                  ServiceOrderStatus
+                    .CANCELADO,
+
+                changedById:
+                  authUser.sub,
+
+                notes:
+                  body.reason ??
+                  'Orçamento não aprovado pelo cliente',
+              },
+            });
+
+          /**
+           * Não usamos registerStatusTransition()
+           * aqui para não gerar
+           * SERVICE_ORDER_CANCELLED.
+           */
+          await serviceOrderCustomerRelationshipService
+            .registerNotApproved(
+              {
+                serviceOrderId:
+                  order.id,
+
+                customerId:
+                  order.customerId,
+
+                organizationId:
+                  order.organizationId,
+
+                previousStatus:
+                  order.status,
+
+                changedById:
+                  authUser.sub,
+
+                reason:
+                  body.reason,
+              },
+
+              tx
+            );
+
+          return tx
+            .serviceOrder
+            .findUniqueOrThrow({
+              where: {
+                id:
+                  order.id,
+              },
+            });
+        }
+      );
+
+  return reply.send({
+    order:
+      updatedOrder,
   });
 }
