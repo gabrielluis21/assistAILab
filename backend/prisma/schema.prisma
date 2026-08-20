@@ -168,6 +168,32 @@ enum AIAnalysisStatus {
   FAILED
 }
 
+enum EquipmentOwnerType {
+  CUSTOMER
+  ORGANIZATION
+}
+
+enum EquipmentPurpose {
+  RESALE
+  PARTS_DONOR
+  INTERNAL_USE
+}
+
+enum EquipmentAcquisitionStatus {
+  PENDING
+  AUTHORIZED
+  REJECTED
+  CANCELLED
+  COMPLETED
+}
+
+enum EquipmentConsentMethod {
+  CUSTOMER_APP
+  QR_CODE
+  DIGITAL_SIGNATURE
+  SIGNED_DOCUMENT
+}
+
 model User {
   id           String     @id @default(uuid())
   name         String
@@ -215,6 +241,8 @@ model Organization {
   mediaAssets           MediaAsset[]
   aiAnalyses            AIAnalysis[]
   customerFeedbacks     CustomerFeedback[]
+  ownedEquipments       Equipment[]
+  equipmentAcquisitions EquipmentAcquisition[]
 
   @@index([name])
   @@map("organizations")
@@ -249,14 +277,15 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user             User?
-  organizations    CustomerOrganization[]
-  equipments       Equipment[]
-  serviceOrders    ServiceOrder[]
-  payments         Payment[]
-  events           CustomerEvent[]
-  CustomerFeedback CustomerFeedback[]
-  MediaAsset       MediaAsset[]
+  user                  User?
+  organizations         CustomerOrganization[]
+  equipments            Equipment[]
+  serviceOrders         ServiceOrder[]
+  payments              Payment[]
+  events                CustomerEvent[]
+  CustomerFeedback      CustomerFeedback[]
+  MediaAsset            MediaAsset[]
+  equipmentAcquisitions EquipmentAcquisition[]
 
   @@index([name])
   @@index([email])
@@ -318,24 +347,81 @@ model CustomerOrganization {
 }
 
 model Equipment {
-  id           String   @id @default(uuid())
-  customerId   String
+  id String @id @default(uuid())
+
+  customerId     String?
+  organizationId String?
+
+  ownerType EquipmentOwnerType @default(CUSTOMER)
+
+  organizationPurpose EquipmentPurpose?
+
   brand        String
   model        String
   serialNumber String?
   type         String
-  notes        String?  @db.Text
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  notes        String? @db.Text
 
-  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
   serviceOrders ServiceOrder[]
   mediaAssets   MediaAsset[]
+  acquisitions  EquipmentAcquisition[]
 
   @@index([customerId])
+  @@index([organizationId])
+  @@index([ownerType])
+  @@index([organizationPurpose])
   @@index([serialNumber])
   @@index([type])
   @@map("equipments")
+}
+
+model EquipmentAcquisition {
+  id             String  @id @default(uuid())
+  equipmentId    String
+  customerId     String
+  organizationId String
+  serviceOrderId String?
+
+  purpose EquipmentPurpose
+
+  status EquipmentAcquisitionStatus @default(PENDING)
+
+  offeredAmount Decimal? @db.Decimal(10, 2)
+
+  consentMethod EquipmentConsentMethod?
+
+  consentSnapshot Json?
+  consentHash     String?
+
+  authorizedAt DateTime?
+  rejectedAt   DateTime?
+  cancelledAt  DateTime?
+  completedAt  DateTime?
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  equipment    Equipment     @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  serviceOrder ServiceOrder? @relation(fields: [serviceOrderId], references: [id], onDelete: SetNull)
+
+  @@index([equipmentId])
+  @@index([customerId])
+  @@index([organizationId])
+  @@index([serviceOrderId])
+  @@index([status])
+  @@index([purpose])
+  @@index([organizationId, status])
+  @@map("equipment_acquisitions")
 }
 
 model ServiceOrder {
@@ -357,16 +443,17 @@ model ServiceOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization     Organization                @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  customer         Customer                    @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  equipment        Equipment                   @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
-  technician       User?                       @relation("TechnicianOrders", fields: [technicianId], references: [id], onDelete: SetNull)
-  statusHistory    ServiceOrderStatusHistory[]
-  items            ServiceOrderItem[]
-  payments         Payment[]
-  customerEvents   CustomerEvent[]
-  mediaAssets      MediaAsset[]
-  CustomerFeedback CustomerFeedback[]
+  organization          Organization                @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer              Customer                    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  equipment             Equipment                   @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+  technician            User?                       @relation("TechnicianOrders", fields: [technicianId], references: [id], onDelete: SetNull)
+  statusHistory         ServiceOrderStatusHistory[]
+  items                 ServiceOrderItem[]
+  payments              Payment[]
+  customerEvents        CustomerEvent[]
+  mediaAssets           MediaAsset[]
+  CustomerFeedback      CustomerFeedback[]
+  equipmentAcquisitions EquipmentAcquisition[]
 
   @@index([organizationId])
   @@index([customerId])

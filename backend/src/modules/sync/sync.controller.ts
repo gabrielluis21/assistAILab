@@ -1,15 +1,40 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
-import { ServiceOrderStatus } from '@prisma/client';
-import { prisma } from '../../core/database/prisma.js';
-import { pushSyncSchema, pullSyncQuerySchema } from './sync.schema.js';
-import { computePayloadHash } from '../../core/middleware/idempotency.middleware.js';
-import { isValidStatusTransition } from '../service_orders/service_order_state_machine.js';
-import { getAuthUser } from '../../core/middleware/auth.middleware.js';
-import { ForbiddenError } from '../../core/utils/errors.js';
+import {
+  FastifyRequest,
+  FastifyReply,
+} from 'fastify';
+
+import {
+  EquipmentOwnerType,
+  ServiceOrderStatus,
+} from '@prisma/client';
+
+import {
+  prisma,
+} from '../../core/database/prisma.js';
+
+import {
+  pushSyncSchema,
+  pullSyncQuerySchema,
+} from './sync.schema.js';
+
+import {
+  computePayloadHash,
+} from '../../core/middleware/idempotency.middleware.js';
+
+import {
+  isValidStatusTransition,
+} from '../service_orders/service_order_state_machine.js';
+
+import {
+  getAuthUser,
+} from '../../core/middleware/auth.middleware.js';
+
+import {
+  ForbiddenError,
+} from '../../core/utils/errors.js';
 
 /**
- * P0.5:
- * Atomically reserves an idempotency slot by attempting a DB insert.
+ * Reserva atomicamente uma chave de idempotência.
  */
 async function reserveIdempotencySlot(
   operationId: string,
@@ -17,7 +42,9 @@ async function reserveIdempotencySlot(
   userId: string,
   deviceId?: string
 ): Promise<
-  | { isNew: true }
+  | {
+    isNew: true;
+  }
   | {
     isNew: false;
     conflict: boolean;
@@ -28,28 +55,53 @@ async function reserveIdempotencySlot(
     await prisma.operationIdempotency.create({
       data: {
         operationId,
-        endpoint: '/api/v1/sync/push',
-        requestHash: currentHash,
-        responseStatus: 200,
+        endpoint:
+          '/api/v1/sync/push',
+
+        requestHash:
+          currentHash,
+
+        responseStatus:
+          200,
+
         responseBody: {},
+
         userId,
-        deviceId: deviceId ?? null,
+
+        deviceId:
+          deviceId ?? null,
       },
     });
 
-    return { isNew: true };
+    return {
+      isNew: true,
+    };
   } catch (err: any) {
-    // P2002 = unique constraint violation
-    if (err?.code === 'P2002') {
-      const existing = await prisma.operationIdempotency.findUnique({
-        where: { operationId },
-      });
+    /**
+     * P2002:
+     * unique constraint violation.
+     */
+    if (
+      err?.code ===
+      'P2002'
+    ) {
+      const existing =
+        await prisma.operationIdempotency.findUnique({
+          where: {
+            operationId,
+          },
+        });
 
       if (!existing) {
-        return { isNew: true };
+        return {
+          isNew: true,
+        };
       }
 
-      if (existing.requestHash !== currentHash) {
+      if (
+        existing.requestHash !==
+        currentHash
+      ) {
         return {
           isNew: false,
           conflict: true,
@@ -59,7 +111,8 @@ async function reserveIdempotencySlot(
       return {
         isNew: false,
         conflict: false,
-        responseBody: existing.responseBody,
+        responseBody:
+          existing.responseBody,
       };
     }
 
@@ -68,22 +121,28 @@ async function reserveIdempotencySlot(
 }
 
 /**
- * Obtains the organization associated with the authenticated user.
+ * Obtém a organização associada
+ * ao usuário autenticado.
  *
  * ADMIN / TECHNICIAN:
- *   organization comes from Membership.
+ * organização vem da Membership.
  *
  * CUSTOMER:
- *   organization comes from the active CustomerOrganization relation.
+ * organização vem da relação
+ * CustomerOrganization ativa.
  *
- * The client NEVER supplies organizationId as the source of authority.
+ * O client nunca fornece organizationId
+ * como fonte de autoridade.
  */
 async function getAuthenticatedOrganizationId(
   userId: string,
   role: string,
   customerId: string | null
 ): Promise<string> {
-  if (role === 'CUSTOMER') {
+  if (
+    role ===
+    'CUSTOMER'
+  ) {
     if (!customerId) {
       throw new ForbiddenError(
         'CUSTOMER user has no associated Customer identity'
@@ -94,36 +153,50 @@ async function getAuthenticatedOrganizationId(
       await prisma.customerOrganization.findFirst({
         where: {
           customerId,
-          status: 'ACTIVE',
+          status:
+            'ACTIVE',
         },
+
         orderBy: {
-          createdAt: 'asc',
+          createdAt:
+            'asc',
         },
+
         select: {
-          organizationId: true,
+          organizationId:
+            true,
         },
       });
 
-    if (!customerOrganization) {
+    if (
+      !customerOrganization
+    ) {
       throw new ForbiddenError(
         'Customer is not associated with an active organization'
       );
     }
 
-    return customerOrganization.organizationId;
+    return (
+      customerOrganization.organizationId
+    );
   }
 
-  const membership = await prisma.membership.findFirst({
-    where: {
-      userId,
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-    select: {
-      organizationId: true,
-    },
-  });
+  const membership =
+    await prisma.membership.findFirst({
+      where: {
+        userId,
+      },
+
+      orderBy: {
+        createdAt:
+          'asc',
+      },
+
+      select: {
+        organizationId:
+          true,
+      },
+    });
 
   if (!membership) {
     throw new ForbiddenError(
@@ -135,30 +208,71 @@ async function getAuthenticatedOrganizationId(
 }
 
 /**
- * Validates whether an entity belongs to the authenticated organization.
+ * Valida se uma entidade existente
+ * pode ser acessada pela organização.
  *
- * This is especially important for ADMIN / TECHNICIAN users.
- * Having a valid JWT does NOT mean that the user can manipulate
- * another organization's data.
+ * IMPORTANTE:
+ *
+ * Equipment possui duas regras:
+ *
+ * CUSTOMER:
+ *   a organização somente acessa
+ *   através de uma ServiceOrder.
+ *
+ * ORGANIZATION:
+ *   a organização proprietária possui
+ *   acesso direto.
  */
 async function validateOrganizationOwnership(
   entityType: string,
   entityId: string,
   organizationId: string
 ): Promise<void> {
-  const entityUpper = entityType.toUpperCase();
+  const entityUpper =
+    entityType.toUpperCase();
 
-  if (entityUpper === 'CUSTOMER') {
-    const relation = await prisma.customerOrganization.findUnique({
-      where: {
-        customerId_organizationId: {
-          customerId: entityId,
-          organizationId,
+  /**
+   * CUSTOMER
+   */
+  if (
+    entityUpper ===
+    'CUSTOMER'
+  ) {
+    /**
+     * Permite CREATE de um novo Customer.
+     */
+    const customer =
+      await prisma.customer.findUnique({
+        where: {
+          id:
+            entityId,
         },
-      },
-    });
 
-    if (!relation) {
+        select: {
+          id:
+            true,
+
+          organizations: {
+            where: {
+              organizationId,
+            },
+
+            select: {
+              id:
+                true,
+            },
+          },
+        },
+      });
+
+    if (!customer) {
+      return;
+    }
+
+    if (
+      customer.organizations.length ===
+      0
+    ) {
       throw new ForbiddenError(
         'Customer does not belong to the authenticated organization'
       );
@@ -167,49 +281,137 @@ async function validateOrganizationOwnership(
     return;
   }
 
-  if (entityUpper === 'EQUIPMENT') {
-    const equipment = await prisma.equipment.findUnique({
-      where: {
-        id: entityId,
-      },
-      select: {
-        customerId: true,
-      },
-    });
+  /**
+   * EQUIPMENT
+   */
+  if (
+    entityUpper ===
+    'EQUIPMENT'
+  ) {
+    const equipment =
+      await prisma.equipment.findUnique({
+        where: {
+          id:
+            entityId,
+        },
 
+        select: {
+          id:
+            true,
+
+          customerId:
+            true,
+
+          organizationId:
+            true,
+
+          ownerType:
+            true,
+        },
+      });
+
+    /**
+     * O equipamento ainda não existe.
+     *
+     * CREATE será validado posteriormente
+     * dentro da transação.
+     */
     if (!equipment) {
       return;
     }
 
-    const relation = await prisma.customerOrganization.findUnique({
-      where: {
-        customerId_organizationId: {
-          customerId: equipment.customerId,
+    /**
+     * Equipamento pertencente
+     * à própria organização.
+     */
+    if (
+      equipment.ownerType ===
+      EquipmentOwnerType.ORGANIZATION
+    ) {
+      if (
+        !equipment.organizationId ||
+        equipment.organizationId !==
+        organizationId
+      ) {
+        throw new ForbiddenError(
+          'Equipment does not belong to the authenticated organization'
+        );
+      }
+
+      return;
+    }
+
+    /**
+     * Equipment CUSTOMER deveria
+     * possuir customerId.
+     *
+     * Se não possuir, o estado do registro
+     * é inconsistente.
+     */
+    if (
+      !equipment.customerId
+    ) {
+      throw new ForbiddenError(
+        'Customer-owned equipment has no associated customer'
+      );
+    }
+
+    /**
+     * CustomerOrganization NÃO concede
+     * automaticamente acesso aos equipamentos.
+     *
+     * A organização só conhece o equipamento
+     * dentro do contexto de uma OS.
+     */
+    const serviceOrder =
+      await prisma.serviceOrder.findFirst({
+        where: {
+          equipmentId:
+            equipment.id,
+
           organizationId,
         },
-      },
-    });
 
-    if (!relation) {
+        select: {
+          id:
+            true,
+        },
+      });
+
+    if (!serviceOrder) {
       throw new ForbiddenError(
-        'Equipment does not belong to the authenticated organization'
+        'Organization has no Service Order granting access to this equipment'
       );
     }
 
     return;
   }
 
-  if (entityUpper === 'SERVICE_ORDER') {
-    const order = await prisma.serviceOrder.findUnique({
-      where: {
-        id: entityId,
-      },
-      select: {
-        organizationId: true,
-      },
-    });
+  /**
+   * SERVICE ORDER
+   */
+  if (
+    entityUpper ===
+    'SERVICE_ORDER'
+  ) {
+    const order =
+      await prisma.serviceOrder.findUnique({
+        where: {
+          id:
+            entityId,
+        },
 
-    if (order && order.organizationId !== organizationId) {
+        select: {
+          organizationId:
+            true,
+        },
+      });
+
+    if (
+      order &&
+      order.organizationId !==
+      organizationId
+    ) {
       throw new ForbiddenError(
         'Service Order does not belong to the authenticated organization'
       );
@@ -218,23 +420,35 @@ async function validateOrganizationOwnership(
     return;
   }
 
-  if (entityUpper === 'SERVICE_ORDER_ITEM') {
-    const item = await prisma.serviceOrderItem.findUnique({
-      where: {
-        id: entityId,
-      },
-      select: {
-        serviceOrder: {
-          select: {
-            organizationId: true,
+  /**
+   * SERVICE ORDER ITEM
+   */
+  if (
+    entityUpper ===
+    'SERVICE_ORDER_ITEM'
+  ) {
+    const item =
+      await prisma.serviceOrderItem.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+
+        select: {
+          serviceOrder: {
+            select: {
+              organizationId:
+                true,
+            },
           },
         },
-      },
-    });
+      });
 
     if (
       item &&
-      item.serviceOrder.organizationId !== organizationId
+      item.serviceOrder
+        .organizationId !==
+      organizationId
     ) {
       throw new ForbiddenError(
         'Service Order Item does not belong to the authenticated organization'
@@ -244,23 +458,35 @@ async function validateOrganizationOwnership(
     return;
   }
 
-  if (entityUpper === 'PAYMENT') {
-    const payment = await prisma.payment.findUnique({
-      where: {
-        id: entityId,
-      },
-      select: {
-        serviceOrder: {
-          select: {
-            organizationId: true,
+  /**
+   * PAYMENT
+   */
+  if (
+    entityUpper ===
+    'PAYMENT'
+  ) {
+    const payment =
+      await prisma.payment.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+
+        select: {
+          serviceOrder: {
+            select: {
+              organizationId:
+                true,
+            },
           },
         },
-      },
-    });
+      });
 
     if (
       payment &&
-      payment.serviceOrder.organizationId !== organizationId
+      payment.serviceOrder
+        .organizationId !==
+      organizationId
     ) {
       throw new ForbiddenError(
         'Payment does not belong to the authenticated organization'
@@ -270,9 +496,15 @@ async function validateOrganizationOwnership(
     return;
   }
 
-  if (entityUpper === 'PART') {
-    // Parts are currently global in the schema.
-    // There is no organizationId on Part.
+  /**
+   * PART
+   *
+   * Atualmente Part ainda é global.
+   */
+  if (
+    entityUpper ===
+    'PART'
+  ) {
     return;
   }
 
@@ -282,9 +514,75 @@ async function validateOrganizationOwnership(
 }
 
 /**
- * P0.3 + P0.4:
- * Validates that CUSTOMER can manipulate only entities
- * belonging to their own Customer identity.
+ * Garante que o Sync genérico de Equipment
+ * não seja utilizado para transferir propriedade.
+ *
+ * Transferência:
+ *
+ * CUSTOMER
+ *     ↓
+ * ORGANIZATION
+ *
+ * deverá ocorrer exclusivamente através
+ * do EquipmentAcquisitionService.
+ */
+export function assertGenericEquipmentSyncPayload(
+  payload: Record<string, any>
+): void {
+  const requestedOwnerType =
+    payload.owner_type ??
+    payload.ownerType;
+
+  const requestedOrganizationId =
+    payload.organization_id ??
+    payload.organizationId;
+
+  const requestedPurpose =
+    payload.organization_purpose ??
+    payload.organizationPurpose;
+
+  /**
+   * O Sync genérico só representa
+   * Equipment pertencente ao Customer.
+   */
+  if (
+    requestedOwnerType &&
+    requestedOwnerType !==
+    EquipmentOwnerType.CUSTOMER
+  ) {
+    throw new ForbiddenError(
+      'Equipment ownership cannot be transferred through generic Sync'
+    );
+  }
+
+  /**
+   * organizationId também não pode
+   * ser injetado pelo client.
+   */
+  if (
+    requestedOrganizationId
+  ) {
+    throw new ForbiddenError(
+      'organizationId cannot be assigned to Equipment through generic Sync'
+    );
+  }
+
+  /**
+   * Finalidade organizacional só existe
+   * depois de uma aquisição válida.
+   */
+  if (
+    requestedPurpose
+  ) {
+    throw new ForbiddenError(
+      'organizationPurpose cannot be assigned through generic Sync'
+    );
+  }
+}
+
+/**
+ * Valida que CUSTOMER manipula somente
+ * entidades relacionadas à própria identidade.
  */
 async function validateCustomerOwnership(
   entityType: string,
@@ -292,10 +590,20 @@ async function validateCustomerOwnership(
   payload: Record<string, any>,
   authenticatedCustomerId: string
 ): Promise<void> {
-  const entityUpper = entityType.toUpperCase();
+  const entityUpper =
+    entityType.toUpperCase();
 
-  if (entityUpper === 'CUSTOMER') {
-    if (entityId !== authenticatedCustomerId) {
+  /**
+   * CUSTOMER
+   */
+  if (
+    entityUpper ===
+    'CUSTOMER'
+  ) {
+    if (
+      entityId !==
+      authenticatedCustomerId
+    ) {
       throw new ForbiddenError(
         'CUSTOMER cannot modify another Customer'
       );
@@ -304,29 +612,68 @@ async function validateCustomerOwnership(
     return;
   }
 
-  if (entityUpper === 'EQUIPMENT') {
-    const equipment = await prisma.equipment.findUnique({
-      where: {
-        id: entityId,
-      },
-    });
+  /**
+   * EQUIPMENT
+   */
+  if (
+    entityUpper ===
+    'EQUIPMENT'
+  ) {
+    assertGenericEquipmentSyncPayload(
+      payload
+    );
 
-    if (
-      equipment &&
-      equipment.customerId !== authenticatedCustomerId
-    ) {
-      throw new ForbiddenError(
-        'CUSTOMER cannot modify another Customer equipment'
-      );
+    const equipment =
+      await prisma.equipment.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+
+        select: {
+          customerId:
+            true,
+
+          ownerType:
+            true,
+
+          organizationId:
+            true,
+        },
+      });
+
+    /**
+     * Se já existe, obrigatoriamente
+     * deve continuar sendo do Customer.
+     */
+    if (equipment) {
+      if (
+        equipment.ownerType !==
+        EquipmentOwnerType.CUSTOMER
+      ) {
+        throw new ForbiddenError(
+          'CUSTOMER cannot modify organization-owned equipment'
+        );
+      }
+
+      if (
+        equipment.customerId !==
+        authenticatedCustomerId
+      ) {
+        throw new ForbiddenError(
+          'CUSTOMER cannot modify another Customer equipment'
+        );
+      }
     }
 
     const payloadCustomerId =
-      payload.customer_id ||
+      payload.customer_id ??
       payload.customerId;
 
     if (
       payloadCustomerId &&
-      payloadCustomerId !== authenticatedCustomerId
+      payloadCustomerId !==
+      authenticatedCustomerId
     ) {
       throw new ForbiddenError(
         'CUSTOMER cannot assign Equipment to another Customer'
@@ -336,16 +683,25 @@ async function validateCustomerOwnership(
     return;
   }
 
-  if (entityUpper === 'SERVICE_ORDER') {
-    const serviceOrder = await prisma.serviceOrder.findUnique({
-      where: {
-        id: entityId,
-      },
-    });
+  /**
+   * SERVICE ORDER
+   */
+  if (
+    entityUpper ===
+    'SERVICE_ORDER'
+  ) {
+    const serviceOrder =
+      await prisma.serviceOrder.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+      });
 
     if (
       serviceOrder &&
-      serviceOrder.customerId !== authenticatedCustomerId
+      serviceOrder.customerId !==
+      authenticatedCustomerId
     ) {
       throw new ForbiddenError(
         'CUSTOMER cannot modify another Customer Service Order'
@@ -353,12 +709,13 @@ async function validateCustomerOwnership(
     }
 
     const payloadCustomerId =
-      payload.customer_id ||
+      payload.customer_id ??
       payload.customerId;
 
     if (
       payloadCustomerId &&
-      payloadCustomerId !== authenticatedCustomerId
+      payloadCustomerId !==
+      authenticatedCustomerId
     ) {
       throw new ForbiddenError(
         'CUSTOMER cannot assign Service Order to another Customer'
@@ -368,23 +725,35 @@ async function validateCustomerOwnership(
     return;
   }
 
-  if (entityUpper === 'SERVICE_ORDER_ITEM') {
-    const item = await prisma.serviceOrderItem.findUnique({
-      where: {
-        id: entityId,
-      },
-      include: {
-        serviceOrder: {
-          select: {
-            customerId: true,
+  /**
+   * SERVICE ORDER ITEM
+   */
+  if (
+    entityUpper ===
+    'SERVICE_ORDER_ITEM'
+  ) {
+    const item =
+      await prisma.serviceOrderItem.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+
+        include: {
+          serviceOrder: {
+            select: {
+              customerId:
+                true,
+            },
           },
         },
-      },
-    });
+      });
 
     if (
       item &&
-      item.serviceOrder.customerId !== authenticatedCustomerId
+      item.serviceOrder
+        .customerId !==
+      authenticatedCustomerId
     ) {
       throw new ForbiddenError(
         'CUSTOMER cannot modify another Customer Service Order Item'
@@ -394,16 +763,25 @@ async function validateCustomerOwnership(
     return;
   }
 
-  if (entityUpper === 'PAYMENT') {
-    const payment = await prisma.payment.findUnique({
-      where: {
-        id: entityId,
-      },
-    });
+  /**
+   * PAYMENT
+   */
+  if (
+    entityUpper ===
+    'PAYMENT'
+  ) {
+    const payment =
+      await prisma.payment.findUnique({
+        where: {
+          id:
+            entityId,
+        },
+      });
 
     if (
       payment &&
-      payment.customerId !== authenticatedCustomerId
+      payment.customerId !==
+      authenticatedCustomerId
     ) {
       throw new ForbiddenError(
         'CUSTOMER cannot modify another Customer Payment'
@@ -413,7 +791,10 @@ async function validateCustomerOwnership(
     return;
   }
 
-  // CUSTOMER cannot manipulate Parts or unknown entities.
+  /**
+   * CUSTOMER não manipula Parts
+   * ou outros tipos arbitrários.
+   */
   throw new ForbiddenError(
     `CUSTOMER cannot modify entity type ${entityType}`
   );
@@ -426,24 +807,40 @@ export async function pushSyncHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const body = pushSyncSchema.parse(request.body);
+  const body =
+    pushSyncSchema.parse(
+      request.body
+    );
 
-  const authUser = getAuthUser(request);
-  const authenticatedUserId = authUser.sub;
+  const authUser =
+    getAuthUser(
+      request
+    );
 
-  let organizationId: string;
+  const authenticatedUserId =
+    authUser.sub;
+
+  let organizationId:
+    string;
 
   try {
-    organizationId = await getAuthenticatedOrganizationId(
-      authenticatedUserId,
-      authUser.role,
-      authUser.customerId
-    );
+    organizationId =
+      await getAuthenticatedOrganizationId(
+        authenticatedUserId,
+        authUser.role,
+        authUser.customerId
+      );
   } catch (error) {
-    if (error instanceof ForbiddenError) {
-      return reply.status(403).send({
-        error: error.message,
-      });
+    if (
+      error instanceof
+      ForbiddenError
+    ) {
+      return reply
+        .status(403)
+        .send({
+          error:
+            error.message,
+        });
     }
 
     throw error;
@@ -451,35 +848,71 @@ export async function pushSyncHandler(
 
   const results: Array<{
     operationId: string;
-    status: 'SYNCED' | 'FAILED' | 'CONFLICT';
+    status:
+    | 'SYNCED'
+    | 'FAILED'
+    | 'CONFLICT';
     error?: string;
   }> = [];
 
-  for (const entry of body.entries) {
+  for (
+    const entry of
+    body.entries
+  ) {
     try {
-      const currentHash = computePayloadHash(entry.payload);
+      const currentHash =
+        computePayloadHash(
+          entry.payload
+        );
 
-      /*
+      const entityUpper =
+        entry.entityType
+          .toUpperCase();
+
+      /**
        * Organization boundary.
        *
-       * IMPORTANT:
-       * organizationId comes from the authenticated identity,
-       * never from the client payload.
+       * Exceção:
+       *
+       * CUSTOMER pode manipular seu próprio
+       * Equipment antes da primeira OS.
+       *
+       * Nesse caso a autoridade vem da
+       * identidade CUSTOMER, não da Organization.
        */
-      await validateOrganizationOwnership(
-        entry.entityType,
-        entry.entityId,
-        organizationId
-      );
+      const skipOrganizationEquipmentCheck =
+        authUser.role ===
+        'CUSTOMER' &&
+        entityUpper ===
+        'EQUIPMENT';
 
-      /*
-       * CUSTOMER ownership boundary.
+      if (
+        !skipOrganizationEquipmentCheck
+      ) {
+        await validateOrganizationOwnership(
+          entry.entityType,
+          entry.entityId,
+          organizationId
+        );
+      }
+
+      /**
+       * CUSTOMER boundary.
        */
-      if (authUser.role === 'CUSTOMER') {
-        if (!authUser.customerId) {
+      if (
+        authUser.role ===
+        'CUSTOMER'
+      ) {
+        if (
+          !authUser.customerId
+        ) {
           results.push({
-            operationId: entry.operationId,
-            status: 'FAILED',
+            operationId:
+              entry.operationId,
+
+            status:
+              'FAILED',
+
             error:
               'CUSTOMER user has no associated Customer identity',
           });
@@ -495,8 +928,8 @@ export async function pushSyncHandler(
         );
       }
 
-      /*
-       * Idempotency reservation.
+      /**
+       * Idempotency.
        */
       const idempotencyResult =
         await reserveIdempotencySlot(
@@ -506,11 +939,19 @@ export async function pushSyncHandler(
           entry.deviceId
         );
 
-      if (!idempotencyResult.isNew) {
-        if (idempotencyResult.conflict) {
+      if (
+        !idempotencyResult.isNew
+      ) {
+        if (
+          idempotencyResult.conflict
+        ) {
           results.push({
-            operationId: entry.operationId,
-            status: 'CONFLICT',
+            operationId:
+              entry.operationId,
+
+            status:
+              'CONFLICT',
+
             error:
               'IDEMPOTENCY_KEY_REUSE: Operation ID was reused with a different payload',
           });
@@ -519,552 +960,995 @@ export async function pushSyncHandler(
         }
 
         results.push({
-          operationId: entry.operationId,
-          status: 'SYNCED',
+          operationId:
+            entry.operationId,
+
+          status:
+            'SYNCED',
         });
 
         continue;
       }
 
-      /*
-       * Process operation atomically.
+      /**
+       * Processamento atômico.
        */
-      await prisma.$transaction(async (tx) => {
-        const entityUpper =
-          entry.entityType.toUpperCase();
-
-        /*
-         * CUSTOMER
-         */
-        if (entityUpper === 'CUSTOMER') {
+      await prisma.$transaction(
+        async (tx) => {
+          /**
+           * CUSTOMER
+           */
           if (
-            entry.operationType === 'CREATE' ||
-            entry.operationType === 'UPDATE'
+            entityUpper ===
+            'CUSTOMER'
           ) {
-            await tx.customer.upsert({
-              where: {
-                id: entry.entityId,
-              },
+            if (
+              entry.operationType ===
+              'CREATE' ||
+              entry.operationType ===
+              'UPDATE'
+            ) {
+              await tx.customer.upsert({
+                where: {
+                  id:
+                    entry.entityId,
+                },
 
-              create: {
-                id: entry.entityId,
-                name: entry.payload.name,
-                document:
-                  entry.payload.document || null,
-                email:
-                  entry.payload.email || null,
-                phone:
-                  entry.payload.phone || null,
-                address:
-                  entry.payload.address || null,
-              },
+                create: {
+                  id:
+                    entry.entityId,
 
-              update: {
-                name: entry.payload.name,
-                document:
-                  entry.payload.document || null,
-                email:
-                  entry.payload.email || null,
-                phone:
-                  entry.payload.phone || null,
-                address:
-                  entry.payload.address || null,
-              },
-            });
+                  name:
+                    entry.payload.name,
 
-            /*
-             * Ensure the Customer is associated with
-             * the authenticated organization.
-             */
-            await tx.customerOrganization.upsert({
-              where: {
-                customerId_organizationId: {
-                  customerId: entry.entityId,
+                  document:
+                    entry.payload.document ??
+                    null,
+
+                  email:
+                    entry.payload.email ??
+                    null,
+
+                  phone:
+                    entry.payload.phone ??
+                    null,
+
+                  address:
+                    entry.payload.address ??
+                    null,
+                },
+
+                update: {
+                  name:
+                    entry.payload.name,
+
+                  document:
+                    entry.payload.document ??
+                    null,
+
+                  email:
+                    entry.payload.email ??
+                    null,
+
+                  phone:
+                    entry.payload.phone ??
+                    null,
+
+                  address:
+                    entry.payload.address ??
+                    null,
+                },
+              });
+
+              /**
+               * Relaciona Customer
+               * à Organization atual.
+               */
+              await tx.customerOrganization.upsert({
+                where: {
+                  customerId_organizationId: {
+                    customerId:
+                      entry.entityId,
+
+                    organizationId,
+                  },
+                },
+
+                create: {
+                  customerId:
+                    entry.entityId,
+
                   organizationId,
+
+                  status:
+                    'ACTIVE',
                 },
-              },
 
-              create: {
-                customerId: entry.entityId,
-                organizationId,
-                status: 'ACTIVE',
-              },
-
-              update: {},
-            });
-          } else if (
-            entry.operationType === 'DELETE'
-          ) {
-            await tx.customerOrganization
-              .delete({
-                where: {
-                  customerId_organizationId: {
-                    customerId: entry.entityId,
-                    organizationId,
-                  },
-                },
-              })
-              .catch(() => null);
-          }
-        }
-
-        /*
-         * EQUIPMENT
-         */
-        else if (entityUpper === 'EQUIPMENT') {
-          if (
-            entry.operationType === 'CREATE' ||
-            entry.operationType === 'UPDATE'
-          ) {
-            const customerId =
-              entry.payload.customer_id ||
-              entry.payload.customerId;
-
-            if (!customerId) {
-              throw new Error(
-                'EQUIPMENT requires customerId'
-              );
-            }
-
-            const customerRelation =
-              await tx.customerOrganization.findUnique({
-                where: {
-                  customerId_organizationId: {
-                    customerId,
-                    organizationId,
-                  },
-                },
+                update: {},
               });
-
-            if (!customerRelation) {
-              throw new ForbiddenError(
-                'Equipment customer does not belong to the authenticated organization'
-              );
-            }
-
-            await tx.equipment.upsert({
-              where: {
-                id: entry.entityId,
-              },
-
-              create: {
-                id: entry.entityId,
-                customerId,
-                type: entry.payload.type,
-                brand: entry.payload.brand,
-                model: entry.payload.model,
-                serialNumber:
-                  entry.payload.serial_number ||
-                  entry.payload.serialNumber ||
-                  null,
-                notes:
-                  entry.payload.notes || null,
-              },
-
-              update: {
-                type: entry.payload.type,
-                brand: entry.payload.brand,
-                model: entry.payload.model,
-                serialNumber:
-                  entry.payload.serial_number ||
-                  entry.payload.serialNumber ||
-                  null,
-                notes:
-                  entry.payload.notes || null,
-              },
-            });
-          } else if (
-            entry.operationType === 'DELETE'
-          ) {
-            await tx.equipment
-              .delete({
-                where: {
-                  id: entry.entityId,
-                },
-              })
-              .catch(() => null);
-          }
-        }
-
-        /*
-         * SERVICE ORDER
-         */
-        else if (entityUpper === 'SERVICE_ORDER') {
-          if (
-            entry.operationType === 'CREATE' ||
-            entry.operationType === 'UPDATE'
-          ) {
-            const existingOS =
-              await tx.serviceOrder.findUnique({
-                where: {
-                  id: entry.entityId,
-                },
-              });
-
-            const newStatus =
-              (entry.payload.status as ServiceOrderStatus) ||
-              ServiceOrderStatus.DIAGNOSTICO;
-
-            if (
-              existingOS &&
-              !isValidStatusTransition(
-                existingOS.status,
-                newStatus
-              )
+            } else if (
+              entry.operationType ===
+              'DELETE'
             ) {
-              throw new Error(
-                `CONFLICT: Invalid status transition from ${existingOS.status} to ${newStatus}`
-              );
-            }
+              /**
+               * Não remove identidade global.
+               *
+               * Remove apenas o relacionamento
+               * com a Organization atual.
+               */
+              await tx.customerOrganization
+                .delete({
+                  where: {
+                    customerId_organizationId: {
+                      customerId:
+                        entry.entityId,
 
-            const customerId =
-              entry.payload.customer_id ||
-              entry.payload.customerId;
-
-            const equipmentId =
-              entry.payload.equipment_id ||
-              entry.payload.equipmentId;
-
-            const technicianId =
-              entry.payload.technician_id ||
-              entry.payload.technicianId ||
-              null;
-
-            const problemDescription =
-              entry.payload.problem_description ||
-              entry.payload.problemDescription;
-
-            if (!customerId) {
-              throw new Error(
-                'SERVICE_ORDER requires customerId'
-              );
-            }
-
-            if (!equipmentId) {
-              throw new Error(
-                'SERVICE_ORDER requires equipmentId'
-              );
-            }
-
-            if (!problemDescription) {
-              throw new Error(
-                'SERVICE_ORDER requires problemDescription'
-              );
-            }
-
-            /*
-             * Customer must belong to organization.
-             */
-            const customerRelation =
-              await tx.customerOrganization.findUnique({
-                where: {
-                  customerId_organizationId: {
-                    customerId,
-                    organizationId,
+                      organizationId,
+                    },
                   },
-                },
-              });
-
-            if (!customerRelation) {
-              throw new ForbiddenError(
-                'Service Order customer does not belong to the authenticated organization'
-              );
+                })
+                .catch(
+                  () =>
+                    null
+                );
             }
+          }
 
-            /*
-             * Equipment must belong to the specified customer.
-             */
-            const equipment =
-              await tx.equipment.findFirst({
+          /**
+           * EQUIPMENT
+           *
+           * O Sync genérico cria/manipula
+           * somente Equipment CUSTOMER.
+           *
+           * Equipment ORGANIZATION será
+           * gerenciado futuramente pelo
+           * EquipmentAcquisitionService.
+           */
+          else if (
+            entityUpper ===
+            'EQUIPMENT'
+          ) {
+            if (
+              entry.operationType ===
+              'CREATE' ||
+              entry.operationType ===
+              'UPDATE'
+            ) {
+              assertGenericEquipmentSyncPayload(
+                entry.payload
+              );
+
+              const customerId =
+                entry.payload
+                  .customer_id ??
+                entry.payload
+                  .customerId;
+
+              if (!customerId) {
+                throw new Error(
+                  'EQUIPMENT requires customerId'
+                );
+              }
+
+              /**
+               * Customer precisa estar relacionado
+               * e ativo na Organization atual.
+               */
+              const customerRelation =
+                await tx.customerOrganization.findUnique({
+                  where: {
+                    customerId_organizationId: {
+                      customerId,
+                      organizationId,
+                    },
+                  },
+                });
+
+              if (
+                !customerRelation
+              ) {
+                throw new ForbiddenError(
+                  'Equipment customer does not belong to the authenticated organization'
+                );
+              }
+
+              if (
+                customerRelation.status !==
+                'ACTIVE'
+              ) {
+                throw new ForbiddenError(
+                  'Equipment customer relationship is not active in the authenticated organization'
+                );
+              }
+
+              /**
+               * Se o equipamento já existe,
+               * o Sync genérico não pode assumir
+               * um equipamento da Organization.
+               */
+              const existingEquipment =
+                await tx.equipment.findUnique({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+
+                  select: {
+                    customerId:
+                      true,
+
+                    organizationId:
+                      true,
+
+                    ownerType:
+                      true,
+                  },
+                });
+
+              if (
+                existingEquipment
+              ) {
+                if (
+                  existingEquipment.ownerType ===
+                  EquipmentOwnerType.ORGANIZATION
+                ) {
+                  throw new ForbiddenError(
+                    'Organization-owned equipment cannot be modified through generic Equipment Sync'
+                  );
+                }
+
+                /**
+                 * Não permite transferir Equipment
+                 * de um Customer para outro através
+                 * de UPDATE.
+                 */
+                if (
+                  existingEquipment.customerId !==
+                  customerId
+                ) {
+                  throw new ForbiddenError(
+                    'Equipment cannot be reassigned to another Customer through Sync'
+                  );
+                }
+              }
+
+              await tx.equipment.upsert({
                 where: {
-                  id: equipmentId,
+                  id:
+                    entry.entityId,
+                },
+
+                create: {
+                  id:
+                    entry.entityId,
+
                   customerId,
+
+                  organizationId:
+                    null,
+
+                  ownerType:
+                    EquipmentOwnerType.CUSTOMER,
+
+                  organizationPurpose:
+                    null,
+
+                  type:
+                    entry.payload.type,
+
+                  brand:
+                    entry.payload.brand,
+
+                  model:
+                    entry.payload.model,
+
+                  serialNumber:
+                    entry.payload
+                      .serial_number ??
+                    entry.payload
+                      .serialNumber ??
+                    null,
+
+                  notes:
+                    entry.payload.notes ??
+                    null,
+                },
+
+                /**
+                 * Ownership nunca é atualizado
+                 * pelo Sync genérico.
+                 */
+                update: {
+                  type:
+                    entry.payload.type,
+
+                  brand:
+                    entry.payload.brand,
+
+                  model:
+                    entry.payload.model,
+
+                  serialNumber:
+                    entry.payload
+                      .serial_number ??
+                    entry.payload
+                      .serialNumber ??
+                    null,
+
+                  notes:
+                    entry.payload.notes ??
+                    null,
                 },
               });
-
-            if (!equipment) {
-              throw new Error(
-                'Equipment does not belong to the specified customer'
-              );
-            }
-
-            await tx.serviceOrder.upsert({
-              where: {
-                id: entry.entityId,
-              },
-
-              create: {
-                id: entry.entityId,
-                organizationId,
-                customerId,
-                equipmentId,
-                technicianId,
-                status: newStatus,
-                problemDescription,
-                diagnosis:
-                  entry.payload.diagnosis ||
-                  null,
-                solution:
-                  entry.payload.solution ||
-                  null,
-                totalAmount:
-                  entry.payload.total_amount ||
-                  entry.payload.totalAmount ||
-                  0,
-              },
-
-              update: {
-                status: newStatus,
-                diagnosis:
-                  entry.payload.diagnosis ||
-                  null,
-                solution:
-                  entry.payload.solution ||
-                  null,
-                totalAmount:
-                  entry.payload.total_amount ||
-                  entry.payload.totalAmount ||
-                  0,
-              },
-            });
-          } else if (
-            entry.operationType === 'DELETE'
-          ) {
-            await tx.serviceOrder
-              .delete({
-                where: {
-                  id: entry.entityId,
-                },
-              })
-              .catch(() => null);
-          }
-        }
-
-        /*
-         * PART
-         *
-         * Parts are currently global because the schema
-         * does not contain organizationId on Part.
-         */
-        else if (entityUpper === 'PART') {
-          if (
-            entry.operationType === 'CREATE' ||
-            entry.operationType === 'UPDATE'
-          ) {
-            await tx.part.upsert({
-              where: {
-                id: entry.entityId,
-              },
-
-              create: {
-                id: entry.entityId,
-                name: entry.payload.name,
-                sku: entry.payload.sku,
-                price: entry.payload.price,
-                costPrice:
-                  entry.payload.cost_price ||
-                  entry.payload.costPrice ||
-                  0,
-                stockQuantity:
-                  entry.payload.stock_quantity ||
-                  entry.payload.stockQuantity ||
-                  0,
-              },
-
-              update: {
-                name: entry.payload.name,
-                sku: entry.payload.sku,
-                price: entry.payload.price,
-                costPrice:
-                  entry.payload.cost_price ||
-                  entry.payload.costPrice ||
-                  0,
-                stockQuantity:
-                  entry.payload.stock_quantity ||
-                  entry.payload.stockQuantity ||
-                  0,
-              },
-            });
-          } else if (
-            entry.operationType === 'DELETE'
-          ) {
-            await tx.part
-              .delete({
-                where: {
-                  id: entry.entityId,
-                },
-              })
-              .catch(() => null);
-          }
-        }
-
-        /*
-         * SERVICE ORDER ITEM
-         */
-        else if (
-          entityUpper === 'SERVICE_ORDER_ITEM'
-        ) {
-          if (
-            entry.operationType === 'CREATE' ||
-            entry.operationType === 'UPDATE'
-          ) {
-            const serviceOrderId =
-              entry.payload.service_order_id ||
-              entry.payload.serviceOrderId;
-
-            if (!serviceOrderId) {
-              throw new Error(
-                'SERVICE_ORDER_ITEM requires serviceOrderId'
-              );
-            }
-
-            const serviceOrder =
-              await tx.serviceOrder.findUnique({
-                where: {
-                  id: serviceOrderId,
-                },
-                select: {
-                  organizationId: true,
-                },
-              });
-
-            if (!serviceOrder) {
-              throw new Error(
-                'Service Order not found'
-              );
-            }
-
-            if (
-              serviceOrder.organizationId !==
-              organizationId
+            } else if (
+              entry.operationType ===
+              'DELETE'
             ) {
-              throw new ForbiddenError(
-                'Service Order Item does not belong to the authenticated organization'
-              );
+              const existingEquipment =
+                await tx.equipment.findUnique({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+
+                  select: {
+                    ownerType:
+                      true,
+
+                    customerId:
+                      true,
+
+                    organizationId:
+                      true,
+                  },
+                });
+
+              if (
+                !existingEquipment
+              ) {
+                /**
+                 * DELETE idempotente:
+                 * já não existe.
+                 */
+                return;
+              }
+
+              /**
+               * Equipment pertencente à Organization
+               * não pode ser removido pelo Sync
+               * genérico.
+               */
+              if (
+                existingEquipment.ownerType ===
+                EquipmentOwnerType.ORGANIZATION
+              ) {
+                throw new ForbiddenError(
+                  'Organization-owned equipment cannot be deleted through generic Equipment Sync'
+                );
+              }
+
+              await tx.equipment.delete({
+                where: {
+                  id:
+                    entry.entityId,
+                },
+              });
             }
+          }
 
-            await tx.serviceOrderItem.upsert({
-              where: {
-                id: entry.entityId,
-              },
+          /**
+           * SERVICE ORDER
+           */
+          else if (
+            entityUpper ===
+            'SERVICE_ORDER'
+          ) {
+            if (
+              entry.operationType ===
+              'CREATE' ||
+              entry.operationType ===
+              'UPDATE'
+            ) {
+              const existingOS =
+                await tx.serviceOrder.findUnique({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+                });
 
-              create: {
-                id: entry.entityId,
-                serviceOrderId,
-                partId:
-                  entry.payload.part_id ||
-                  entry.payload.partId ||
-                  null,
-                description:
-                  entry.payload.description,
-                quantity:
-                  entry.payload.quantity || 1,
-                unitPrice:
-                  entry.payload.unit_price ||
-                  entry.payload.unitPrice ||
-                  0,
-                totalPrice:
-                  entry.payload.total_price ||
-                  entry.payload.totalPrice ||
-                  0,
-              },
+              const newStatus =
+                (
+                  entry.payload
+                    .status as
+                  ServiceOrderStatus
+                ) ??
+                ServiceOrderStatus
+                  .DIAGNOSTICO;
 
-              update: {
-                description:
-                  entry.payload.description,
-                quantity:
-                  entry.payload.quantity || 1,
-                unitPrice:
-                  entry.payload.unit_price ||
-                  entry.payload.unitPrice ||
-                  0,
-                totalPrice:
-                  entry.payload.total_price ||
-                  entry.payload.totalPrice ||
-                  0,
+              if (
+                existingOS &&
+                !isValidStatusTransition(
+                  existingOS.status,
+                  newStatus
+                )
+              ) {
+                throw new Error(
+                  `CONFLICT: Invalid status transition from ${existingOS.status} to ${newStatus}`
+                );
+              }
+
+              const customerId =
+                entry.payload
+                  .customer_id ??
+                entry.payload
+                  .customerId;
+
+              const equipmentId =
+                entry.payload
+                  .equipment_id ??
+                entry.payload
+                  .equipmentId;
+
+              const technicianId =
+                entry.payload
+                  .technician_id ??
+                entry.payload
+                  .technicianId ??
+                null;
+
+              const problemDescription =
+                entry.payload
+                  .problem_description ??
+                entry.payload
+                  .problemDescription;
+
+              if (!customerId) {
+                throw new Error(
+                  'SERVICE_ORDER requires customerId'
+                );
+              }
+
+              if (!equipmentId) {
+                throw new Error(
+                  'SERVICE_ORDER requires equipmentId'
+                );
+              }
+
+              if (
+                !problemDescription
+              ) {
+                throw new Error(
+                  'SERVICE_ORDER requires problemDescription'
+                );
+              }
+
+              /**
+               * Customer precisa estar relacionado
+               * à Organization.
+               */
+              const customerRelation =
+                await tx.customerOrganization.findUnique({
+                  where: {
+                    customerId_organizationId: {
+                      customerId,
+                      organizationId,
+                    },
+                  },
+                });
+
+              if (
+                !customerRelation
+              ) {
+                throw new ForbiddenError(
+                  'Service Order customer does not belong to the authenticated organization'
+                );
+              }
+
+              if (
+                customerRelation.status !==
+                'ACTIVE'
+              ) {
+                throw new ForbiddenError(
+                  'Service Order customer relationship is not active'
+                );
+              }
+
+              /**
+               * Equipment principal da OS precisa:
+               *
+               * - pertencer ao CUSTOMER;
+               * - estar ligado ao mesmo customerId.
+               *
+               * Equipment ORGANIZATION:
+               * RESALE / PARTS_DONOR / INTERNAL_USE
+               * não pode ser equipamento principal
+               * de uma OS de cliente.
+               */
+              const equipment =
+                await tx.equipment.findFirst({
+                  where: {
+                    id:
+                      equipmentId,
+
+                    customerId,
+
+                    ownerType:
+                      EquipmentOwnerType.CUSTOMER,
+                  },
+                });
+
+              if (!equipment) {
+                throw new Error(
+                  'Equipment does not belong to the specified customer or is not customer-owned'
+                );
+              }
+
+              /**
+               * Technician, quando informado,
+               * precisa pertencer à Organization.
+               */
+              if (
+                technicianId
+              ) {
+                const technician =
+                  await tx.membership.findUnique({
+                    where: {
+                      userId_organizationId: {
+                        userId:
+                          technicianId,
+
+                        organizationId,
+                      },
+                    },
+                  });
+
+                if (
+                  !technician ||
+                  ![
+                    'ADMIN',
+                    'TECHNICIAN',
+                  ].includes(
+                    technician.role
+                  )
+                ) {
+                  throw new ForbiddenError(
+                    'Technician does not belong to the authenticated organization'
+                  );
+                }
+              }
+
+              await tx.serviceOrder.upsert({
+                where: {
+                  id:
+                    entry.entityId,
+                },
+
+                create: {
+                  id:
+                    entry.entityId,
+
+                  organizationId,
+
+                  customerId,
+
+                  equipmentId,
+
+                  technicianId,
+
+                  status:
+                    newStatus,
+
+                  problemDescription,
+
+                  diagnosis:
+                    entry.payload
+                      .diagnosis ??
+                    null,
+
+                  solution:
+                    entry.payload
+                      .solution ??
+                    null,
+
+                  totalAmount:
+                    entry.payload
+                      .total_amount ??
+                    entry.payload
+                      .totalAmount ??
+                    0,
+                },
+
+                update: {
+                  status:
+                    newStatus,
+
+                  diagnosis:
+                    entry.payload
+                      .diagnosis ??
+                    null,
+
+                  solution:
+                    entry.payload
+                      .solution ??
+                    null,
+
+                  totalAmount:
+                    entry.payload
+                      .total_amount ??
+                    entry.payload
+                      .totalAmount ??
+                    0,
+                },
+              });
+            } else if (
+              entry.operationType ===
+              'DELETE'
+            ) {
+              await tx.serviceOrder
+                .delete({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+                })
+                .catch(
+                  () =>
+                    null
+                );
+            }
+          }
+
+          /**
+           * PART
+           *
+           * Atualmente Part ainda é global,
+           * pois não possui organizationId.
+           */
+          else if (
+            entityUpper ===
+            'PART'
+          ) {
+            if (
+              entry.operationType ===
+              'CREATE' ||
+              entry.operationType ===
+              'UPDATE'
+            ) {
+              await tx.part.upsert({
+                where: {
+                  id:
+                    entry.entityId,
+                },
+
+                create: {
+                  id:
+                    entry.entityId,
+
+                  name:
+                    entry.payload.name,
+
+                  sku:
+                    entry.payload.sku,
+
+                  price:
+                    entry.payload.price,
+
+                  costPrice:
+                    entry.payload
+                      .cost_price ??
+                    entry.payload
+                      .costPrice ??
+                    0,
+
+                  stockQuantity:
+                    entry.payload
+                      .stock_quantity ??
+                    entry.payload
+                      .stockQuantity ??
+                    0,
+                },
+
+                update: {
+                  name:
+                    entry.payload.name,
+
+                  sku:
+                    entry.payload.sku,
+
+                  price:
+                    entry.payload.price,
+
+                  costPrice:
+                    entry.payload
+                      .cost_price ??
+                    entry.payload
+                      .costPrice ??
+                    0,
+
+                  stockQuantity:
+                    entry.payload
+                      .stock_quantity ??
+                    entry.payload
+                      .stockQuantity ??
+                    0,
+                },
+              });
+            } else if (
+              entry.operationType ===
+              'DELETE'
+            ) {
+              await tx.part
+                .delete({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+                })
+                .catch(
+                  () =>
+                    null
+                );
+            }
+          }
+
+          /**
+           * SERVICE ORDER ITEM
+           */
+          else if (
+            entityUpper ===
+            'SERVICE_ORDER_ITEM'
+          ) {
+            if (
+              entry.operationType ===
+              'CREATE' ||
+              entry.operationType ===
+              'UPDATE'
+            ) {
+              const serviceOrderId =
+                entry.payload
+                  .service_order_id ??
+                entry.payload
+                  .serviceOrderId;
+
+              if (
+                !serviceOrderId
+              ) {
+                throw new Error(
+                  'SERVICE_ORDER_ITEM requires serviceOrderId'
+                );
+              }
+
+              const serviceOrder =
+                await tx.serviceOrder.findUnique({
+                  where: {
+                    id:
+                      serviceOrderId,
+                  },
+
+                  select: {
+                    organizationId:
+                      true,
+
+                    customerId:
+                      true,
+                  },
+                });
+
+              if (
+                !serviceOrder
+              ) {
+                throw new Error(
+                  'Service Order not found'
+                );
+              }
+
+              if (
+                serviceOrder.organizationId !==
+                organizationId
+              ) {
+                throw new ForbiddenError(
+                  'Service Order Item does not belong to the authenticated organization'
+                );
+              }
+
+              if (
+                authUser.role ===
+                'CUSTOMER' &&
+                serviceOrder.customerId !==
+                authUser.customerId
+              ) {
+                throw new ForbiddenError(
+                  'CUSTOMER cannot modify another Customer Service Order Item'
+                );
+              }
+
+              await tx.serviceOrderItem.upsert({
+                where: {
+                  id:
+                    entry.entityId,
+                },
+
+                create: {
+                  id:
+                    entry.entityId,
+
+                  serviceOrderId,
+
+                  partId:
+                    entry.payload
+                      .part_id ??
+                    entry.payload
+                      .partId ??
+                    null,
+
+                  description:
+                    entry.payload
+                      .description,
+
+                  quantity:
+                    entry.payload
+                      .quantity ??
+                    1,
+
+                  unitPrice:
+                    entry.payload
+                      .unit_price ??
+                    entry.payload
+                      .unitPrice ??
+                    0,
+
+                  totalPrice:
+                    entry.payload
+                      .total_price ??
+                    entry.payload
+                      .totalPrice ??
+                    0,
+                },
+
+                update: {
+                  description:
+                    entry.payload
+                      .description,
+
+                  quantity:
+                    entry.payload
+                      .quantity ??
+                    1,
+
+                  unitPrice:
+                    entry.payload
+                      .unit_price ??
+                    entry.payload
+                      .unitPrice ??
+                    0,
+
+                  totalPrice:
+                    entry.payload
+                      .total_price ??
+                    entry.payload
+                      .totalPrice ??
+                    0,
+                },
+              });
+            } else if (
+              entry.operationType ===
+              'DELETE'
+            ) {
+              await tx.serviceOrderItem
+                .delete({
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
+                })
+                .catch(
+                  () =>
+                    null
+                );
+            }
+          }
+
+          /**
+           * Tipo desconhecido.
+           */
+          else {
+            throw new Error(
+              `Unsupported entity type: ${entry.entityType}`
+            );
+          }
+
+          /**
+           * Sync Change Log
+           */
+          const changeLog =
+            await tx.syncChangeLog.create({
+              data: {
+                cursor:
+                  entry.operationId,
+
+                entityType:
+                  entry.entityType,
+
+                entityId:
+                  entry.entityId,
+
+                operationType:
+                  entry.operationType,
+
+                data:
+                  entry.payload,
               },
             });
-          } else if (
-            entry.operationType === 'DELETE'
-          ) {
-            await tx.serviceOrderItem
-              .delete({
-                where: {
-                  id: entry.entityId,
-                },
-              })
-              .catch(() => null);
-          }
-        }
 
-        else {
-          throw new Error(
-            `Unsupported entity type: ${entry.entityType}`
-          );
-        }
+          await tx.syncChangeLog.update({
+            where: {
+              id:
+                changeLog.id,
+            },
 
-        /*
-         * Sync Change Log
-         */
-        const changeLog =
-          await tx.syncChangeLog.create({
             data: {
-              cursor: entry.operationId,
-              entityType: entry.entityType,
-              entityId: entry.entityId,
-              operationType: entry.operationType,
-              data: entry.payload,
+              cursor:
+                changeLog.id.toString(),
             },
           });
+        }
+      );
 
-        await tx.syncChangeLog.update({
-          where: {
-            id: changeLog.id,
-          },
-          data: {
-            cursor: changeLog.id.toString(),
-          },
-        });
-      });
-
-      /*
-       * Update idempotency result after successful transaction.
+      /**
+       * Atualiza resultado da
+       * idempotência após sucesso.
        */
       await prisma.operationIdempotency
         .update({
           where: {
-            operationId: entry.operationId,
+            operationId:
+              entry.operationId,
           },
+
           data: {
             responseBody: {
-              status: 'SYNCED',
+              status:
+                'SYNCED',
             },
-            responseStatus: 200,
+
+            responseStatus:
+              200,
           },
         })
-        .catch(() => { });
+        .catch(
+          () => { }
+        );
 
       results.push({
-        operationId: entry.operationId,
-        status: 'SYNCED',
-      });
-    } catch (err: any) {
-      results.push({
-        operationId: entry.operationId,
+        operationId:
+          entry.operationId,
+
         status:
-          err?.statusCode === 403
-            ? 'FAILED'
-            : 'FAILED',
+          'SYNCED',
+      });
+    } catch (
+    err: any
+    ) {
+      results.push({
+        operationId:
+          entry.operationId,
+
+        status:
+          'FAILED',
+
         error:
-          err?.message ||
+          err?.message ??
           'Unknown processing error',
       });
     }
   }
 
-  return reply.status(200).send({
-    results,
-  });
+  return reply
+    .status(200)
+    .send({
+      results,
+    });
 }
 
 /**
@@ -1075,17 +1959,27 @@ export async function pullSyncHandler(
   reply: FastifyReply
 ) {
   const query =
-    pullSyncQuerySchema.parse(request.query);
+    pullSyncQuerySchema.parse(
+      request.query
+    );
 
-  const authUser = getAuthUser(request);
+  const authUser =
+    getAuthUser(
+      request
+    );
 
-  let cursorId = 0n;
+  let cursorId =
+    0n;
 
   if (query.cursor) {
     try {
-      cursorId = BigInt(query.cursor);
+      cursorId =
+        BigInt(
+          query.cursor
+        );
     } catch {
-      cursorId = 0n;
+      cursorId =
+        0n;
     }
   }
 
@@ -1093,7 +1987,8 @@ export async function pullSyncHandler(
     cursorId > 0n
       ? {
         id: {
-          gt: cursorId,
+          gt:
+            cursorId,
         },
       }
       : {};
@@ -1105,75 +2000,114 @@ export async function pullSyncHandler(
       authUser.customerId
     );
 
-  let authorizedEntityIds: Set<string>;
+  let authorizedEntityIds:
+    Set<string>;
 
-  if (authUser.role === 'CUSTOMER') {
-    /*
-     * CUSTOMER:
-     * only own Customer, Equipment, Service Orders,
-     * Service Order Items and Payments.
-     */
-    const customerId = authUser.customerId;
+  /**
+   * CUSTOMER
+   */
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
+    const customerId =
+      authUser.customerId;
 
     if (!customerId) {
-      return reply.status(403).send({
-        error:
-          'CUSTOMER user has no associated Customer identity',
-      });
+      return reply
+        .status(403)
+        .send({
+          error:
+            'CUSTOMER user has no associated Customer identity',
+        });
     }
 
     const [
       equipments,
       serviceOrders,
       payments,
-    ] = await Promise.all([
-      prisma.equipment.findMany({
-        where: {
-          customerId,
-        },
-        select: {
-          id: true,
-        },
-      }),
+    ] =
+      await Promise.all([
+        /**
+         * CUSTOMER vê equipamentos
+         * atualmente pertencentes a ele.
+         *
+         * Equipment transferido para uma
+         * Organization passa a ter
+         * customerId = null e deixa
+         * naturalmente esta lista.
+         */
+        prisma.equipment.findMany({
+          where: {
+            customerId,
 
-      prisma.serviceOrder.findMany({
-        where: {
-          customerId,
-          organizationId,
-        },
-        select: {
-          id: true,
-        },
-      }),
+            ownerType:
+              EquipmentOwnerType.CUSTOMER,
+          },
 
-      prisma.payment.findMany({
-        where: {
-          customerId,
-          serviceOrder: {
+          select: {
+            id:
+              true,
+          },
+        }),
+
+        /**
+         * Somente OS do Customer
+         * na Organization ativa.
+         */
+        prisma.serviceOrder.findMany({
+          where: {
+            customerId,
             organizationId,
           },
-        },
-        select: {
-          id: true,
-        },
-      }),
-    ]);
+
+          select: {
+            id:
+              true,
+          },
+        }),
+
+        /**
+         * Pagamentos do Customer,
+         * mas somente das OS pertencentes
+         * à Organization ativa.
+         */
+        prisma.payment.findMany({
+          where: {
+            customerId,
+
+            serviceOrder: {
+              organizationId,
+            },
+          },
+
+          select: {
+            id:
+              true,
+          },
+        }),
+      ]);
 
     const serviceOrderIds =
       serviceOrders.map(
-        (order) => order.id
+        (order) =>
+          order.id
       );
 
     const serviceOrderItems =
-      serviceOrderIds.length > 0
+      serviceOrderIds.length >
+        0
         ? await prisma.serviceOrderItem.findMany({
           where: {
             serviceOrderId: {
-              in: serviceOrderIds,
+              in:
+                serviceOrderIds,
             },
           },
+
           select: {
-            id: true,
+            id:
+              true,
           },
         })
         : [];
@@ -1183,107 +2117,163 @@ export async function pullSyncHandler(
         customerId,
 
         ...equipments.map(
-          (equipment) => equipment.id
+          (equipment) =>
+            equipment.id
         ),
 
         ...serviceOrderIds,
 
         ...serviceOrderItems.map(
-          (item) => item.id
+          (item) =>
+            item.id
         ),
 
         ...payments.map(
-          (payment) => payment.id
+          (payment) =>
+            payment.id
         ),
       ]);
-  } else {
-    /*
-     * ADMIN / TECHNICIAN:
-     * only entities belonging to their organization.
-     */
+  }
+
+  /**
+   * ADMIN / TECHNICIAN
+   */
+  else {
     const [
       customerRelations,
       equipments,
       serviceOrders,
       payments,
-    ] = await Promise.all([
-      prisma.customerOrganization.findMany({
-        where: {
-          organizationId,
-          status: 'ACTIVE',
-        },
-        select: {
-          customerId: true,
-        },
-      }),
+    ] =
+      await Promise.all([
+        /**
+         * Customers relacionados
+         * à Organization.
+         */
+        prisma.customerOrganization.findMany({
+          where: {
+            organizationId,
 
-      prisma.equipment.findMany({
-        where: {
-          customer: {
-            organizations: {
-              some: {
-                organizationId,
-                status: 'ACTIVE',
-              },
-            },
+            status:
+              'ACTIVE',
           },
-        },
-        select: {
-          id: true,
-        },
-      }),
 
-      prisma.serviceOrder.findMany({
-        where: {
-          organizationId,
-        },
-        select: {
-          id: true,
-        },
-      }),
+          select: {
+            customerId:
+              true,
+          },
+        }),
 
-      prisma.payment.findMany({
-        where: {
-          serviceOrder: {
+        /**
+         * Equipment visível à Organization:
+         *
+         * 1. pertence diretamente a ela;
+         *
+         * OU
+         *
+         * 2. pertence a Customer e existe
+         *    pelo menos uma OS desta Organization
+         *    utilizando esse Equipment.
+         */
+        prisma.equipment.findMany({
+          where: {
+            OR: [
+              {
+                ownerType:
+                  EquipmentOwnerType.ORGANIZATION,
+
+                organizationId,
+              },
+
+              {
+                ownerType:
+                  EquipmentOwnerType.CUSTOMER,
+
+                serviceOrders: {
+                  some: {
+                    organizationId,
+                  },
+                },
+              },
+            ],
+          },
+
+          select: {
+            id:
+              true,
+          },
+        }),
+
+        /**
+         * Todas as OS da Organization.
+         */
+        prisma.serviceOrder.findMany({
+          where: {
             organizationId,
           },
-        },
-        select: {
-          id: true,
-        },
-      }),
-    ]);
+
+          select: {
+            id:
+              true,
+          },
+        }),
+
+        /**
+         * Pagamentos somente das OS
+         * pertencentes à Organization.
+         */
+        prisma.payment.findMany({
+          where: {
+            serviceOrder: {
+              organizationId,
+            },
+          },
+
+          select: {
+            id:
+              true,
+          },
+        }),
+      ]);
 
     const customerIds =
       customerRelations.map(
-        (relation) => relation.customerId
+        (relation) =>
+          relation.customerId
       );
 
     const equipmentIds =
       equipments.map(
-        (equipment) => equipment.id
+        (equipment) =>
+          equipment.id
       );
 
     const serviceOrderIds =
       serviceOrders.map(
-        (order) => order.id
+        (order) =>
+          order.id
       );
 
     const paymentIds =
       payments.map(
-        (payment) => payment.id
+        (payment) =>
+          payment.id
       );
 
     const serviceOrderItems =
-      serviceOrderIds.length > 0
+      serviceOrderIds.length >
+        0
         ? await prisma.serviceOrderItem.findMany({
           where: {
             serviceOrderId: {
-              in: serviceOrderIds,
+              in:
+                serviceOrderIds,
             },
           },
+
           select: {
-            id: true,
+            id:
+              true,
           },
         })
         : [];
@@ -1291,51 +2281,84 @@ export async function pullSyncHandler(
     authorizedEntityIds =
       new Set<string>([
         ...customerIds,
+
         ...equipmentIds,
+
         ...serviceOrderIds,
+
         ...serviceOrderItems.map(
-          (item) => item.id
+          (item) =>
+            item.id
         ),
+
         ...paymentIds,
       ]);
   }
 
-  /*
-   * Fetch changes.
+  /**
+   * Busca alterações após cursor.
    */
   const allChanges =
     await prisma.syncChangeLog.findMany({
-      where: baseWhere,
+      where:
+        baseWhere,
+
       orderBy: {
-        id: 'asc',
+        id:
+          'asc',
       },
-      take: query.limit,
+
+      take:
+        query.limit,
     });
 
+  /**
+   * Filtra somente entidades
+   * que o usuário atual pode receber.
+   */
   const changes =
-    allChanges.filter((change) =>
-      authorizedEntityIds.has(
-        change.entityId
-      )
+    allChanges.filter(
+      (change) =>
+        authorizedEntityIds.has(
+          change.entityId
+        )
     );
 
   const nextCursor =
     changes.length > 0
       ? changes[
-        changes.length - 1
+        changes.length -
+        1
       ].id.toString()
-      : query.cursor || '0';
+      : query.cursor ??
+      '0';
 
-  return reply.status(200).send({
-    nextCursor,
+  return reply
+    .status(200)
+    .send({
+      nextCursor,
 
-    changes: changes.map((change) => ({
-      cursor: change.id.toString(),
-      entityType: change.entityType,
-      entityId: change.entityId,
-      operationType: change.operationType,
-      data: change.data,
-      createdAt: change.createdAt,
-    })),
-  });
+      changes:
+        changes.map(
+          (change) => ({
+            cursor:
+              change.id.toString(),
+
+            entityType:
+              change.entityType,
+
+            entityId:
+              change.entityId,
+
+            operationType:
+              change.operationType,
+
+            data:
+              change.data,
+
+            createdAt:
+              change.createdAt,
+          })
+        ),
+    });
 }
