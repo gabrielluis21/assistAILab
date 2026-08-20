@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import bcrypt from 'bcrypt';
 
 import {
+  EquipmentOwnerType,
   Role,
   UserStatus,
 } from '@prisma/client';
@@ -30,40 +31,274 @@ import {
   prisma,
 } from '../../core/database/prisma.js';
 
+import {
+  registerSchema,
+} from './auth.schema.js';
+
 /**
- * C1 — Organização adquire/acessa o sistema.
+ * ============================================================
+ * AUTH SECURITY
+ * ============================================================
+ *
+ * Testes de segurança existentes antes da expansão do C1.
+ *
+ * Eles continuam importantes porque cobrem:
+ *
+ * C01.01
+ * - JWT_SECRET obrigatório.
+ *
+ * C01.02
+ * - cadastro público não pode injetar role.
+ *
+ * C03
+ * - validações básicas do cadastro público de Customer.
+ */
+describe(
+  'Auth Security & Privilege Escalation Hardening',
+  () => {
+    /**
+     * C01.01
+     *
+     * O backend não pode iniciar sem
+     * segredo JWT configurado.
+     */
+    test(
+      'Startup fails when JWT_SECRET is missing',
+      () => {
+        const oldSecret =
+          process.env.JWT_SECRET;
+
+        delete process.env.JWT_SECRET;
+
+        assert.throws(
+          () => {
+            buildApp();
+          },
+          /JWT_SECRET environment variable is missing/
+        );
+
+        if (oldSecret) {
+          process.env.JWT_SECRET =
+            oldSecret;
+        } else {
+          process.env.JWT_SECRET =
+            'test-jwt-secret-key-12345';
+        }
+      }
+    );
+
+    /**
+     * C01.02 / C03
+     *
+     * Dados enviados pelo client representam
+     * intenção, nunca autoridade.
+     *
+     * O cadastro público não pode aceitar
+     * role privilegiada.
+     */
+    test(
+      'Public registration rejects role injection',
+      () => {
+        const invalidPayload = {
+          name:
+            'Hacker User',
+
+          email:
+            'hacker@example.com',
+
+          password:
+            'securepassword123',
+
+          organizationId:
+            '550e8400-e29b-41d4-a716-446655440000',
+
+          role:
+            'ADMIN',
+        };
+
+        const parseResult =
+          registerSchema.safeParse(
+            invalidPayload
+          );
+
+        /**
+         * O Zod remove propriedades
+         * desconhecidas.
+         *
+         * Portanto o payload continua válido,
+         * mas role NÃO pode sobreviver ao parse.
+         */
+        assert.equal(
+          parseResult.success,
+          true
+        );
+
+        if (
+          parseResult.success
+        ) {
+          assert.equal(
+            'role' in
+            parseResult.data,
+            false
+          );
+
+          assert.equal(
+            'organizationId' in
+            parseResult.data,
+            false
+          );
+        }
+      }
+    );
+
+    /**
+     * C03
+     */
+    test(
+      'Public registration requires a password',
+      () => {
+        const invalidPayload = {
+          name:
+            'Test User',
+
+          email:
+            'test@example.com',
+
+          organizationId:
+            '550e8400-e29b-41d4-a716-446655440000',
+        };
+
+        const parseResult =
+          registerSchema.safeParse(
+            invalidPayload
+          );
+
+        assert.equal(
+          parseResult.success,
+          false
+        );
+      }
+    );
+
+    /**
+     * C03
+     */
+    test(
+      'Public registration accepts valid customer data',
+      () => {
+        const validPayload = {
+          name:
+            'Valid Customer',
+
+          email:
+            'customer@example.com',
+
+          password:
+            'securepassword123',
+
+          phone:
+            '16999999999',
+
+          /**
+           * organizationId propositalmente
+           * enviado para garantir que ele
+           * não quebra o cadastro e também
+           * não é aceito como autoridade.
+           */
+          organizationId:
+            '550e8400-e29b-41d4-a716-446655440000',
+        };
+
+        const parseResult =
+          registerSchema.safeParse(
+            validPayload
+          );
+
+        assert.equal(
+          parseResult.success,
+          true
+        );
+
+        if (
+          parseResult.success
+        ) {
+          assert.equal(
+            'organizationId' in
+            parseResult.data,
+            false
+          );
+        }
+      }
+    );
+  }
+);
+
+/**
+ * ============================================================
+ * C1 — ORGANIZATION / AUTHENTICATION / TENANT ISOLATION
+ * ============================================================
  *
  * Escopo atualmente implementado:
  *
- * C01.01 JWT_SECRET obrigatório             -> já coberto
- * C01.02 sem privilege escalation           -> já coberto
- * C01.03 Organization existente             -> esta suíte
- * C01.04 Membership obrigatória              -> esta suíte
- * C01.05 Login + JWT com contexto correto    -> esta suíte
- * C01.06 Credenciais inválidas               -> esta suíte
- * C01.07 /auth/me                            -> esta suíte
- * C01.08 isolamento entre Organizations      -> esta suíte
+ * C01.01 JWT_SECRET obrigatório
+ *         → Auth Security
  *
- * C01.09 Licenciamento                       -> ainda não implementado
- * C01.10 Login Flutter Desktop/Web/Mobile    -> ainda não implementado
+ * C01.02 sem privilege escalation
+ *         → Auth Security
+ *
+ * C01.03 Organization existente
+ *         → esta suíte
+ *
+ * C01.04 Membership obrigatória
+ *         → esta suíte
+ *
+ * C01.05 Login + JWT com contexto correto
+ *         → esta suíte
+ *
+ * C01.06 Credenciais inválidas
+ *         → esta suíte
+ *
+ * C01.07 /auth/me
+ *         → esta suíte
+ *
+ * C01.08 isolamento entre Organizations
+ *         → esta suíte
+ *
+ * C01.09 Licenciamento
+ *         → ainda não implementado
+ *
+ * C01.10 Login Flutter Desktop/Web/Mobile
+ *         → ainda não implementado
  */
-
 describe(
   'C1 - Organization Authentication & Tenant Isolation',
   {
     concurrency: false,
   },
   () => {
-    let app: FastifyInstance;
+    let app:
+      FastifyInstance;
 
     const runId =
       randomUUID();
+
+    /**
+     * --------------------------------------------------------
+     * ORGANIZATIONS
+     * --------------------------------------------------------
+     */
 
     const organizationAId =
       randomUUID();
 
     const organizationBId =
       randomUUID();
+
+    /**
+     * --------------------------------------------------------
+     * USERS
+     * --------------------------------------------------------
+     */
 
     const adminAId =
       randomUUID();
@@ -74,6 +309,15 @@ describe(
     const userWithoutMembershipId =
       randomUUID();
 
+    /**
+     * --------------------------------------------------------
+     * RECURSO DA ORGANIZATION B
+     * --------------------------------------------------------
+     *
+     * Utilizado para provar isolamento
+     * multi-tenant.
+     */
+
     const customerBId =
       randomUUID();
 
@@ -82,6 +326,12 @@ describe(
 
     const serviceOrderBId =
       randomUUID();
+
+    /**
+     * --------------------------------------------------------
+     * CREDENTIALS
+     * --------------------------------------------------------
+     */
 
     const adminAEmail =
       `c1-admin-a-${runId}@assistailab.test`;
@@ -99,7 +349,8 @@ describe(
       string | undefined;
 
     /**
-     * Helper de login.
+     * Helper utilizado pelos testes
+     * que precisam autenticar um usuário.
      */
     async function login(
       email: string,
@@ -114,18 +365,23 @@ describe(
 
         payload: {
           email,
+
           password:
             userPassword,
         },
       });
     }
 
+    /**
+     * ========================================================
+     * SETUP
+     * ========================================================
+     */
     before(
       async () => {
         /**
-         * A suíte precisa de JWT_SECRET,
-         * mas não deve depender do .env
-         * da máquina.
+         * Não dependemos do JWT_SECRET
+         * configurado na máquina de desenvolvimento.
          */
         oldJwtSecret =
           process.env.JWT_SECRET;
@@ -140,11 +396,10 @@ describe(
           );
 
         /**
-         * --------------------------------
-         * ORGANIZATIONS
-         * --------------------------------
+         * ----------------------------------------------------
+         * ORGANIZATION A
+         * ----------------------------------------------------
          */
-
         await prisma.organization.create({
           data: {
             id:
@@ -155,6 +410,11 @@ describe(
           },
         });
 
+        /**
+         * ----------------------------------------------------
+         * ORGANIZATION B
+         * ----------------------------------------------------
+         */
         await prisma.organization.create({
           data: {
             id:
@@ -166,11 +426,10 @@ describe(
         });
 
         /**
-         * --------------------------------
-         * USERS
-         * --------------------------------
+         * ----------------------------------------------------
+         * ADMIN A
+         * ----------------------------------------------------
          */
-
         await prisma.user.create({
           data: {
             id:
@@ -192,6 +451,11 @@ describe(
           },
         });
 
+        /**
+         * ----------------------------------------------------
+         * ADMIN B
+         * ----------------------------------------------------
+         */
         await prisma.user.create({
           data: {
             id:
@@ -214,12 +478,14 @@ describe(
         });
 
         /**
-         * Usuário ACTIVE propositalmente
-         * sem Membership.
+         * ----------------------------------------------------
+         * ACTIVE SEM MEMBERSHIP
+         * ----------------------------------------------------
          *
-         * Será usado para provar que apenas
-         * ter uma conta ativa não concede
-         * contexto organizacional.
+         * Este usuário existe propositalmente
+         * para provar que:
+         *
+         * User ACTIVE != acesso organizacional.
          */
         await prisma.user.create({
           data: {
@@ -243,11 +509,10 @@ describe(
         });
 
         /**
-         * --------------------------------
-         * MEMBERSHIPS
-         * --------------------------------
+         * ----------------------------------------------------
+         * MEMBERSHIP A
+         * ----------------------------------------------------
          */
-
         await prisma.membership.create({
           data: {
             userId:
@@ -261,6 +526,11 @@ describe(
           },
         });
 
+        /**
+         * ----------------------------------------------------
+         * MEMBERSHIP B
+         * ----------------------------------------------------
+         */
         await prisma.membership.create({
           data: {
             userId:
@@ -275,12 +545,12 @@ describe(
         });
 
         /**
-         * --------------------------------
-         * DADO PROTEGIDO DA ORGANIZATION B
-         * --------------------------------
+         * ====================================================
+         * RECURSO PROTEGIDO DA ORGANIZATION B
+         * ====================================================
          *
-         * Criamos uma OS real da Organization B
-         * para testar isolamento multi-tenant.
+         * Customer + Equipment + ServiceOrder
+         * pertencentes ao contexto da Organization B.
          */
 
         await prisma.customer.create({
@@ -317,11 +587,11 @@ describe(
             customerId:
               customerBId,
 
-            ownerType:
-              'CUSTOMER',
-
             organizationId:
               null,
+
+            ownerType:
+              EquipmentOwnerType.CUSTOMER,
 
             organizationPurpose:
               null,
@@ -358,7 +628,7 @@ describe(
 
         /**
          * Inicializa Fastify somente depois
-         * de prepararmos a configuração.
+         * de preparar as fixtures.
          */
         app =
           buildApp();
@@ -367,11 +637,15 @@ describe(
       }
     );
 
+    /**
+     * ========================================================
+     * CLEANUP
+     * ========================================================
+     */
     after(
       async () => {
         /**
-         * Cleanup na ordem inversa
-         * das dependências.
+         * Ordem inversa das dependências.
          */
 
         await prisma.serviceOrder.deleteMany({
@@ -437,12 +711,10 @@ describe(
           },
         });
 
-        if (app) {
-          await app.close();
-        }
+        await app.close();
 
         /**
-         * Restaura ambiente original.
+         * Restaura JWT_SECRET original.
          */
         if (oldJwtSecret) {
           process.env.JWT_SECRET =
@@ -454,12 +726,17 @@ describe(
     );
 
     /**
+     * ========================================================
      * C01.03 + C01.04
+     * ========================================================
      *
-     * Prova que o usuário organizacional
-     * possui uma Organization persistida
-     * e uma Membership válida apontando
-     * para ela.
+     * Prova:
+     *
+     * User
+     *   ↓
+     * Membership
+     *   ↓
+     * Organization
      */
     test(
       'ADMIN has a persisted Organization and Membership before authentication',
@@ -516,10 +793,13 @@ describe(
     );
 
     /**
+     * ========================================================
      * C01.05
+     * ========================================================
      *
-     * O contexto privilegiado do JWT
-     * deve vir do backend/Membership.
+     * Login válido precisa gerar um JWT
+     * cujo contexto privilegiado venha
+     * do backend/Membership.
      */
     test(
       'valid ADMIN login returns JWT with role and organizationId derived from Membership',
@@ -558,13 +838,11 @@ describe(
         );
 
         /**
-         * Verifica também o conteúdo
-         * efetivamente assinado no JWT.
+         * Confere também o JWT efetivamente
+         * assinado pelo Fastify.
          */
         const payload =
-          (
-            app as any
-          ).jwt.verify(
+          (app as any).jwt.verify(
             body.token
           ) as {
             sub: string;
@@ -598,7 +876,9 @@ describe(
     );
 
     /**
+     * ========================================================
      * C01.06
+     * ========================================================
      */
     test(
       'invalid password is rejected',
@@ -625,11 +905,14 @@ describe(
     );
 
     /**
+     * ========================================================
      * C01.04
+     * ========================================================
      *
-     * Conta ACTIVE isoladamente não basta.
-     * O usuário precisa estar associado
-     * a uma Organization.
+     * User ACTIVE não basta.
+     *
+     * É necessário existir Membership
+     * vinculando o usuário à Organization.
      */
     test(
       'ACTIVE user without Membership cannot authenticate into an organization context',
@@ -655,7 +938,9 @@ describe(
     );
 
     /**
+     * ========================================================
      * C01.07
+     * ========================================================
      */
     test(
       '/auth/me returns the authenticated user with the correct organizational Membership',
@@ -727,18 +1012,22 @@ describe(
             .organizationId,
           organizationAId
         );
+
+        assert.equal(
+          body.user.memberships[0]
+            .role,
+          Role.ADMIN
+        );
       }
     );
 
     /**
+     * ========================================================
      * C01.08
+     * ========================================================
      *
-     * Organization A NÃO pode acessar
-     * recurso protegido pertencente à B.
-     *
-     * ServiceOrder já possui isolamento
-     * explícito por organizationId no
-     * backend.
+     * Organization A não pode enxergar
+     * uma ServiceOrder da Organization B.
      */
     test(
       'Organization A cannot access a Service Order owned by Organization B',
@@ -773,9 +1062,8 @@ describe(
           });
 
         /**
-         * O backend deliberadamente
-         * não encontra recursos de outro
-         * tenant no contexto corrente.
+         * O recurso de outro tenant
+         * não deve ser exposto.
          */
         assert.equal(
           response.statusCode,
@@ -793,11 +1081,11 @@ describe(
     );
 
     /**
-     * Contraprova do teste anterior.
+     * Contraprova do isolamento.
      *
-     * Não basta provar que A recebe 404:
-     * precisamos provar que a OS existe
-     * e B consegue acessá-la.
+     * Precisamos provar que a OS realmente
+     * existe e que sua Organization legítima
+     * consegue acessá-la.
      */
     test(
       'Organization B can access its own Service Order',
