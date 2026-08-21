@@ -5,6 +5,10 @@ import {
 
 import assert from 'node:assert/strict';
 
+import {
+  assertGenericEquipmentSyncPayload,
+} from './sync.controller.js';
+
 import bcrypt from 'bcrypt';
 
 import {
@@ -902,6 +906,77 @@ describe(
             delete process.env.JWT_SECRET;
           }
         }
+      }
+    );
+
+    /**
+ * ============================================================
+ * T037 / C04.08
+ * ============================================================
+ *
+ * O Sync genérico não pode ser usado como atalho
+ * para transferir propriedade de Equipment.
+ *
+ * CUSTOMER → ORGANIZATION
+ *
+ * deve acontecer exclusivamente através
+ * do EquipmentAcquisition.
+ */
+    test(
+      'generic Equipment Sync cannot transfer CUSTOMER ownership to an Organization',
+      () => {
+        /**
+         * Não pode mudar ownerType.
+         */
+        assert.throws(
+          () => {
+            assertGenericEquipmentSyncPayload({
+              ownerType:
+                'ORGANIZATION',
+
+              organizationId:
+                '00000000-0000-0000-0000-000000000001',
+
+              organizationPurpose:
+                'RESALE',
+            });
+          },
+          /Equipment ownership cannot be transferred through generic Sync/
+        );
+
+        /**
+         * Mesmo mantendo ownerType CUSTOMER,
+         * não pode injetar organizationId.
+         */
+        assert.throws(
+          () => {
+            assertGenericEquipmentSyncPayload({
+              ownerType:
+                'CUSTOMER',
+
+              organizationId:
+                '00000000-0000-0000-0000-000000000001',
+            });
+          },
+          /organizationId cannot be assigned to Equipment through generic Sync/
+        );
+
+        /**
+         * Também não pode atribuir finalidade
+         * organizacional pelo Sync genérico.
+         */
+        assert.throws(
+          () => {
+            assertGenericEquipmentSyncPayload({
+              ownerType:
+                'CUSTOMER',
+
+              organizationPurpose:
+                'PARTS_DONOR',
+            });
+          },
+          /organizationPurpose cannot be assigned through generic Sync/
+        );
       }
     );
   }
