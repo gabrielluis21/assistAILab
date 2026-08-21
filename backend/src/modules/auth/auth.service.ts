@@ -1,5 +1,8 @@
 import bcrypt from 'bcrypt';
-import { prisma } from '../../core/database/prisma.js';
+
+import {
+  prisma,
+} from '../../core/database/prisma.js';
 
 import {
   RegisterInput,
@@ -12,15 +15,22 @@ import {
   ConflictError,
 } from '../../core/utils/errors.js';
 
-const SALT_ROUNDS = 12;
+const SALT_ROUNDS =
+  12;
 
 export class AuthService {
-  async register(input: RegisterInput) {
-    const existingUser = await prisma.user.findUnique({
-      where: {
-        email: input.email,
-      },
-    });
+  async register(
+    input: RegisterInput
+  ) {
+    const existingUser =
+      await prisma
+        .user
+        .findUnique({
+          where: {
+            email:
+              input.email,
+          },
+        });
 
     if (existingUser) {
       throw new ConflictError(
@@ -28,138 +38,347 @@ export class AuthService {
       );
     }
 
-    const passwordHash = await bcrypt.hash(
-      input.password,
-      SALT_ROUNDS
-    );
+    const passwordHash =
+      await bcrypt.hash(
+        input.password,
+        SALT_ROUNDS
+      );
 
-    return prisma.$transaction(async (tx) => {
-      const customer = await tx.customer.create({
-        data: {
-          name: input.name,
-          email: input.email,
-          phone: input.phone,
-        },
-      });
+    return prisma
+      .$transaction(
+        async (tx) => {
+          const customer =
+            await tx
+              .customer
+              .create({
+                data: {
+                  name:
+                    input.name,
 
-      const user = await tx.user.create({
-        data: {
-          name: input.name,
-          email: input.email,
-          phone: input.phone,
-          passwordHash,
-          role: 'CUSTOMER',
-          status: 'PENDING',
-          customerId: customer.id,
-        },
-      });
+                  email:
+                    input.email,
 
-      return {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        status: user.status,
-        customerId: user.customerId,
-      };
-    });
+                  phone:
+                    input.phone,
+                },
+              });
+
+          const user =
+            await tx
+              .user
+              .create({
+                data: {
+                  name:
+                    input.name,
+
+                  email:
+                    input.email,
+
+                  phone:
+                    input.phone,
+
+                  passwordHash,
+
+                  role:
+                    'CUSTOMER',
+
+                  status:
+                    'PENDING',
+
+                  customerId:
+                    customer.id,
+                },
+              });
+
+          return {
+            id:
+              user.id,
+
+            name:
+              user.name,
+
+            email:
+              user.email,
+
+            phone:
+              user.phone,
+
+            role:
+              user.role,
+
+            status:
+              user.status,
+
+            customerId:
+              user.customerId,
+          };
+        }
+      );
   }
 
-  async validateCredentials(input: LoginInput) {
-    const user = await prisma.user.findUnique({
-      where: {
-        email: input.email,
-      },
-      include: {
-        memberships: {
+  async validateCredentials(
+    input: LoginInput
+  ) {
+    const user =
+      await prisma
+        .user
+        .findUnique({
+          where: {
+            email:
+              input.email,
+          },
+
           include: {
-            organization: true,
+            memberships: {
+              include: {
+                organization:
+                  true,
+              },
+
+              orderBy: {
+                createdAt:
+                  'asc',
+              },
+            },
           },
-          orderBy: {
-            createdAt: 'asc',
-          },
-        },
-      },
-    });
+        });
 
     if (!user) {
-      throw new UnauthorizedError('Invalid credentials');
+      throw new UnauthorizedError(
+        'Invalid credentials'
+      );
     }
 
-    if (user.status !== 'ACTIVE') {
+    if (
+      user.status !==
+      'ACTIVE'
+    ) {
       throw new ForbiddenError(
         'User account is not active'
       );
     }
 
-    const valid = await bcrypt.compare(
-      input.password,
-      user.passwordHash
-    );
+    const valid =
+      await bcrypt.compare(
+        input.password,
+        user.passwordHash
+      );
 
     if (!valid) {
-      throw new UnauthorizedError('Invalid credentials');
+      throw new UnauthorizedError(
+        'Invalid credentials'
+      );
     }
 
-    if (user.memberships.length === 0) {
+    /**
+     * ======================================================
+     * CUSTOMER
+     * ======================================================
+     *
+     * Customer é identidade global.
+     *
+     * NÃO exige Membership.
+     */
+    if (
+      user.role ===
+      'CUSTOMER'
+    ) {
+      if (!user.customerId) {
+        throw new ForbiddenError(
+          'CUSTOMER user has no associated Customer identity'
+        );
+      }
+
+      return {
+        id:
+          user.id,
+
+        name:
+          user.name,
+
+        email:
+          user.email,
+
+        phone:
+          user.phone,
+
+        role:
+          'CUSTOMER',
+
+        status:
+          user.status,
+
+        customerId:
+          user.customerId,
+
+        organizationId:
+          null,
+      };
+    }
+
+    /**
+     * ======================================================
+     * ADMIN / TECHNICIAN
+     * ======================================================
+     */
+
+    if (
+      user.memberships.length ===
+      0
+    ) {
       throw new ForbiddenError(
         'User is not associated with an organization'
       );
     }
 
-    const membership = user.memberships[0];
+    const membership =
+      user.memberships[0];
 
     return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: membership.role,
-      status: user.status,
-      customerId: user.customerId,
-      organizationId: membership.organizationId,
+      id:
+        user.id,
+
+      name:
+        user.name,
+
+      email:
+        user.email,
+
+      phone:
+        user.phone,
+
+      role:
+        membership.role,
+
+      status:
+        user.status,
+
+      customerId:
+        user.customerId,
+
+      organizationId:
+        membership.organizationId,
     };
   }
 
-  async getCurrentUser(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: {
-        id: userId,
-      },
-      include: {
-        memberships: {
+  async getCurrentUser(
+    userId: string
+  ) {
+    const user =
+      await prisma
+        .user
+        .findUnique({
+          where: {
+            id:
+              userId,
+          },
+
           include: {
-            organization: true,
+            memberships: {
+              include: {
+                organization:
+                  true,
+              },
+
+              orderBy: {
+                createdAt:
+                  'asc',
+              },
+            },
           },
-          orderBy: {
-            createdAt: 'asc',
-          },
-        },
-      },
-    });
+        });
 
     if (!user) {
-      throw new UnauthorizedError('User not found');
+      throw new UnauthorizedError(
+        'User not found'
+      );
     }
 
-    if (user.memberships.length === 0) {
+    /**
+     * CUSTOMER global.
+     */
+    if (
+      user.role ===
+      'CUSTOMER'
+    ) {
+      if (!user.customerId) {
+        throw new ForbiddenError(
+          'CUSTOMER user has no associated Customer identity'
+        );
+      }
+
+      return {
+        id:
+          user.id,
+
+        name:
+          user.name,
+
+        email:
+          user.email,
+
+        phone:
+          user.phone,
+
+        role:
+          'CUSTOMER',
+
+        status:
+          user.status,
+
+        customerId:
+          user.customerId,
+
+        organizationId:
+          null,
+
+        memberships:
+          user.memberships,
+      };
+    }
+
+    /**
+     * ADMIN / TECHNICIAN.
+     */
+    if (
+      user.memberships.length ===
+      0
+    ) {
       throw new ForbiddenError(
         'User is not associated with an organization'
       );
     }
 
-    const membership = user.memberships[0];
+    const membership =
+      user.memberships[0];
 
     return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: membership.role,
-      status: user.status,
-      customerId: user.customerId,
-      memberships: user.memberships,
+      id:
+        user.id,
+
+      name:
+        user.name,
+
+      email:
+        user.email,
+
+      phone:
+        user.phone,
+
+      role:
+        membership.role,
+
+      status:
+        user.status,
+
+      customerId:
+        user.customerId,
+
+      organizationId:
+        membership.organizationId,
+
+      memberships:
+        user.memberships,
     };
   }
 }

@@ -9,6 +9,7 @@ import {
 
 import {
   CustomerEventType,
+  EquipmentOwnerType,
   ServiceOrderStatus,
 } from '@prisma/client';
 
@@ -18,6 +19,7 @@ import {
 
 import {
   getAuthUser,
+  requireOrganizationId,
 } from '../../core/middleware/auth.middleware.js';
 
 import {
@@ -34,13 +36,59 @@ import {
   isValidStatusTransition,
 } from './service_order_state_machine.js';
 
+const newEquipmentSchema =
+  z.object({
+    type:
+      z.string()
+        .trim()
+        .min(1),
+
+    brand:
+      z.string()
+        .trim()
+        .min(1),
+
+    model:
+      z.string()
+        .trim()
+        .min(1),
+
+    serialNumber:
+      z.string()
+        .trim()
+        .min(1)
+        .optional(),
+
+    notes:
+      z.string()
+        .trim()
+        .optional(),
+  });
+
+
 const createOrderSchema =
   z.object({
     customerId:
       z.string().uuid(),
 
+    /**
+     * Equipment já conhecido pela
+     * Organization através de OS anterior.
+     */
     equipmentId:
-      z.string().uuid(),
+      z.string()
+        .uuid()
+        .optional(),
+
+    /**
+     * Primeiro atendimento desse Equipment.
+     *
+     * Equipment + OS serão criados
+     * atomicamente.
+     */
+    equipment:
+      newEquipmentSchema
+        .optional(),
 
     technicianId:
       z.string()
@@ -48,8 +96,44 @@ const createOrderSchema =
         .optional(),
 
     problemDescription:
-      z.string().min(1),
-  });
+      z.string()
+        .trim()
+        .min(1),
+  })
+    .superRefine(
+      (
+        data,
+        ctx
+      ) => {
+        const hasEquipmentId =
+          Boolean(
+            data.equipmentId
+          );
+
+        const hasNewEquipment =
+          Boolean(
+            data.equipment
+          );
+
+        /**
+         * Exatamente UMA das opções
+         * deve ser informada.
+         */
+        if (
+          hasEquipmentId ===
+          hasNewEquipment
+        ) {
+          ctx.addIssue({
+            code:
+              z.ZodIssueCode
+                .custom,
+
+            message:
+              'Provide either equipmentId or equipment, but not both',
+          });
+        }
+      }
+    );
 
 const updateStatusSchema =
   z.object({
@@ -81,20 +165,44 @@ export async function listServiceOrdersHandler(
       request
     );
 
-  const whereClause =
-    authUser.role ===
-      'CUSTOMER'
-      ? {
-        organizationId:
-          authUser.organizationId,
+  let whereClause;
 
-        customerId:
-          authUser.customerId!,
-      }
-      : {
-        organizationId:
-          authUser.organizationId,
-      };
+  /**
+   * CUSTOMER:
+   *
+   * identidade global.
+   * Todas as próprias OS.
+   */
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
+    if (
+      !authUser.customerId
+    ) {
+      throw new ForbiddenError(
+        'CUSTOMER user has no associated Customer identity'
+      );
+    }
+
+    whereClause = {
+      customerId:
+        authUser.customerId,
+    };
+  } else {
+    /**
+     * ADMIN / TECH:
+     * tenant obrigatório.
+     */
+    const organizationId =
+      requireOrganizationId(
+        authUser
+      );
+
+    whereClause = {
+      organizationId,
+    };
+  }
 
   const orders =
     await prisma
@@ -104,9 +212,24 @@ export async function listServiceOrdersHandler(
           whereClause,
 
         include: {
-          customer: true,
-          equipment: true,
-          technician: true,
+          organization: {
+            select: {
+              id:
+                true,
+
+              name:
+                true,
+            },
+          },
+
+          customer:
+            true,
+
+          equipment:
+            true,
+
+          technician:
+            true,
         },
 
         orderBy: {
@@ -124,7 +247,9 @@ export async function getServiceOrderHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const { id } =
+  const {
+    id,
+  } =
     request.params as {
       id: string;
     };
@@ -134,24 +259,78 @@ export async function getServiceOrderHandler(
       request
     );
 
+  let whereClause;
+
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
+    if (
+      !authUser.customerId
+    ) {
+      throw new ForbiddenError(
+        'CUSTOMER user has no associated Customer identity'
+      );
+    }
+
+    /**
+     * CUSTOMER:
+     *
+     * id + customerId.
+     *
+     * Não usamos organizationId.
+     */
+    whereClause = {
+      id,
+
+      customerId:
+        authUser.customerId,
+    };
+  } else {
+    const organizationId =
+      requireOrganizationId(
+        authUser
+      );
+
+    whereClause = {
+      id,
+      organizationId,
+    };
+  }
+
   const order =
     await prisma
       .serviceOrder
       .findFirst({
-        where: {
-          id,
-
-          organizationId:
-            authUser.organizationId,
-        },
+        where:
+          whereClause,
 
         include: {
-          customer: true,
-          equipment: true,
-          technician: true,
+          organization: {
+            select: {
+              id:
+                true,
+
+              name:
+                true,
+            },
+          },
+
+          customer:
+            true,
+
+          equipment:
+            true,
+
+          technician:
+            true,
         },
       });
 
+  /**
+   * CUSTOMER tentando OS alheia
+   * também recebe 404.
+   */
   if (!order) {
     return reply
       .status(404)
@@ -159,21 +338,6 @@ export async function getServiceOrderHandler(
         error:
           'Service Order not found',
       });
-  }
-
-  if (
-    authUser.role ===
-    'CUSTOMER'
-  ) {
-    if (
-      !authUser.customerId ||
-      order.customerId !==
-      authUser.customerId
-    ) {
-      throw new ForbiddenError(
-        'Access denied: you can only access your own Service Orders'
-      );
-    }
   }
 
   return reply.send({
@@ -195,6 +359,16 @@ export async function createServiceOrderHandler(
       request
     );
 
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+  /**
+   * ========================================================
+   * CUSTOMER × ORGANIZATION
+   * ========================================================
+   */
+
   const customerOrganization =
     await prisma
       .customerOrganization
@@ -205,7 +379,7 @@ export async function createServiceOrderHandler(
               body.customerId,
 
             organizationId:
-              authUser.organizationId,
+              organizationId,
           },
         },
       });
@@ -227,24 +401,11 @@ export async function createServiceOrderHandler(
     );
   }
 
-  const equipment =
-    await prisma
-      .equipment
-      .findFirst({
-        where: {
-          id:
-            body.equipmentId,
-
-          customerId:
-            body.customerId,
-        },
-      });
-
-  if (!equipment) {
-    throw new ForbiddenError(
-      'Equipment does not belong to the specified customer'
-    );
-  }
+  /**
+   * ========================================================
+   * TECHNICIAN
+   * ========================================================
+   */
 
   if (
     body.technicianId
@@ -259,7 +420,7 @@ export async function createServiceOrderHandler(
                 body.technicianId,
 
               organizationId:
-                authUser.organizationId,
+                organizationId,
             },
           },
         });
@@ -279,23 +440,180 @@ export async function createServiceOrderHandler(
     }
   }
 
+  /**
+   * ========================================================
+   * EQUIPMENT EXISTENTE
+   * ========================================================
+   *
+   * equipmentId somente pode ser reutilizado
+   * quando:
+   *
+   * 1. pertence ao Customer;
+   * 2. continua sendo CUSTOMER-owned;
+   * 3. a Organization já possui uma OS
+   *    relacionada a esse Equipment.
+   *
+   * CustomerOrganization sozinho NÃO concede
+   * acesso ao Equipment.
+   */
+
+  let existingEquipmentId:
+    string | null =
+    null;
+
+  if (
+    body.equipmentId
+  ) {
+    const equipment =
+      await prisma
+        .equipment
+        .findFirst({
+          where: {
+            id:
+              body.equipmentId,
+
+            customerId:
+              body.customerId,
+
+            ownerType:
+              EquipmentOwnerType
+                .CUSTOMER,
+
+            serviceOrders: {
+              some: {
+                organizationId:
+                  authUser
+                    .organizationId,
+              },
+            },
+          },
+
+          select: {
+            id:
+              true,
+          },
+        });
+
+    if (
+      !equipment
+    ) {
+      /**
+       * Mensagem propositalmente genérica.
+       *
+       * Não informamos se:
+       * - Equipment não existe;
+       * - pertence a outro Customer;
+       * - pertence a outro tenant;
+       * - ainda não foi atendido pela Organization.
+       */
+      throw new ForbiddenError(
+        'Equipment is not available to the current organization'
+      );
+    }
+
+    existingEquipmentId =
+      equipment.id;
+  }
+
+  /**
+   * ========================================================
+   * TRANSACTION
+   * ========================================================
+   *
+   * Primeiro atendimento:
+   *
+   * Equipment
+   *     +
+   * ServiceOrder
+   *     +
+   * CRM
+   *
+   * Tudo ou nada.
+   */
+
   const order =
     await prisma
       .$transaction(
         async (tx) => {
+          let equipmentId =
+            existingEquipmentId;
+
+          /**
+           * Primeiro atendimento
+           * daquele equipamento.
+           */
+          if (
+            body.equipment
+          ) {
+            const createdEquipment =
+              await tx
+                .equipment
+                .create({
+                  data: {
+                    customerId:
+                      body.customerId,
+
+                    organizationId:
+                      null,
+
+                    ownerType:
+                      EquipmentOwnerType
+                        .CUSTOMER,
+
+                    organizationPurpose:
+                      null,
+
+                    type:
+                      body.equipment
+                        .type,
+
+                    brand:
+                      body.equipment
+                        .brand,
+
+                    model:
+                      body.equipment
+                        .model,
+
+                    serialNumber:
+                      body.equipment
+                        .serialNumber,
+
+                    notes:
+                      body.equipment
+                        .notes,
+                  },
+                });
+
+            equipmentId =
+              createdEquipment.id;
+          }
+
+          /**
+           * Impossível após validação Zod,
+           * mas mantemos defesa interna.
+           */
+          if (
+            !equipmentId
+          ) {
+            throw new ConflictError(
+              'Service Order requires an Equipment'
+            );
+          }
+
           const createdOrder =
             await tx
               .serviceOrder
               .create({
                 data: {
                   organizationId:
-                    authUser.organizationId,
+                    authUser
+                      .organizationId,
 
                   customerId:
                     body.customerId,
 
-                  equipmentId:
-                    body.equipmentId,
+                  equipmentId,
 
                   technicianId:
                     body.technicianId,
@@ -316,13 +634,16 @@ export async function createServiceOrderHandler(
                   createdOrder.id,
 
                 customerId:
-                  createdOrder.customerId,
+                  createdOrder
+                    .customerId,
 
                 organizationId:
-                  createdOrder.organizationId,
+                  createdOrder
+                    .organizationId,
 
                 status:
-                  createdOrder.status,
+                  createdOrder
+                    .status,
               },
 
               tx
@@ -369,7 +690,7 @@ export async function updateServiceOrderStatusHandler(
           id,
 
           organizationId:
-            authUser.organizationId,
+            organizationId,
         },
       });
 
@@ -429,7 +750,7 @@ export async function updateServiceOrderStatusHandler(
                   id,
 
                   organizationId:
-                    authUser.organizationId,
+                    organizationId,
 
                   status:
                     order.status,
@@ -542,7 +863,7 @@ export async function markServiceOrderNotApprovedHandler(
           id,
 
           organizationId:
-            authUser.organizationId,
+            organizationId,
         },
       });
 
@@ -564,7 +885,7 @@ export async function markServiceOrderNotApprovedHandler(
       .findFirst({
         where: {
           organizationId:
-            authUser.organizationId,
+            organizationId,
 
           serviceOrderId:
             order.id,
@@ -621,7 +942,7 @@ export async function markServiceOrderNotApprovedHandler(
                     order.id,
 
                   organizationId:
-                    authUser.organizationId,
+                    organizationId,
 
                   status:
                     ServiceOrderStatus

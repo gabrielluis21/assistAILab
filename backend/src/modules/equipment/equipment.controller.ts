@@ -1,60 +1,249 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
-import { createEquipmentSchema, updateEquipmentSchema } from './equipment.schema.js';
-import { EquipmentService } from './equipment.service.js';
-import { getAuthUser } from '../../core/middleware/auth.middleware.js';
-import { ForbiddenError } from '../../core/utils/errors.js';
+import {
+  FastifyRequest,
+  FastifyReply,
+} from 'fastify';
 
-const svc = new EquipmentService();
+import {
+  updateEquipmentSchema,
+} from './equipment.schema.js';
 
-// P0.2: CUSTOMER sees only their own equipment; ADMIN/TECH see all.
-export async function listEquipmentsHandler(req: FastifyRequest, reply: FastifyReply) {
-  const authUser = getAuthUser(req);
+import {
+  EquipmentService,
+} from './equipment.service.js';
 
-  if (authUser.role === 'CUSTOMER') {
-    if (!authUser.customerId) {
-      throw new ForbiddenError('Access denied: no customer identity associated with this account');
+import {
+  getAuthUser,
+  requireOrganizationId,
+} from '../../core/middleware/auth.middleware.js';
+
+import {
+  ForbiddenError,
+} from '../../core/utils/errors.js';
+
+const svc =
+  new EquipmentService();
+
+/**
+ * ============================================================
+ * LIST
+ * ============================================================
+ */
+export async function listEquipmentsHandler(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  const authUser =
+    getAuthUser(
+      req
+    );
+
+  /**
+   * Customer vê seus próprios equipamentos.
+   */
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
+    if (
+      !authUser.customerId
+    ) {
+      throw new ForbiddenError(
+        'Access denied: no customer identity associated with this account'
+      );
     }
-    const data = await svc.listByCustomer(authUser.customerId);
-    return reply.send(data);
+
+    const data =
+      await svc
+        .listByCustomer(
+          authUser.customerId
+        );
+
+    return reply.send(
+      data
+    );
   }
 
-  const { customerId } = req.query as { customerId?: string };
-  const data = customerId ? await svc.listByCustomer(customerId) : await svc.listAll();
-  return reply.send(data);
+  /**
+   * ADMIN / TECH:
+   *
+   * somente Equipment:
+   *
+   * - da própria Organization;
+   * - ou usado em OS da Organization.
+   */
+  const {
+    customerId,
+  } =
+    req.query as {
+      customerId?: string;
+    };
+
+  const data =
+    await svc
+      .listForOrganization(
+        authUser.organizationId,
+        customerId
+      );
+
+  return reply.send(
+    data
+  );
 }
 
-// P0.2: CUSTOMER can only access their own equipment.
-export async function getEquipmentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const { id } = req.params as { id: string };
-  const authUser = getAuthUser(req);
+/**
+ * ============================================================
+ * GET
+ * ============================================================
+ */
+export async function getEquipmentHandler(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  const {
+    id,
+  } =
+    req.params as {
+      id: string;
+    };
 
-  const equipment = await svc.findById(id);
+  const authUser =
+    getAuthUser(
+      req
+    );
 
-  if (authUser.role === 'CUSTOMER') {
-    if (!authUser.customerId || equipment.customerId !== authUser.customerId) {
-      throw new ForbiddenError('Access denied: you can only access your own equipment');
+  /**
+   * CUSTOMER.
+   */
+  if (
+    authUser.role ===
+    'CUSTOMER'
+  ) {
+    const equipment =
+      await svc
+        .findById(
+          id
+        );
+
+    if (
+      !authUser.customerId ||
+      equipment.customerId !==
+      authUser.customerId
+    ) {
+      throw new ForbiddenError(
+        'Access denied: you can only access your own equipment'
+      );
     }
+
+    return reply.send(
+      equipment
+    );
   }
 
-  return reply.send(equipment);
+  /**
+   * ADMIN / TECH.
+   */
+  const equipment =
+    await svc
+      .findByIdForOrganization(
+        id,
+        authUser.organizationId
+      );
+
+  return reply.send(
+    equipment
+  );
 }
 
-// ADMIN / TECHNICIAN only
-export async function upsertEquipmentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const body = createEquipmentSchema.parse(req.body);
-  return reply.status(200).send(await svc.upsert(body));
+/**
+ * ============================================================
+ * CREATE / UPSERT
+ * ============================================================
+ *
+ * A equipe NÃO cria mais Equipment CUSTOMER isoladamente.
+ *
+ * Primeiro cadastro:
+ *
+ * POST /service-orders
+ *
+ * Futuramente Equipment ORGANIZATION será criado pelo
+ * fluxo EquipmentAcquisition.
+ */
+export async function upsertEquipmentHandler(
+  _req: FastifyRequest,
+  _reply: FastifyReply
+) {
+  throw new ForbiddenError(
+    'Equipment must be registered through a Service Order or an approved acquisition flow'
+  );
 }
 
-// ADMIN / TECHNICIAN only
-export async function updateEquipmentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const { id } = req.params as { id: string };
-  const body = updateEquipmentSchema.parse(req.body);
-  return reply.send(await svc.update(id, body));
+/**
+ * ============================================================
+ * UPDATE
+ * ============================================================
+ */
+export async function updateEquipmentHandler(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  const {
+    id,
+  } =
+    req.params as {
+      id: string;
+    };
+
+  const authUser =
+    getAuthUser(
+      req
+    );
+
+  const body =
+    updateEquipmentSchema.parse(
+      req.body
+    );
+
+  const equipment =
+    await svc
+      .updateForOrganization(
+        id,
+        authUser.organizationId,
+        body
+      );
+
+  return reply.send(
+    equipment
+  );
 }
 
-// ADMIN / TECHNICIAN only
-export async function deleteEquipmentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const { id } = req.params as { id: string };
-  await svc.delete(id);
-  return reply.status(204).send();
+/**
+ * ============================================================
+ * DELETE
+ * ============================================================
+ */
+export async function deleteEquipmentHandler(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  const {
+    id,
+  } =
+    req.params as {
+      id: string;
+    };
+
+  const authUser =
+    getAuthUser(
+      req
+    );
+
+  await svc
+    .deleteForOrganization(
+      id,
+      authUser.organizationId
+    );
+
+  return reply
+    .status(204)
+    .send();
 }
