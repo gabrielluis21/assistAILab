@@ -160,6 +160,9 @@ class SyncEngine {
                 {
                   'id': entityId,
                   'customer_id': data['customer_id'] ?? data['customerId'],
+                  'organization_id': data['organization_id'] ?? data['organizationId'],
+                  'owner_type': data['owner_type'] ?? data['ownerType'] ?? 'CUSTOMER',
+                  'organization_purpose': data['organization_purpose'] ?? data['organizationPurpose'],
                   'type': data['type'],
                   'brand': data['brand'],
                   'model': data['model'],

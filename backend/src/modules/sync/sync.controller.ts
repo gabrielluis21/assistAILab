@@ -1,4 +1,4 @@
-import {
+﻿import {
   FastifyRequest,
   FastifyReply,
 } from 'fastify';
@@ -2271,6 +2271,26 @@ export async function pullSyncHandler(
           payment.id
       );
 
+    /**
+     * Part ainda e global no schema atual.
+     *
+     * O frontend possui suporte a PART no Sync Pull,
+     * portanto ADMIN/TECH precisam autorizar os IDs globais
+     * ate a futura modelagem multi-tenant do estoque.
+     */
+    const partIdsForPull =
+      (
+        await prisma.part.findMany({
+          select: {
+            id:
+              true,
+          },
+        })
+      ).map(
+        (part) =>
+          part.id
+      );
+
     const serviceOrderItems =
       serviceOrderIds.length >
         0
@@ -2303,6 +2323,8 @@ export async function pullSyncHandler(
         ),
 
         ...paymentIds,
+
+        ...partIdsForPull,
       ]);
   }
 
@@ -2335,10 +2357,17 @@ export async function pullSyncHandler(
         )
     );
 
+  /**
+   * O cursor representa o ultimo registro EXAMINADO,
+   * e nao apenas o ultimo registro autorizado.
+   *
+   * Assim, um lote contendo somente mudancas de outro tenant
+   * nao prende o cliente em um loop relendo o mesmo lote.
+   */
   const nextCursor =
-    changes.length > 0
-      ? changes[
-        changes.length -
+    allChanges.length > 0
+      ? allChanges[
+        allChanges.length -
         1
       ].id.toString()
       : query.cursor ??

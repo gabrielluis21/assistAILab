@@ -1,13 +1,15 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:hive/hive.dart';
+import 'api_environment.dart';
 
 class ApiClient {
   final String baseUrl;
   final http.Client _client;
-  
-  ApiClient({this.baseUrl = 'http://127.0.0.1:8080/api/v1', http.Client? client}) 
-      : _client = client ?? http.Client();
+
+  ApiClient({String? baseUrl, http.Client? client})
+      : baseUrl = baseUrl ?? ApiEnvironment.centralApiBaseUrl,
+        _client = client ?? http.Client();
 
   Future<String?> _getToken() async {
     final box = await Hive.openBox('auth_box');

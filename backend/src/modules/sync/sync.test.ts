@@ -1,4 +1,4 @@
-import {
+﻿import {
   describe,
   test,
 } from 'node:test';
@@ -977,6 +977,617 @@ describe(
           },
           /organizationPurpose cannot be assigned through generic Sync/
         );
+      }
+    );
+
+
+    /**
+     * ========================================================
+     * T049 — PART PULL
+     * ========================================================
+     *
+     * Part é global no schema atual e o frontend possui
+     * suporte explícito a PART no SyncEngine.
+     *
+     * ADMIN/TECH precisam receber mudanças de Part.
+     */
+    test(
+      'ADMIN Sync Pull includes global PART changes',
+      async () => {
+        const runId =
+          randomUUID();
+
+        const organizationId =
+          randomUUID();
+
+        const adminId =
+          randomUUID();
+
+        const partId =
+          randomUUID();
+
+        const adminEmail =
+          `sync-part-${runId}@assistailab.test`;
+
+        const password =
+          'Sync-Part@123456';
+
+        let app:
+          FastifyInstance | undefined;
+
+        let oldJwtSecret:
+          string | undefined;
+
+        try {
+          oldJwtSecret =
+            process.env.JWT_SECRET;
+
+          process.env.JWT_SECRET =
+            'sync-part-test-secret-2026';
+
+          const latestChange =
+            await prisma.syncChangeLog.findFirst({
+              orderBy: {
+                id:
+                  'desc',
+              },
+
+              select: {
+                id:
+                  true,
+              },
+            });
+
+          const baselineCursor =
+            latestChange
+              ?.id
+              .toString() ??
+            '0';
+
+          const passwordHash =
+            await bcrypt.hash(
+              password,
+              12
+            );
+
+          await prisma.organization.create({
+            data: {
+              id:
+                organizationId,
+
+              name:
+                `Sync Part Organization ${runId}`,
+            },
+          });
+
+          await prisma.user.create({
+            data: {
+              id:
+                adminId,
+
+              name:
+                'Sync Part Admin',
+
+              email:
+                adminEmail,
+
+              passwordHash,
+
+              role:
+                Role.ADMIN,
+
+              status:
+                UserStatus.ACTIVE,
+            },
+          });
+
+          await prisma.membership.create({
+            data: {
+              userId:
+                adminId,
+
+              organizationId,
+
+              role:
+                Role.ADMIN,
+            },
+          });
+
+          await prisma.part.create({
+            data: {
+              id:
+                partId,
+
+              name:
+                'Sync Test Part',
+
+              sku:
+                `SYNC-PART-${runId}`,
+
+              price:
+                100,
+
+              costPrice:
+                50,
+
+              stockQuantity:
+                4,
+            },
+          });
+
+          await prisma.syncChangeLog.create({
+            data: {
+              cursor:
+                randomUUID(),
+
+              entityType:
+                'PART',
+
+              entityId:
+                partId,
+
+              operationType:
+                OperationType.CREATE,
+
+              data: {
+                id:
+                  partId,
+
+                name:
+                  'Sync Test Part',
+
+                sku:
+                  `SYNC-PART-${runId}`,
+
+                price:
+                  100,
+
+                costPrice:
+                  50,
+
+                stockQuantity:
+                  4,
+              },
+            },
+          });
+
+          app =
+            buildApp();
+
+          await app.ready();
+
+          const loginResponse =
+            await app.inject({
+              method:
+                'POST',
+
+              url:
+                '/api/v1/auth/login',
+
+              payload: {
+                email:
+                  adminEmail,
+
+                password,
+              },
+            });
+
+          assert.equal(
+            loginResponse.statusCode,
+            200
+          );
+
+          const token =
+            loginResponse
+              .json()
+              .token;
+
+          const pullResponse =
+            await app.inject({
+              method:
+                'GET',
+
+              url:
+                `/api/v1/sync/changes?cursor=${baselineCursor}&limit=100`,
+
+              headers: {
+                authorization:
+                  `Bearer ${token}`,
+              },
+            });
+
+          assert.equal(
+            pullResponse.statusCode,
+            200
+          );
+
+          const receivedIds =
+            new Set<string>(
+              pullResponse
+                .json()
+                .changes
+                .map(
+                  (
+                    change:
+                      {
+                        entityId:
+                        string;
+                      }
+                  ) =>
+                    change.entityId
+                )
+            );
+
+          assert.equal(
+            receivedIds.has(
+              partId
+            ),
+            true
+          );
+        } finally {
+          await prisma.syncChangeLog.deleteMany({
+            where: {
+              entityId:
+                partId,
+            },
+          });
+
+          await prisma.part.deleteMany({
+            where: {
+              id:
+                partId,
+            },
+          });
+
+          await prisma.membership.deleteMany({
+            where: {
+              userId:
+                adminId,
+            },
+          });
+
+          await prisma.user.deleteMany({
+            where: {
+              id:
+                adminId,
+            },
+          });
+
+          await prisma.organization.deleteMany({
+            where: {
+              id:
+                organizationId,
+            },
+          });
+
+          if (app) {
+            await app.close();
+          }
+
+          if (oldJwtSecret) {
+            process.env.JWT_SECRET =
+              oldJwtSecret;
+          } else {
+            delete process
+              .env
+              .JWT_SECRET;
+          }
+        }
+      }
+    );
+
+    /**
+     * ========================================================
+     * T050 — CURSOR ADVANCEMENT
+     * ========================================================
+     *
+     * Um lote pode conter somente mudanças que o usuário
+     * não está autorizado a receber.
+     *
+     * Mesmo assim o cursor precisa avançar sobre o lote
+     * já examinado, evitando loop infinito.
+     */
+    test(
+      'Sync Pull advances cursor across an unauthorized-only batch',
+      async () => {
+        const runId =
+          randomUUID();
+
+        const organizationAId =
+          randomUUID();
+
+        const organizationBId =
+          randomUUID();
+
+        const adminId =
+          randomUUID();
+
+        const foreignCustomerId =
+          randomUUID();
+
+        const adminEmail =
+          `sync-cursor-${runId}@assistailab.test`;
+
+        const password =
+          'Sync-Cursor@123456';
+
+        let app:
+          FastifyInstance | undefined;
+
+        let oldJwtSecret:
+          string | undefined;
+
+        let unauthorizedChangeId:
+          bigint | undefined;
+
+        try {
+          oldJwtSecret =
+            process.env.JWT_SECRET;
+
+          process.env.JWT_SECRET =
+            'sync-cursor-test-secret-2026';
+
+          const latestChange =
+            await prisma.syncChangeLog.findFirst({
+              orderBy: {
+                id:
+                  'desc',
+              },
+
+              select: {
+                id:
+                  true,
+              },
+            });
+
+          const baselineCursor =
+            latestChange
+              ?.id
+              .toString() ??
+            '0';
+
+          const passwordHash =
+            await bcrypt.hash(
+              password,
+              12
+            );
+
+          await prisma.organization.createMany({
+            data: [
+              {
+                id:
+                  organizationAId,
+
+                name:
+                  `Cursor Organization A ${runId}`,
+              },
+
+              {
+                id:
+                  organizationBId,
+
+                name:
+                  `Cursor Organization B ${runId}`,
+              },
+            ],
+          });
+
+          await prisma.user.create({
+            data: {
+              id:
+                adminId,
+
+              name:
+                'Cursor Admin',
+
+              email:
+                adminEmail,
+
+              passwordHash,
+
+              role:
+                Role.ADMIN,
+
+              status:
+                UserStatus.ACTIVE,
+            },
+          });
+
+          await prisma.membership.create({
+            data: {
+              userId:
+                adminId,
+
+              organizationId:
+                organizationAId,
+
+              role:
+                Role.ADMIN,
+            },
+          });
+
+          await prisma.customer.create({
+            data: {
+              id:
+                foreignCustomerId,
+
+              name:
+                'Foreign Customer',
+            },
+          });
+
+          await prisma.customerOrganization.create({
+            data: {
+              customerId:
+                foreignCustomerId,
+
+              organizationId:
+                organizationBId,
+
+              status:
+                CustomerOrganizationStatus.ACTIVE,
+            },
+          });
+
+          const unauthorizedChange =
+            await prisma.syncChangeLog.create({
+              data: {
+                cursor:
+                  randomUUID(),
+
+                entityType:
+                  'CUSTOMER',
+
+                entityId:
+                  foreignCustomerId,
+
+                operationType:
+                  OperationType.CREATE,
+
+                data: {
+                  id:
+                    foreignCustomerId,
+
+                  name:
+                    'Foreign Customer',
+                },
+              },
+            });
+
+          unauthorizedChangeId =
+            unauthorizedChange.id;
+
+          app =
+            buildApp();
+
+          await app.ready();
+
+          const loginResponse =
+            await app.inject({
+              method:
+                'POST',
+
+              url:
+                '/api/v1/auth/login',
+
+              payload: {
+                email:
+                  adminEmail,
+
+                password,
+              },
+            });
+
+          assert.equal(
+            loginResponse.statusCode,
+            200
+          );
+
+          const token =
+            loginResponse
+              .json()
+              .token;
+
+          const pullResponse =
+            await app.inject({
+              method:
+                'GET',
+
+              url:
+                `/api/v1/sync/changes?cursor=${baselineCursor}&limit=1`,
+
+              headers: {
+                authorization:
+                  `Bearer ${token}`,
+              },
+            });
+
+          assert.equal(
+            pullResponse.statusCode,
+            200
+          );
+
+          const body =
+            pullResponse.json();
+
+          assert.equal(
+            body.changes.length,
+            0
+          );
+
+          assert.equal(
+            body.nextCursor,
+            unauthorizedChange.id.toString()
+          );
+
+          assert.notEqual(
+            body.nextCursor,
+            baselineCursor
+          );
+        } finally {
+          if (
+            unauthorizedChangeId
+          ) {
+            await prisma.syncChangeLog.deleteMany({
+              where: {
+                id:
+                  unauthorizedChangeId,
+              },
+            });
+          }
+
+          await prisma.customerOrganization.deleteMany({
+            where: {
+              customerId:
+                foreignCustomerId,
+            },
+          });
+
+          await prisma.customer.deleteMany({
+            where: {
+              id:
+                foreignCustomerId,
+            },
+          });
+
+          await prisma.membership.deleteMany({
+            where: {
+              userId:
+                adminId,
+            },
+          });
+
+          await prisma.user.deleteMany({
+            where: {
+              id:
+                adminId,
+            },
+          });
+
+          await prisma.organization.deleteMany({
+            where: {
+              id: {
+                in: [
+                  organizationAId,
+                  organizationBId,
+                ],
+              },
+            },
+          });
+
+          if (app) {
+            await app.close();
+          }
+
+          if (oldJwtSecret) {
+            process.env.JWT_SECRET =
+              oldJwtSecret;
+          } else {
+            delete process
+              .env
+              .JWT_SECRET;
+          }
+        }
       }
     );
   }

@@ -28,9 +28,14 @@ class SqliteDatabase {
     final dbPath = await _getDbPath();
     return await openDatabase(
       dbPath,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async => await _createTables(db),
-      onUpgrade: (db, oldVersion, newVersion) async => await _createTables(db),
+      onUpgrade: (db, oldVersion, newVersion) async {
+        await _createTables(db);
+        if (oldVersion < 4) {
+          await _migrateV3ToV4(db);
+        }
+      },
       onOpen: (db) async => await _createTables(db),
     );
   }
@@ -89,7 +94,10 @@ class SqliteDatabase {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS equipments (
         id TEXT PRIMARY KEY,
-        customer_id TEXT NOT NULL,
+        customer_id TEXT,
+        organization_id TEXT,
+        owner_type TEXT NOT NULL DEFAULT 'CUSTOMER',
+        organization_purpose TEXT,
         type TEXT NOT NULL,
         brand TEXT NOT NULL,
         model TEXT NOT NULL,
@@ -158,5 +166,26 @@ class SqliteDatabase {
         value TEXT NOT NULL
       )
     ''');
+  }
+
+  /// Migration v3 → v4: adiciona colunas de ownership a equipments.
+  /// Usa ALTER TABLE ADD COLUMN para preservar dados existentes.
+  static Future<void> _migrateV3ToV4(Database db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(equipments)');
+    final existing = cols.map((c) => c['name'] as String).toSet();
+
+    if (!existing.contains('organization_id')) {
+      await db.execute('ALTER TABLE equipments ADD COLUMN organization_id TEXT');
+    }
+    if (!existing.contains('owner_type')) {
+      await db.execute(
+        "ALTER TABLE equipments ADD COLUMN owner_type TEXT NOT NULL DEFAULT 'CUSTOMER'",
+      );
+    }
+    if (!existing.contains('organization_purpose')) {
+      await db.execute(
+        'ALTER TABLE equipments ADD COLUMN organization_purpose TEXT',
+      );
+    }
   }
 }
