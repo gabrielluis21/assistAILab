@@ -1,21 +1,15 @@
 import 'dart:convert';
 import 'dart:math';
-import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
+import '../network/api_client.dart';
 import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
 
 class SyncEngine {
-  final String apiBaseUrl;
-  final String? authToken;
+  final ApiClient apiClient;
   final OutboxDao _outboxDao = OutboxDao();
 
-  SyncEngine({required this.apiBaseUrl, this.authToken});
-
-  Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        if (authToken != null) 'Authorization': 'Bearer $authToken',
-      };
+  SyncEngine({required this.apiClient});
 
   Future<String?> getLocalCursor() async {
     final db = await SqliteDatabase.instance;
@@ -49,7 +43,6 @@ class SyncEngine {
     final pendingEntries = await _outboxDao.getPendingEntries(limit: 20);
     if (pendingEntries.isEmpty) return;
 
-    final url = Uri.parse('$apiBaseUrl/api/v1/sync/push');
     final payload = {
       'entries': pendingEntries.map((e) => e.toMap()).toList(),
     };
@@ -59,9 +52,10 @@ class SyncEngine {
     }
 
     try {
-      final response = await http
-          .post(url, headers: _headers, body: jsonEncode(payload))
-          .timeout(const Duration(seconds: 15));
+      final response = await apiClient.post(
+        '/sync/push',
+        body: payload,
+      ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
@@ -124,9 +118,8 @@ class SyncEngine {
 
   Future<void> pullIncrementalChanges() async {
     final cursor = await getLocalCursor();
-    final url = Uri.parse('$apiBaseUrl/api/v1/sync/changes?cursor=${cursor ?? ''}&limit=50');
-
-    final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 15));
+    final response = await apiClient.get('/sync/changes?cursor=${cursor ?? ''}&limit=50')
+        .timeout(const Duration(seconds: 15));
 
     if (response.statusCode == 200) {
       final body = jsonDecode(response.body) as Map<String, dynamic>;

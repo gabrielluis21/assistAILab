@@ -1,14 +1,14 @@
 import 'dart:convert';
 import 'dart:math';
-import 'package:http/http.dart' as http;
 import '../database/outbox_dao.dart';
+import '../network/api_client.dart';
 
 class OutboxProcessor {
   final OutboxDao outboxDao;
-  final String apiBaseUrl;
+  final ApiClient apiClient;
   bool _isProcessing = false;
 
-  OutboxProcessor({required this.outboxDao, required this.apiBaseUrl});
+  OutboxProcessor({required this.outboxDao, required this.apiClient});
 
   Future<void> processOutbox() async {
     if (_isProcessing) return;
@@ -25,11 +25,9 @@ class OutboxProcessor {
         'entries': pendingEntries.map((e) => e.toMap()).toList(),
       };
 
-      final url = Uri.parse('$apiBaseUrl/api/v1/sync/push');
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
+      final response = await apiClient.post(
+        '/sync/push',
+        body: payload,
       ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {

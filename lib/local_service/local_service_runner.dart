@@ -3,6 +3,7 @@ import 'dart:io';
 import '../core/database/outbox_dao.dart';
 import '../core/sync/sync_engine.dart';
 import '../core/sync/outbox_processor.dart';
+import '../core/network/api_client.dart';
 
 class LocalServiceRunner {
   final int port;
@@ -11,11 +12,13 @@ class LocalServiceRunner {
   late final OutboxDao _outboxDao;
   late final SyncEngine _syncEngine;
   late final OutboxProcessor _outboxProcessor;
+  late final ApiClient _apiClient;
 
   LocalServiceRunner({this.port = 8080, this.remoteApiUrl = 'http://localhost:3000'}) {
     _outboxDao = OutboxDao();
-    _syncEngine = SyncEngine(apiBaseUrl: remoteApiUrl);
-    _outboxProcessor = OutboxProcessor(outboxDao: _outboxDao, apiBaseUrl: remoteApiUrl);
+    _apiClient = ApiClient(baseUrl: remoteApiUrl);
+    _syncEngine = SyncEngine(apiClient: _apiClient);
+    _outboxProcessor = OutboxProcessor(outboxDao: _outboxDao, apiClient: _apiClient);
   }
 
   Future<void> start() async {

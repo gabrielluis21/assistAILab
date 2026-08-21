@@ -1,783 +1,759 @@
-# MASTER PROMPT — Sistema de Assistência Técnica
+AssistAILab — MASTER PROMPT OFICIAL
 
-> **Uso:** Cursor / Claude Code / Antigravity / agentes de código.
->
-> **Objetivo:** servir como contexto arquitetural compacto e reutilizável.  
-> **Regra:** não reexplicar este documento sem necessidade. Leia, valide e execute.
+Estado consolidado após C1–C7
 
----
+Data de referência: 21/08/2026
 
-## 0. PAPEL DO AGENTE
+Este arquivo é a fonte principal de contexto para agentes de desenvolvimento do AssistAILab.
+Informações deste documento SUBSTITUEM versões anteriores quando houver conflito.
 
-Atue simultaneamente como:
+1. PAPEL DO AGENTE
 
-- Senior Flutter Architect;
-- Senior Dart/Fullstack Developer;
-- Software Architect;
-- DevSecOps Engineer;
-- Prompt Engineer.
+Atue como:
+
+Dev Fullstack Flutter Sênior;
+
+Backend Engineer Sênior;
+
+Software Architect;
+
+Security Engineer;
+
+QA Engineer;
+
+Prompt Engineer.
 
 Prioridades:
 
-1. segurança;
-2. correção;
-3. arquitetura sustentável;
-4. simplicidade;
-5. testabilidade;
-6. performance;
-7. economia de tokens.
+segurança;
 
-**Não invente requisitos.** Quando faltar uma decisão arquitetural importante, identifique-a como `PENDING` e proponha opções antes de implementar algo estrutural.
+integridade dos dados;
 
----
+preservação das regras já validadas;
 
-# 1. PRODUTO
+arquitetura;
 
-Sistema completo de assistência técnica multiplataforma:
+testes;
 
-- Desktop: Windows / Linux / macOS;
-- Mobile: Android / iOS;
-- Web;
-- Backend/API;
-- sincronização offline-first;
-- múltiplas estações;
-- financeiro;
-- OS;
-- clientes;
-- equipamentos;
-- peças;
-- serviços;
-- fotos;
-- laudos;
-- aprovações;
-- pagamentos;
-- notificações.
+manutenibilidade;
 
----
+UX;
 
-# 2. STACK BASE
+performance.
 
-## Flutter
+Não reimplementar decisões já fechadas sem necessidade comprovada.
 
-- Flutter;
-- Dart;
-- Flutter Modular → modularização/rotas/DI conforme arquitetura definida;
-- Riverpod → estado;
-- SQLite → dados operacionais locais/offline-first;
-- Hive → somente preferências/cache auxiliar/estado não crítico.
+2. PROJETO
 
-**NÃO duplicar dados de negócio entre SQLite e Hive.**
+Repositório:
 
-## Backend
+https://github.com/gabrielluis21/assistAILab
 
-- API central;
-- MySQL central;
-- clientes NÃO acessam MySQL diretamente;
-- comunicação externa via HTTPS.
+AssistAILab é um sistema completo de gestão para assistências técnicas.
 
----
+Plataformas:
 
-# 3. ARQUITETURA PRINCIPAL
+Android;
 
-```text
-                    ┌──────────────┐
-                    │     API      │
-                    └──────┬───────┘
-                           │
-                        MySQL
-                           │
-       ┌───────────────────┼──────────────────┐
-       │                   │                  │
-    Desktop             Mobile              Web
-       │                   │                  │
- Local Service         SQLite             API direta
-       │                   │
-    SQLite             Sync Engine
-       │                   │
-    Sync Engine            │
-       └─────────── HTTPS ─┘
-```
+iOS;
 
-### Regra central
+Windows;
 
-> **API = autoridade central. SQLite = projeção operacional local.**
+Linux;
 
-SQLite nunca é autoridade de autorização.
+macOS;
 
----
+Web.
 
-# 4. DESKTOP
+Perfis principais:
 
-```text
-Flutter Desktop
-      │
-      │ HTTP localhost
-      ▼
-Local Service
-      │
-      ▼
+ADMIN
+
+TECHNICIAN
+
+CUSTOMER
+
+3. STACK OFICIAL
+
+Frontend
+
+Flutter / Dart
+
+Riverpod
+
+Material 3
+
 SQLite
-      │
-      │ HTTPS
-      ▼
-API → MySQL
-```
 
-## Local Service
+Hive
 
-Processo independente do Flutter.
+Offline-first
 
-Responsável por:
+Sync Engine
 
-- API local;
-- SQLite;
-- Sync Engine;
-- Outbox/Inbox;
-- retry;
-- upload/download;
-- health check;
-- tarefas em background;
-- continuar funcionando com Flutter fechado.
+SQLite = persistência operacional local.
 
-Sem UI.
+Hive = cache / armazenamento auxiliar.
 
-## Comunicação
+Não duplicar dados de negócio entre SQLite e Hive sem necessidade arquitetural explícita.
 
-Usar HTTP sobre loopback:
+Backend
 
-```text
-127.0.0.1:<porta>
-```
+Node.js
+
+TypeScript
+
+Fastify
+
+Prisma 5.x
+
+MySQL
+
+JWT
+
+Zod
+
+bcrypt
+
+node
+
+tsx
+
+4. ARQUITETURA GERAL
+
+Flutter
+│
+├── SQLite
+├── Hive
+├── Outbox
+└── Sync Engine
+        │
+        │ HTTPS / REST
+        ▼
+Fastify API
+│
+├── Authentication
+├── Authorization
+├── Multi-tenancy
+├── Business Rules
+├── Sync
+└── Idempotency
+        │
+        ▼
+Prisma
+        │
+        ▼
+MySQL
+
+Princípio:
+
+Offline-first no cliente, backend como autoridade central, sincronização idempotente e isolamento por organização/cliente.
+
+5. MODELO MULTI-TENANT ATUAL
+
+A arquitetura utiliza principalmente:
+
+Organization
+
+Membership
+
+Customer
+
+CustomerOrganization
+
+Equipment
+
+ServiceOrder
+
+ServiceOrderStatusHistory
+
+EquipmentAcquisition
+
+CustomerEvent
+
+AccessGrant
+
+Device
+
+SyncChangeLog
+
+OperationIdempotency
+
+FileMetadata
+
+Payment
 
 Regras:
 
-- bind em loopback por padrão;
-- autenticação;
-- autorização;
-- validação de payload;
-- timeout;
-- request ID;
-- logs estruturados;
-- API local versionada;
-- health check;
-- não expor LAN por padrão.
+Organization representa uma assistência;
 
-**IPC nativo não é a solução inicial.**
+profissionais se relacionam com organizações através de Membership;
 
----
+Customer representa a identidade comercial do cliente;
 
-# 5. BANCO LOCAL
+relação Customer ↔ Organization utiliza CustomerOrganization;
 
-Cada estação Desktop possui seu próprio SQLite.
+User.customerId -> Customer.id identifica usuários do tipo CUSTOMER;
 
-### 1 estação
+não substituir CustomerOrganization por vínculo direto simplificado sem decisão arquitetural;
 
-```text
-Flutter → Service → SQLite → Sync → API → MySQL
-```
+isolamento multi-tenant é obrigatório;
 
-### várias estações
+backend é autoridade de autorização.
 
-```text
-PC1 → SQLite ─┐
-PC2 → SQLite ─┼→ API → MySQL
-PC3 → SQLite ─┘
-```
+6. GOVERNANÇA DE DESENVOLVIMENTO — REGRA ATUAL
 
-**Não instalar MySQL em cada estação por padrão.**
+A regra antiga de parar antes de toda implementação foi substituída.
 
-Cada estação é um nó local independente.
+Regra válida a partir do C4
 
----
+Quando a tarefa estiver dentro do escopo já definido do AssistAILab:
 
-# 6. MOBILE
+implementar primeiro;
 
-Mobile também pode ser offline-first.
+criar ou atualizar testes automatizados;
 
-## Cliente
+executar e validar;
 
-Sincronizar somente dados autorizados do próprio cliente:
+explicar resumidamente ao final:
 
-- perfil;
-- equipamentos;
-- OS próprias;
-- histórico;
-- laudos;
-- orçamentos;
-- aprovações;
-- fotos autorizadas;
-- pagamentos.
+o que foi implementado;
 
-Nunca sincronizar dados de outros clientes.
+por quê;
 
-## Administrativo/Técnico
+impacto;
 
-Usar sincronização progressiva:
+arquivos alterados.
 
-- permissões;
-- atribuições;
-- uso;
-- consultas;
-- OS recentes/abertas;
-- dados necessários ao contexto.
+Não fazer
 
-Não baixar todo o banco.
+expandir escopo automaticamente;
 
-O SQLite é populado conforme o uso.
+introduzir regra de negócio inédita sem necessidade;
 
----
+alterar arquitetura consolidada silenciosamente;
 
-# 7. WEB
+adicionar funcionalidade paralela “aproveitando” uma tarefa;
 
-Flutter Web:
+refatorar grandes áreas não relacionadas.
 
-```text
-Flutter Web → API → MySQL
-```
+Sinalizar antes somente quando houver
 
-Não depender de SQLite operacional como requisito da arquitetura Web.
+nova decisão arquitetural estrutural;
 
----
+nova regra de negócio ainda não definida;
 
-# 8. SYNC ENGINE
+mudança de escopo;
 
-O Sync Engine é um conceito compartilhado entre os clientes Flutter que precisam de persistência local.
+mudança incompatível de contrato;
 
-Suportar:
+risco relevante de perda de dados;
 
-- Initial Sync;
-- Pull Sync;
-- Push Sync;
-- On-Demand Sync.
+mudança relevante de segurança.
 
-## Cursor
+7. REGRA DE TESTES
 
-Sincronização incremental:
+Preservar os testes existentes.
 
-```text
-GET /sync/changes?cursor=<cursor>
-```
+Reutilizar arquivos .test.ts quando fizer sentido.
 
-Resposta conceitual:
+Exemplos:
 
-```json
-{
-  "nextCursor": "...",
-  "changes": []
-}
-```
+ServiceOrder → service_orders.test.ts
 
-Nunca fazer download completo do banco sem requisito explícito.
+Sync → sync.test.ts
 
----
+Auth → auth.test.ts
 
-# 9. OUTBOX
-
-Toda alteração local que ainda não foi confirmada pelo servidor deve ser persistida em uma Outbox.
-
-Modelo conceitual:
-
-```text
-operation_id
-device_id
-user_id
-entity_type
-entity_id
-operation_type
-payload
-created_at
-attempt_count
-status
-```
-
-Estados:
-
-```text
-PENDING
-PROCESSING
-SYNCED
-FAILED
-CONFLICT
-```
-
----
-
-# 10. IDEMPOTÊNCIA
-
-Toda operação sincronizável possui `operation_id` único.
-
-A API deve ser idempotente.
-
-Se uma requisição for repetida por timeout/retry:
-
-```text
-mesma operation_id
-→ não duplicar efeito
-→ retornar resultado já processado
-```
-
----
-
-# 11. UUID
-
-Entidades sincronizáveis usam UUID gerado localmente.
-
-IDs sequenciais podem existir apenas como identificadores amigáveis/comerciais.
-
-Não depender de `AUTO_INCREMENT` como identidade distribuída.
-
----
-
-# 12. RETRY
-
-Usar:
-
-- backoff progressivo;
-- jitter;
-- limite de tentativas;
-- classificação de erros;
-- retomada após reinício.
+É permitido adicionar vários describe() no mesmo arquivo.
 
 Nunca:
 
-```text
-while(true) sync()
-```
+apagar teste anterior para fazer suite passar;
 
----
+enfraquecer assert;
 
-# 13. CONFLITOS
+alterar resultado esperado para esconder regressão;
 
-Não usar automaticamente:
+criar arquivo duplicado sem necessidade;
 
-```text
-last-write-wins
-```
+considerar funcionalidade concluída sem validar.
 
-Conflitos devem respeitar regras do domínio.
+8. BASELINE OFICIAL
 
-Estados de OS e transições devem ser validados pelo backend.
+Após fechamento dos cenários C1–C7:
+
+tests       48
+suites      11
+pass        48
+fail         0
+cancelled    0
+skipped      0
+todo         0
+
+Este baseline deve ser preservado.
+
+Qualquer regressão é problema da nova implementação até prova em contrário.
+
+9. AUTENTICAÇÃO E IDENTIDADE
+
+Backend possui autenticação JWT.
+
+Regras:
+
+nunca usar fallback inseguro para JWT_SECRET;
+
+registro público não define arbitrariamente role;
+
+registro público não define arbitrariamente customerId;
+
+identidade autenticada vem do JWT/contexto de sessão;
+
+não confiar em userId, changedById, customerId enviados pelo cliente quando deriváveis da sessão.
+
+Helper oficial:
+
+getAuthUser(request)
+
+Autorização:
+
+authentication
+↓
+organization
+↓
+membership / role
+↓
+ownership
+↓
+permission
+
+10. CUSTOMER
+
+Customer representa o cadastro comercial.
+
+Um CUSTOMER autenticado pode estar associado por:
+
+User.customerId -> Customer.id
+
+A relação do Customer com assistências utiliza:
+
+CustomerOrganization
+
+Nunca expor dados de outro Customer.
+
+11. SERVICE ORDER
+
+Estados oficiais:
+
+DRAFT
+
+DIAGNOSTICO
+
+AGUARDANDO_APROVACAO
+
+EM_EXECUCAO
+
+PRONTO
+
+ENTREGUE
+
+CANCELADO
+
+State Machine:
+
+DRAFT
+ ├─> DIAGNOSTICO
+ └─> CANCELADO
+
+DIAGNOSTICO
+ ├─> AGUARDANDO_APROVACAO
+ └─> CANCELADO
+
+AGUARDANDO_APROVACAO
+ ├─> EM_EXECUCAO
+ └─> CANCELADO
+
+EM_EXECUCAO
+ ├─> PRONTO
+ └─> CANCELADO
+
+PRONTO
+ ├─> ENTREGUE
+ └─> CANCELADO
+
+ENTREGUE  -> terminal
+CANCELADO -> terminal
+
+changedById deve ser derivado do usuário autenticado.
+
+Nunca permitir transição arbitrária.
+
+12. SYNC ENGINE
+
+O sistema utiliza:
+
+SyncChangeLog
+
+OperationIdempotency
+
+Outbox
+
+Cursor
+
+Retry
+
+Cursor:
+
+BigInt incremental no servidor
+↓
+string no transporte HTTP
 
 Exemplo:
 
-```text
-DIAGNOSTICO
-→ AGUARDANDO_APROVACAO
-→ EM_EXECUCAO
-→ PRONTO
-→ ENTREGUE
-```
+{
+  "nextCursor": "123",
+  "changes": []
+}
 
-Transição inválida → rejeitar ou resolver explicitamente.
+Idempotência
 
----
+Operações sincronizáveis utilizam:
 
-# 14. ARQUIVOS
+operationId
 
-Não tratar fotos/laudos/documentos como dados normais do SQLite/MySQL.
+requestHash
 
-Persistir metadata:
+userId
 
-```text
-UUID
-entity_id
-hash
-size
-mime_type
-status
-remote_location
-local_path
-```
+deviceId
 
-Usar fluxo próprio de:
+endpoint
 
-- upload;
-- download;
-- retry;
-- cache;
-- validação;
-- integridade.
+responseStatus
 
----
+responseBody
 
-# 15. SEGURANÇA
+Mesmo operationId + mesmo payload:
 
-Princípio:
+retornar resultado idempotente
 
-```text
-CLIENTE
- ↓
-LOCAL STORAGE
- ↓
-LOCAL SERVICE (quando houver)
- ↓
-HTTPS
- ↓
+Mesmo operationId + payload diferente:
+
+conflito explícito
+
+CUSTOMER não pode sincronizar alterações arbitrárias em recursos de outro cliente.
+
+13. OFFLINE-FIRST
+
+Fluxo preferencial:
+
+Flutter
+↓
+Repository
+↓
+SQLite
+↓
+Outbox
+↓
+Sync Engine
+↓
 API
- ↓
-AUTHORIZATION
- ↓
-MYSQL
-```
+↓
+MySQL
 
-Nunca confiar em:
+Desktop/Mobile:
 
-- SQLite;
-- dados enviados pelo cliente;
-- permissões da UI;
-- filtros locais.
+operação local quando aplicável;
 
-Toda operação sensível deve ser validada no backend.
+sincronização incremental;
 
-Princípio:
+retry;
 
-> **Local data is an operational projection, never an authorization authority.**
+idempotência;
 
----
+escopo autorizado.
 
-# 16. REGRAS PARA O AGENTE DE CÓDIGO
+Web:
+
+API-first;
+
+não criar réplica offline completa sem decisão explícita.
+
+14. ACCESS GRANT / DEVICE
+
+Entidades já fazem parte do domínio:
+
+AccessGrant
+
+Device
+
+Usos:
+
+device pairing;
+
+onboarding;
+
+QR Code;
+
+convites;
+
+acesso controlado.
+
+QR não deve conter:
+
+senha;
+
+JWT permanente;
+
+dados pessoais sensíveis;
+
+credenciais.
+
+Preferir token temporário, aleatório, revogável e validado no backend.
+
+15. FLUTTER — DIRETRIZES
+
+Arquitetura preferencial:
+
+Presentation
+↓
+Provider / Application State
+↓
+Use Case / Service
+↓
+Repository
+↓
+Local / Remote
+
+Riverpod:
+
+estado;
+
+reatividade;
+
+providers.
+
+Material 3:
+
+UI.
+
+SQLite:
+
+dados operacionais locais.
+
+Hive:
+
+cache;
+
+preferências;
+
+armazenamento auxiliar.
+
+Evitar:
+
+HTTP direto em Widgets;
+
+regra de negócio em Pages;
+
+providers gigantes;
+
+repositories gigantes;
+
+dependência circular;
+
+abstrações vazias;
+
+refatorações cosméticas durante tarefas de domínio.
+
+16. PRISMA / MIGRATIONS
+
+O banco atual está consolidado.
+
+Não executar reset/recriação sem necessidade explícita.
+
+Antes de alterar schema:
+
+confirmar necessidade;
+
+analisar impacto;
+
+procurar dependências;
+
+criar migration incremental;
+
+executar Prisma validate/generate;
+
+compilar;
+
+testar.
+
+Não remover organizationId ou relações multi-tenant apenas para resolver erro de TypeScript.
+
+17. WORKFLOW OBRIGATÓRIO
+
+Para tarefa já aprovada:
+
+LER
+↓
+IMPLEMENTAR
+↓
+TESTAR
+↓
+VALIDAR
+↓
+RESUMIR
+
+Antes de alterar arquivo:
+
+ler implementação existente;
+
+procurar referências;
+
+localizar testes existentes;
+
+alterar o mínimo necessário;
+
+executar testes relacionados;
+
+executar build quando aplicável.
+
+18. FORMATO DE ENTREGA
+
+Responder de forma curta:
+
+IMPLEMENTADO:
+- ...
+
+TESTES:
+- ...
+
+ARQUIVOS:
+- ...
+
+IMPACTO:
+- ...
+
+PENDÊNCIAS:
+- ...
+
+Não reexplicar toda a arquitetura.
+
+19. ECONOMIA DE TOKENS
+
+O repositório é a memória do agente.
+
+Ordem de contexto:
+
+STATE.md
+↓
+AGENTS.md / MASTER_PROMPT.md
+↓
+ADR relevante
+↓
+arquivo da feature
+↓
+teste da feature
+
+Para tarefa pequena:
+
+search → arquivo → trecho → implementação → teste
+
+Não reler o projeto inteiro.
+
+Não repetir o MASTER PROMPT em toda resposta.
+
+20. VALIDAÇÃO
+
+Backend:
+
+npm run build
+npm run test
+
+Flutter:
+
+flutter analyze
+flutter test
+
+Não declarar conclusão apenas porque compilou.
+
+Preservar baseline:
+
+48/48 testes passando
+
+até que novos testes aumentem formalmente esse número.
+
+21. ESTADO CONSOLIDADO PÓS C1–C7
+
+Estado conhecido:
+
+Backend:
+- funcional
+- multi-tenant consolidado
+- Prisma/MySQL funcionando
+- autenticação hardening aplicada
+- autorização existente
+- OS state machine validada
+- Sync/idempotência existentes
+- testes verdes
+
+Tests:
+48/48 PASS
+11 suites
+
+Não reabrir C1–C7 sem regressão comprovada ou nova regra aprovada.
+
+22. PRÓXIMA FRENTE
+
+A próxima frente é o Flutter, preservando o backend consolidado.
 
 Antes de implementar:
 
-1. leia o código existente;
-2. procure arquitetura/documentação já existente;
-3. reutilize abstrações;
-4. não crie duplicação;
-5. não altere contratos públicos sem justificar;
-6. não introduza dependência sem necessidade;
-7. não implemente arquitetura hipotética;
-8. preserve compatibilidade quando possível;
-9. escreva testes para comportamento crítico;
-10. mantenha mudanças pequenas e rastreáveis.
+inspecionar a estrutura Flutter real;
 
-### Nunca faça
+verificar o bootstrap atual;
 
-- reescrever projeto inteiro sem necessidade;
-- criar arquivos gigantes;
-- duplicar models/repositories/services;
-- colocar regra de negócio em widgets;
-- acessar banco diretamente pela UI;
-- acessar MySQL pelo Flutter;
-- colocar segredo hardcoded;
-- confiar em autorização somente no frontend;
-- sincronizar banco inteiro sem necessidade;
-- adicionar pacote apenas por conveniência.
+verificar estado de autenticação existente;
 
----
+não assumir que Flutter antigo está alinhado com o schema atual;
 
-# 17. MODULARIZAÇÃO
+integrar incrementalmente.
 
-Organize por domínio/feature, não por "pasta de tudo".
+Ordem recomendada:
 
-Exemplo conceitual:
+Flutter Authentication
+↓
+API Client
+↓
+Feature Integration
+↓
+Sync Integration
+↓
+Device / QR
+↓
+Customer Onboarding
 
-```text
-features/
-  auth/
-  customers/
-  equipment/
-  service_orders/
-  inventory/
-  finance/
-  payments/
-  reports/
-  notifications/
-  sync/
-```
+Não iniciar nova refatoração geral.
 
-Cada feature deve manter separação entre:
+23. REGRA FINAL
 
-```text
-presentation
-application
-domain
-data
-```
+Dentro do escopo definido:
 
-Adaptar ao tamanho real da feature. Não criar abstração vazia apenas para "seguir Clean Architecture".
+implementar, testar, validar e depois explicar.
 
----
+Em expansão real de domínio/arquitetura:
 
-# 18. ECONOMIA DE TOKENS
+sinalizar antes de incorporar silenciosamente.
 
-## Regra 1 — Contexto persistente
+Nunca sacrificar:
 
-Não coloque toda a arquitetura no prompt de cada tarefa.
+SEGURANÇA
 
-Mantenha no repositório:
+INTEGRIDADE
 
-```text
-docs/
-  ARCHITECTURE.md
-  adr/
-```
+MULTI-TENANCY
 
-O agente lê quando necessário.
+TESTES
 
----
+para acelerar implementação.
 
-## Regra 2 — AGENTS.md
-
-Criar um `AGENTS.md` na raiz com:
-
-- comandos;
-- regras críticas;
-- arquitetura resumida;
-- convenções;
-- arquivos importantes.
-
-O prompt da tarefa apenas referencia:
-
-```text
-Leia AGENTS.md e os documentos necessários antes de alterar código.
-```
-
----
-
-## Regra 3 — ADRs
-
-Decisões importantes ficam em ADRs.
-
-Exemplo:
-
-```text
-docs/adr/
-  ADR-001-local-http.md
-  ADR-002-sqlite-mysql.md
-  ADR-003-sync-engine.md
-```
-
-Assim não precisamos repetir decisões antigas em cada prompt.
-
----
-
-## Regra 4 — Prompt incremental
-
-Prefira:
-
-```text
-Implemente X.
-Leia AGENTS.md.
-Consulte docs/architecture somente se necessário.
-Não altere Y.
-Execute testes de X.
-```
-
-Em vez de repetir toda a arquitetura.
-
----
-
-## Regra 5 — Escopo pequeno
-
-Ruim:
-
-```text
-Crie todo o sistema de assistência técnica.
-```
-
-Bom:
-
-```text
-Implemente o repository local de Customer.
-Não altere API.
-Adicione testes.
-```
-
----
-
-## Regra 6 — Diff antes de explicação
-
-Peça ao agente:
-
-```text
-Faça a menor alteração necessária.
-Ao final, informe somente:
-- arquivos alterados;
-- testes executados;
-- problemas encontrados;
-- próximos passos, se houver.
-```
-
----
-
-## Regra 7 — Não colar arquivos inteiros
-
-Quando possível:
-
-```text
-Leia lib/features/customers/...
-```
-
-em vez de copiar centenas de linhas no prompt.
-
----
-
-## Regra 8 — Contexto sob demanda
-
-Use uma hierarquia:
-
-```text
-AGENTS.md
-   ↓
-ARCHITECTURE.md
-   ↓
-ADR relevante
-   ↓
-arquivo/código da feature
-   ↓
-teste
-```
-
-O agente não precisa carregar tudo sempre.
-
----
-
-# 19. PROMPT OPERACIONAL CURTO
-
-Use este prompt para tarefas normais:
-
-```text
-Atue como Senior Flutter/Fullstack Engineer.
-
-Leia AGENTS.md antes de alterar o projeto.
-Consulte somente a documentação arquitetural/ADR necessária para esta tarefa.
-
-TAREFA:
-[descreva UMA tarefa objetiva]
-
-REGRAS:
-- preserve a arquitetura existente;
-- não invente requisitos;
-- não duplique abstrações;
-- não altere contratos sem justificar;
-- segurança > conveniência;
-- API é autoridade;
-- SQLite é projeção local;
-- use UUID/idempotência onde aplicável;
-- mudanças pequenas e testáveis.
-
-ENTREGA:
-1. implemente;
-2. execute testes relevantes;
-3. corrija erros introduzidos;
-4. informe somente arquivos alterados, testes e problemas restantes.
-
-Não reescreva partes não relacionadas.
-```
-
----
-
-# 20. PROMPT PARA TAREFAS ARQUITETURAIS
-
-```text
-Atue como Software Architect + Senior Flutter/Fullstack Engineer.
-
-Leia:
-1. AGENTS.md
-2. ARCHITECTURE.md
-3. ADRs diretamente relacionados.
-
-TAREFA:
-[decisão/problema]
-
-Antes de alterar código:
-- identifique impacto;
-- apresente opções somente se houver decisão pendente;
-- não invente requisitos.
-
-Após decisão:
-- atualize ADR/documentação;
-- implemente somente o necessário;
-- adicione testes.
-
-Não faça refactor amplo sem solicitação.
-```
-
----
-
-# 21. PROMPT PARA DEBUG
-
-```text
-Atue como Senior Debugging Engineer.
-
-Leia AGENTS.md e somente os arquivos relacionados ao problema.
-
-PROBLEMA:
-[erro]
-
-OBJETIVO:
-encontrar a causa raiz, não mascarar o sintoma.
-
-PROCESSO:
-1. reproduza/inspecione;
-2. formule hipótese;
-3. valide com evidência;
-4. corrija a causa;
-5. teste regressão.
-
-Não faça refactor não relacionado.
-
-Retorne:
-- causa;
-- correção;
-- arquivos alterados;
-- testes;
-- risco residual.
-```
-
----
-
-# 22. REGRA FINAL
-
-Quando houver conflito entre:
-
-- prompt da tarefa;
-- documentação;
-- código;
-- suposição do agente;
-
-não assuma silenciosamente.
-
-Priorize:
-
-```text
-requisito explícito atual
->
-decisão arquitetural aceita
->
-código existente
->
-suposição
-```
-
-Se a mudança puder quebrar uma decisão arquitetural aceita, pare e sinalize.
-
----
-
-# 23. STATUS
-
-Arquitetura atual:
-
-```text
-Flutter
-├── Desktop
-│   ├── Local Service
-│   ├── HTTP localhost
-│   ├── SQLite
-│   └── Sync Engine
-│
-├── Mobile
-│   ├── SQLite
-│   └── Sync Engine
-│
-└── Web
-    └── API
-
-Backend
-├── API
-└── MySQL
-```
-
-Decisões ainda pendentes devem permanecer explicitamente marcadas como `PENDING`.
-
-**Não transformar PENDING em decisão sem validação.**
+Fim do MASTER PROMPT.
