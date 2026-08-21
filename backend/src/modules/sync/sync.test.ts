@@ -16,6 +16,7 @@ import type {
 } from 'fastify';
 
 import {
+  CustomerOrganizationStatus,
   EquipmentOwnerType,
   OperationType,
   Role,
@@ -41,11 +42,16 @@ import {
  */
 describe(
   'Sync Engine & Idempotency Hardening',
+  {
+    concurrency: false,
+  },
   () => {
     /**
-     * Teste original.
+     * ========================================================
+     * T012
+     * ========================================================
      *
-     * NÃO remover.
+     * Teste original.
      */
     test(
       'computePayloadHash generates deterministic SHA-256 string',
@@ -108,21 +114,20 @@ describe(
 
     /**
      * ========================================================
-     * C03.07 — OFFLINE-FIRST
+     * T030 / C03.07
      * ========================================================
      *
-     * API REST:
+     * Offline-first precisa respeitar a mesma
+     * identidade global usada pela API REST.
      *
-     * CUSTOMER vê todas as próprias OS.
+     * CUSTOMER João possui:
      *
-     * Portanto o Sync Pull precisa obedecer
-     * exatamente à mesma regra.
+     * Organization A → OS A
+     * Organization B → OS B
      *
-     * Customer
-     *   ├── OS Organization A
-     *   └── OS Organization B
+     * Pull deve devolver ambas.
      *
-     * ambas devem ser sincronizadas.
+     * OS de Maria não pode ser devolvida.
      */
     test(
       'CUSTOMER Sync Pull returns own Service Orders from multiple Organizations and excludes other Customers',
@@ -138,7 +143,7 @@ describe(
 
         /**
          * ====================================================
-         * FIXTURE IDS
+         * IDS
          * ====================================================
          */
 
@@ -195,24 +200,26 @@ describe(
             );
 
           /**
-           * Precisamos do cursor existente
-           * antes de gerar nossos logs.
+           * ==================================================
+           * CURSOR BASE
+           * ==================================================
            *
-           * Isso evita depender de um banco
-           * completamente vazio.
+           * Não assumimos banco vazio.
            */
           const latestChange =
-            await prisma.syncChangeLog.findFirst({
-              orderBy: {
-                id:
-                  'desc',
-              },
+            await prisma
+              .syncChangeLog
+              .findFirst({
+                orderBy: {
+                  id:
+                    'desc',
+                },
 
-              select: {
-                id:
-                  true,
-              },
-            });
+                select: {
+                  id:
+                    true,
+                },
+              });
 
           const baselineCursor =
             latestChange
@@ -221,9 +228,9 @@ describe(
             '0';
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * ORGANIZATIONS
-           * --------------------------------------------------
+           * ==================================================
            */
 
           await prisma.organization.create({
@@ -247,9 +254,9 @@ describe(
           });
 
           /**
-           * --------------------------------------------------
-           * CUSTOMER
-           * --------------------------------------------------
+           * ==================================================
+           * CUSTOMER GLOBAL
+           * ==================================================
            */
 
           await prisma.customer.create({
@@ -265,6 +272,11 @@ describe(
             },
           });
 
+          /**
+           * User CUSTOMER ACTIVE.
+           *
+           * Nenhuma Membership.
+           */
           await prisma.user.create({
             data: {
               id:
@@ -289,11 +301,9 @@ describe(
           });
 
           /**
-           * Nenhuma Membership é criada.
-           *
-           * Customer é global.
+           * Customer possui relacionamento
+           * com duas assistências.
            */
-
           await prisma.customerOrganization.create({
             data: {
               customerId,
@@ -302,7 +312,7 @@ describe(
                 organizationAId,
 
               status:
-                'ACTIVE',
+                CustomerOrganizationStatus.ACTIVE,
             },
           });
 
@@ -314,14 +324,14 @@ describe(
                 organizationBId,
 
               status:
-                'ACTIVE',
+                CustomerOrganizationStatus.ACTIVE,
             },
           });
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * OUTRO CUSTOMER
-           * --------------------------------------------------
+           * ==================================================
            */
 
           await prisma.customer.create({
@@ -346,14 +356,14 @@ describe(
                 organizationAId,
 
               status:
-                'ACTIVE',
+                CustomerOrganizationStatus.ACTIVE,
             },
           });
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * EQUIPMENTS
-           * --------------------------------------------------
+           * ==================================================
            */
 
           await prisma.equipment.create({
@@ -439,9 +449,9 @@ describe(
           });
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * SERVICE ORDERS
-           * --------------------------------------------------
+           * ==================================================
            */
 
           await prisma.serviceOrder.create({
@@ -500,12 +510,15 @@ describe(
           });
 
           /**
-           * --------------------------------------------------
-           * CHANGE LOG
-           * --------------------------------------------------
+           * ==================================================
+           * SYNC CHANGE LOG
+           * ==================================================
            *
-           * Simulamos mudanças que o dispositivo
-           * precisa receber via Pull.
+           * Cria três mudanças:
+           *
+           * João/A
+           * João/B
+           * Maria/A
            */
 
           await prisma.syncChangeLog.create({
@@ -588,9 +601,9 @@ describe(
           });
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * APP
-           * --------------------------------------------------
+           * ==================================================
            */
 
           app =
@@ -599,8 +612,13 @@ describe(
           await app.ready();
 
           /**
-           * CUSTOMER autentica sem Membership.
+           * ==================================================
+           * LOGIN
+           * ==================================================
+           *
+           * Deve funcionar sem Membership.
            */
+
           const loginResponse =
             await app.inject({
               method:
@@ -623,15 +641,33 @@ describe(
             200
           );
 
+          const loginBody =
+            loginResponse.json();
+
+          assert.equal(
+            loginBody.user.role,
+            Role.CUSTOMER
+          );
+
+          assert.equal(
+            loginBody.user.customerId,
+            customerId
+          );
+
+          assert.equal(
+            loginBody.user.organizationId,
+            null
+          );
+
           const {
             token,
           } =
-            loginResponse.json();
+            loginBody;
 
           /**
-           * --------------------------------------------------
+           * ==================================================
            * PULL
-           * --------------------------------------------------
+           * ==================================================
            */
 
           const pullResponse =
@@ -662,8 +698,12 @@ describe(
             )
           );
 
+          /**
+           * Apenas os IDs devolvidos
+           * pelo Sync.
+           */
           const receivedIds =
-            new Set(
+            new Set<string>(
               body.changes.map(
                 (
                   change:
@@ -677,7 +717,7 @@ describe(
             );
 
           /**
-           * Próprias OS de A e B.
+           * OS própria na Organization A.
            */
           assert.equal(
             receivedIds.has(
@@ -686,6 +726,12 @@ describe(
             true
           );
 
+          /**
+           * OS própria na Organization B.
+           *
+           * Este assert é o principal
+           * do C03.07 offline-first.
+           */
           assert.equal(
             receivedIds.has(
               orderBId
@@ -694,8 +740,7 @@ describe(
           );
 
           /**
-           * OS de outro Customer
-           * não é sincronizada.
+           * OS da Maria nunca pode aparecer.
            */
           assert.equal(
             receivedIds.has(
@@ -705,11 +750,9 @@ describe(
           );
 
           /**
-           * Confirma também que os dois
-           * registros recebidos realmente
-           * representam Organizations distintas.
+           * Confirma que as mudanças recebidas
+           * são efetivamente de duas Organizations.
            */
-
           const ownOrderChanges =
             body.changes.filter(
               (
@@ -725,20 +768,25 @@ describe(
                 orderBId
             );
 
+          assert.equal(
+            ownOrderChanges.length,
+            2
+          );
+
           const organizationIds =
-            new Set(
+            new Set<string>(
               ownOrderChanges.map(
                 (
                   change:
                     {
-                      data:
-                      {
+                      data: {
                         organizationId:
                         string;
                       };
                     }
                 ) =>
-                  change.data
+                  change
+                    .data
                     .organizationId
               )
             );
@@ -800,8 +848,8 @@ describe(
           });
 
           /**
-           * User antes de Customer,
-           * devido à relação customerId.
+           * User precisa sair antes
+           * do Customer.
            */
           await prisma.user.deleteMany({
             where: {

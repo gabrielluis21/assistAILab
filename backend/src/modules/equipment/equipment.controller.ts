@@ -38,7 +38,10 @@ export async function listEquipmentsHandler(
     );
 
   /**
-   * Customer vê seus próprios equipamentos.
+   * CUSTOMER vê seus próprios equipamentos.
+   *
+   * CUSTOMER é uma identidade global e não depende
+   * de organizationId no JWT.
    */
   if (
     authUser.role ===
@@ -66,11 +69,13 @@ export async function listEquipmentsHandler(
   /**
    * ADMIN / TECH:
    *
-   * somente Equipment:
-   *
-   * - da própria Organization;
-   * - ou usado em OS da Organization.
+   * Contexto de Organization é obrigatório.
    */
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+
   const {
     customerId,
   } =
@@ -81,7 +86,7 @@ export async function listEquipmentsHandler(
   const data =
     await svc
       .listForOrganization(
-        authUser.organizationId,
+        organizationId,
         customerId
       );
 
@@ -142,11 +147,16 @@ export async function getEquipmentHandler(
   /**
    * ADMIN / TECH.
    */
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+
   const equipment =
     await svc
       .findByIdForOrganization(
         id,
-        authUser.organizationId
+        organizationId
       );
 
   return reply.send(
@@ -198,6 +208,11 @@ export async function updateEquipmentHandler(
       req
     );
 
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+
   const body =
     updateEquipmentSchema.parse(
       req.body
@@ -207,7 +222,7 @@ export async function updateEquipmentHandler(
     await svc
       .updateForOrganization(
         id,
-        authUser.organizationId,
+        organizationId,
         body
       );
 
@@ -237,10 +252,15 @@ export async function deleteEquipmentHandler(
       req
     );
 
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+
   await svc
     .deleteForOrganization(
       id,
-      authUser.organizationId
+      organizationId
     );
 
   return reply

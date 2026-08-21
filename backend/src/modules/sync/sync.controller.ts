@@ -1994,11 +1994,14 @@ export async function pullSyncHandler(
       : {};
 
   const organizationId =
-    await getAuthenticatedOrganizationId(
-      authUser.sub,
-      authUser.role,
-      authUser.customerId
-    );
+    authUser.role ===
+      'CUSTOMER'
+      ? null
+      : await getAuthenticatedOrganizationId(
+        authUser.sub,
+        authUser.role,
+        authUser.customerId
+      );
 
   let authorizedEntityIds:
     Set<string>;
@@ -2052,42 +2055,37 @@ export async function pullSyncHandler(
         }),
 
         /**
-         * Somente OS do Customer
-         * na Organization ativa.
+         * CUSTOMER global:
+         *
+         * todas as próprias OS,
+         * independentemente da Organization.
          */
         prisma.serviceOrder.findMany({
           where: {
             customerId,
-            organizationId,
           },
 
           select: {
-            id:
-              true,
+            id: true,
           },
         }),
 
         /**
-         * Pagamentos do Customer,
-         * mas somente das OS pertencentes
-         * à Organization ativa.
+         * CUSTOMER global:
+         *
+         * todos os próprios pagamentos,
+         * independentemente da Organization da OS.
          */
         prisma.payment.findMany({
           where: {
             customerId,
-
-            serviceOrder: {
-              organizationId,
-            },
           },
 
           select: {
-            id:
-              true,
+            id: true,
           },
         }),
       ]);
-
     const serviceOrderIds =
       serviceOrders.map(
         (order) =>
@@ -2139,6 +2137,19 @@ export async function pullSyncHandler(
    * ADMIN / TECHNICIAN
    */
   else {
+    /**
+     * ADMIN / TECHNICIAN sempre precisam operar
+     * dentro de um contexto organizacional.
+     *
+     * O narrowing explícito também garante ao TypeScript
+     * que organizationId é string neste ramo.
+     */
+    if (!organizationId) {
+      throw new ForbiddenError(
+        'Organization context is required'
+      );
+    }
+
     const [
       customerRelations,
       equipments,

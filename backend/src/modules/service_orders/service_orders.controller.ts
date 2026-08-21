@@ -481,9 +481,7 @@ export async function createServiceOrderHandler(
 
             serviceOrders: {
               some: {
-                organizationId:
-                  authUser
-                    .organizationId,
+                organizationId,
               },
             },
           },
@@ -606,9 +604,7 @@ export async function createServiceOrderHandler(
               .serviceOrder
               .create({
                 data: {
-                  organizationId:
-                    authUser
-                      .organizationId,
+                  organizationId,
 
                   customerId:
                     body.customerId,
@@ -678,7 +674,10 @@ export async function updateServiceOrderStatusHandler(
     getAuthUser(
       request
     );
-
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
   const changedById =
     authUser.sub;
 
@@ -855,6 +854,10 @@ export async function markServiceOrderNotApprovedHandler(
       request
     );
 
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
   const order =
     await prisma
       .serviceOrder

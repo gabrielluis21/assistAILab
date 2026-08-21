@@ -10,6 +10,14 @@ import assert from 'node:assert/strict';
 import bcrypt from 'bcrypt';
 
 import {
+  randomUUID,
+} from 'node:crypto';
+
+import type {
+  FastifyInstance,
+} from 'fastify';
+
+import {
   AccessGrantStatus,
   AccessGrantType,
   CustomerOrganizationStatus,
@@ -17,14 +25,6 @@ import {
   Role,
   UserStatus,
 } from '@prisma/client';
-
-import {
-  randomUUID,
-} from 'node:crypto';
-
-import type {
-  FastifyInstance,
-} from 'fastify';
 
 import {
   buildApp,
@@ -43,28 +43,22 @@ import {
  * AUTH SECURITY
  * ============================================================
  *
- * Testes de segurança existentes antes da expansão do C1.
+ * T001–T004
  *
- * Eles continuam importantes porque cobrem:
+ * Mantém a cobertura existente de:
  *
  * C01.01
- * - JWT_SECRET obrigatório.
- *
  * C01.02
- * - cadastro público não pode injetar role.
- *
- * C03
- * - validações básicas do cadastro público de Customer.
+ * C03.01
+ * C03.02
+ * C03.03
  */
 describe(
   'Auth Security & Privilege Escalation Hardening',
+  {
+    concurrency: false,
+  },
   () => {
-    /**
-     * C01.01
-     *
-     * O backend não pode iniciar sem
-     * segredo JWT configurado.
-     */
     test(
       'Startup fails when JWT_SECRET is missing',
       () => {
@@ -90,15 +84,6 @@ describe(
       }
     );
 
-    /**
-     * C01.02 / C03
-     *
-     * Dados enviados pelo client representam
-     * intenção, nunca autoridade.
-     *
-     * O cadastro público não pode aceitar
-     * role privilegiada.
-     */
     test(
       'Public registration rejects role injection',
       () => {
@@ -124,13 +109,6 @@ describe(
             invalidPayload
           );
 
-        /**
-         * O Zod remove propriedades
-         * desconhecidas.
-         *
-         * Portanto o payload continua válido,
-         * mas role NÃO pode sobreviver ao parse.
-         */
         assert.equal(
           parseResult.success,
           true
@@ -154,9 +132,6 @@ describe(
       }
     );
 
-    /**
-     * C03
-     */
     test(
       'Public registration requires a password',
       () => {
@@ -183,9 +158,6 @@ describe(
       }
     );
 
-    /**
-     * C03
-     */
     test(
       'Public registration accepts valid customer data',
       () => {
@@ -202,12 +174,6 @@ describe(
           phone:
             '16999999999',
 
-          /**
-           * organizationId propositalmente
-           * enviado para garantir que ele
-           * não quebra o cadastro e também
-           * não é aceito como autoridade.
-           */
           organizationId:
             '550e8400-e29b-41d4-a716-446655440000',
         };
@@ -241,37 +207,7 @@ describe(
  * C1 — ORGANIZATION / AUTHENTICATION / TENANT ISOLATION
  * ============================================================
  *
- * Escopo atualmente implementado:
- *
- * C01.01 JWT_SECRET obrigatório
- *         → Auth Security
- *
- * C01.02 sem privilege escalation
- *         → Auth Security
- *
- * C01.03 Organization existente
- *         → esta suíte
- *
- * C01.04 Membership obrigatória
- *         → esta suíte
- *
- * C01.05 Login + JWT com contexto correto
- *         → esta suíte
- *
- * C01.06 Credenciais inválidas
- *         → esta suíte
- *
- * C01.07 /auth/me
- *         → esta suíte
- *
- * C01.08 isolamento entre Organizations
- *         → esta suíte
- *
- * C01.09 Licenciamento
- *         → ainda não implementado
- *
- * C01.10 Login Flutter Desktop/Web/Mobile
- *         → ainda não implementado
+ * T013–T019
  */
 describe(
   'C1 - Organization Authentication & Tenant Isolation',
@@ -282,26 +218,17 @@ describe(
     let app:
       FastifyInstance;
 
+    let oldJwtSecret:
+      string | undefined;
+
     const runId =
       randomUUID();
-
-    /**
-     * --------------------------------------------------------
-     * ORGANIZATIONS
-     * --------------------------------------------------------
-     */
 
     const organizationAId =
       randomUUID();
 
     const organizationBId =
       randomUUID();
-
-    /**
-     * --------------------------------------------------------
-     * USERS
-     * --------------------------------------------------------
-     */
 
     const adminAId =
       randomUUID();
@@ -312,15 +239,6 @@ describe(
     const userWithoutMembershipId =
       randomUUID();
 
-    /**
-     * --------------------------------------------------------
-     * RECURSO DA ORGANIZATION B
-     * --------------------------------------------------------
-     *
-     * Utilizado para provar isolamento
-     * multi-tenant.
-     */
-
     const customerBId =
       randomUUID();
 
@@ -329,12 +247,6 @@ describe(
 
     const serviceOrderBId =
       randomUUID();
-
-    /**
-     * --------------------------------------------------------
-     * CREDENTIALS
-     * --------------------------------------------------------
-     */
 
     const adminAEmail =
       `c1-admin-a-${runId}@assistailab.test`;
@@ -348,13 +260,6 @@ describe(
     const password =
       'C1-Test@123456';
 
-    let oldJwtSecret:
-      string | undefined;
-
-    /**
-     * Helper utilizado pelos testes
-     * que precisam autenticar um usuário.
-     */
     async function login(
       email: string,
       userPassword = password
@@ -375,17 +280,8 @@ describe(
       });
     }
 
-    /**
-     * ========================================================
-     * SETUP
-     * ========================================================
-     */
     before(
       async () => {
-        /**
-         * Não dependemos do JWT_SECRET
-         * configurado na máquina de desenvolvimento.
-         */
         oldJwtSecret =
           process.env.JWT_SECRET;
 
@@ -398,11 +294,6 @@ describe(
             12
           );
 
-        /**
-         * ----------------------------------------------------
-         * ORGANIZATION A
-         * ----------------------------------------------------
-         */
         await prisma.organization.create({
           data: {
             id:
@@ -413,11 +304,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * ORGANIZATION B
-         * ----------------------------------------------------
-         */
         await prisma.organization.create({
           data: {
             id:
@@ -428,11 +314,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * ADMIN A
-         * ----------------------------------------------------
-         */
         await prisma.user.create({
           data: {
             id:
@@ -454,11 +335,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * ADMIN B
-         * ----------------------------------------------------
-         */
         await prisma.user.create({
           data: {
             id:
@@ -480,16 +356,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * ACTIVE SEM MEMBERSHIP
-         * ----------------------------------------------------
-         *
-         * Este usuário existe propositalmente
-         * para provar que:
-         *
-         * User ACTIVE != acesso organizacional.
-         */
         await prisma.user.create({
           data: {
             id:
@@ -511,11 +377,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * MEMBERSHIP A
-         * ----------------------------------------------------
-         */
         await prisma.membership.create({
           data: {
             userId:
@@ -529,11 +390,6 @@ describe(
           },
         });
 
-        /**
-         * ----------------------------------------------------
-         * MEMBERSHIP B
-         * ----------------------------------------------------
-         */
         await prisma.membership.create({
           data: {
             userId:
@@ -546,15 +402,6 @@ describe(
               Role.ADMIN,
           },
         });
-
-        /**
-         * ====================================================
-         * RECURSO PROTEGIDO DA ORGANIZATION B
-         * ====================================================
-         *
-         * Customer + Equipment + ServiceOrder
-         * pertencentes ao contexto da Organization B.
-         */
 
         await prisma.customer.create({
           data: {
@@ -578,7 +425,7 @@ describe(
               organizationBId,
 
             status:
-              'ACTIVE',
+              CustomerOrganizationStatus.ACTIVE,
           },
         });
 
@@ -629,10 +476,6 @@ describe(
           },
         });
 
-        /**
-         * Inicializa Fastify somente depois
-         * de preparar as fixtures.
-         */
         app =
           buildApp();
 
@@ -640,17 +483,8 @@ describe(
       }
     );
 
-    /**
-     * ========================================================
-     * CLEANUP
-     * ========================================================
-     */
     after(
       async () => {
-        /**
-         * Ordem inversa das dependências.
-         */
-
         await prisma.serviceOrder.deleteMany({
           where: {
             id:
@@ -716,9 +550,6 @@ describe(
 
         await app.close();
 
-        /**
-         * Restaura JWT_SECRET original.
-         */
         if (oldJwtSecret) {
           process.env.JWT_SECRET =
             oldJwtSecret;
@@ -728,19 +559,6 @@ describe(
       }
     );
 
-    /**
-     * ========================================================
-     * C01.03 + C01.04
-     * ========================================================
-     *
-     * Prova:
-     *
-     * User
-     *   ↓
-     * Membership
-     *   ↓
-     * Organization
-     */
     test(
       'ADMIN has a persisted Organization and Membership before authentication',
       async () => {
@@ -795,15 +613,6 @@ describe(
       }
     );
 
-    /**
-     * ========================================================
-     * C01.05
-     * ========================================================
-     *
-     * Login válido precisa gerar um JWT
-     * cujo contexto privilegiado venha
-     * do backend/Membership.
-     */
     test(
       'valid ADMIN login returns JWT with role and organizationId derived from Membership',
       async () => {
@@ -840,21 +649,19 @@ describe(
           organizationAId
         );
 
-        /**
-         * Confere também o JWT efetivamente
-         * assinado pelo Fastify.
-         */
         const payload =
-          (app as any).jwt.verify(
-            body.token
-          ) as {
-            sub: string;
-            role: string;
-            customerId:
-            string | null;
-            organizationId:
-            string;
-          };
+          (app as any)
+            .jwt
+            .verify(
+              body.token
+            ) as {
+              sub: string;
+              role: string;
+              customerId:
+              string | null;
+              organizationId:
+              string | null;
+            };
 
         assert.equal(
           payload.sub,
@@ -878,11 +685,6 @@ describe(
       }
     );
 
-    /**
-     * ========================================================
-     * C01.06
-     * ========================================================
-     */
     test(
       'invalid password is rejected',
       async () => {
@@ -897,26 +699,15 @@ describe(
           401
         );
 
-        const body =
-          response.json();
-
         assert.equal(
-          body.error,
+          response
+            .json()
+            .error,
           'Invalid credentials'
         );
       }
     );
 
-    /**
-     * ========================================================
-     * C01.04
-     * ========================================================
-     *
-     * User ACTIVE não basta.
-     *
-     * É necessário existir Membership
-     * vinculando o usuário à Organization.
-     */
     test(
       'ACTIVE user without Membership cannot authenticate into an organization context',
       async () => {
@@ -930,21 +721,15 @@ describe(
           403
         );
 
-        const body =
-          response.json();
-
         assert.equal(
-          body.error,
+          response
+            .json()
+            .error,
           'User is not associated with an organization'
         );
       }
     );
 
-    /**
-     * ========================================================
-     * C01.07
-     * ========================================================
-     */
     test(
       '/auth/me returns the authenticated user with the correct organizational Membership',
       async () => {
@@ -1011,27 +796,21 @@ describe(
         );
 
         assert.equal(
-          body.user.memberships[0]
+          body.user
+            .memberships[0]
             .organizationId,
           organizationAId
         );
 
         assert.equal(
-          body.user.memberships[0]
+          body.user
+            .memberships[0]
             .role,
           Role.ADMIN
         );
       }
     );
 
-    /**
-     * ========================================================
-     * C01.08
-     * ========================================================
-     *
-     * Organization A não pode enxergar
-     * uma ServiceOrder da Organization B.
-     */
     test(
       'Organization A cannot access a Service Order owned by Organization B',
       async () => {
@@ -1064,32 +843,20 @@ describe(
             },
           });
 
-        /**
-         * O recurso de outro tenant
-         * não deve ser exposto.
-         */
         assert.equal(
           response.statusCode,
           404
         );
 
-        const body =
-          response.json();
-
         assert.equal(
-          body.error,
+          response
+            .json()
+            .error,
           'Service Order not found'
         );
       }
     );
 
-    /**
-     * Contraprova do isolamento.
-     *
-     * Precisamos provar que a OS realmente
-     * existe e que sua Organization legítima
-     * consegue acessá-la.
-     */
     test(
       'Organization B can access its own Service Order',
       async () => {
@@ -1154,6 +921,16 @@ describe(
   }
 );
 
+/**
+ * ============================================================
+ * C3 — CUSTOMER ONBOARDING / LOGIN / GLOBAL HISTORY
+ * ============================================================
+ *
+ * T026 → C03.04
+ * T027 → C03.05
+ * T028 → C03.06
+ * T029 → C03.07
+ */
 describe(
   'C3 - Customer Onboarding, Authentication & Global Service Order History',
   {
@@ -1183,7 +960,7 @@ describe(
 
     /**
      * ========================================================
-     * ADMIN
+     * ADMIN A
      * ========================================================
      */
 
@@ -1198,18 +975,8 @@ describe(
 
     /**
      * ========================================================
-     * CUSTOMER PARA ONBOARDING
+     * CUSTOMER PRÉ-CADASTRADO
      * ========================================================
-     *
-     * Representa o fluxo real:
-     *
-     * assistência pré-cadastra Customer
-     *          ↓
-     * abre OS
-     *          ↓
-     * gera QR/token
-     *          ↓
-     * Customer cria/ativa sua conta
      */
 
     const onboardingCustomerId =
@@ -1231,14 +998,6 @@ describe(
      * ========================================================
      * CUSTOMER GLOBAL
      * ========================================================
-     *
-     * Este Customer já possui conta ACTIVE,
-     * mas NÃO possui Membership.
-     *
-     * Ele possui OS:
-     *
-     * Organization A
-     * Organization B
      */
 
     const globalCustomerId =
@@ -1269,9 +1028,6 @@ describe(
      * ========================================================
      * OUTRO CUSTOMER
      * ========================================================
-     *
-     * Usado para provar que João não consegue
-     * acessar a OS de Maria.
      */
 
     const otherCustomerId =
@@ -1285,12 +1041,6 @@ describe(
 
     const otherOrderId =
       randomUUID();
-
-    /**
-     * ========================================================
-     * HELPERS
-     * ========================================================
-     */
 
     async function login(
       email: string,
@@ -1309,12 +1059,6 @@ describe(
         },
       });
     }
-
-    /**
-     * ========================================================
-     * SETUP
-     * ========================================================
-     */
 
     before(
       async () => {
@@ -1337,9 +1081,7 @@ describe(
           );
 
         /**
-         * ----------------------------------------------------
          * ORGANIZATIONS
-         * ----------------------------------------------------
          */
 
         await prisma.organization.create({
@@ -1363,9 +1105,7 @@ describe(
         });
 
         /**
-         * ----------------------------------------------------
          * ADMIN A
-         * ----------------------------------------------------
          */
 
         await prisma.user.create({
@@ -1405,14 +1145,12 @@ describe(
 
         /**
          * ====================================================
-         * CUSTOMER PRÉ-CADASTRADO PARA ONBOARDING
+         * CUSTOMER PRÉ-CADASTRADO
          * ====================================================
          *
-         * Importante:
+         * Sem User.
          *
-         * NÃO criamos User.
-         *
-         * A conta será criada pelo claim.
+         * A conta será criada pelo onboarding.
          */
 
         await prisma.customer.create({
@@ -1514,9 +1252,7 @@ describe(
         });
 
         /**
-         * Conta global.
-         *
-         * NÃO existe Membership.
+         * Não existe Membership para este User.
          */
         await prisma.user.create({
           data: {
@@ -1543,9 +1279,6 @@ describe(
           },
         });
 
-        /**
-         * João possui relação com A e B.
-         */
         await prisma.customerOrganization.create({
           data: {
             customerId:
@@ -1572,9 +1305,6 @@ describe(
           },
         });
 
-        /**
-         * Equipment atendido por A.
-         */
         await prisma.equipment.create({
           data: {
             id:
@@ -1603,9 +1333,6 @@ describe(
           },
         });
 
-        /**
-         * Equipment atendido por B.
-         */
         await prisma.equipment.create({
           data: {
             id:
@@ -1751,9 +1478,6 @@ describe(
           },
         });
 
-        /**
-         * Fastify depois das fixtures.
-         */
         app =
           buildApp();
 
@@ -1761,38 +1485,24 @@ describe(
       }
     );
 
-    /**
-     * ========================================================
-     * CLEANUP
-     * ========================================================
-     */
-
     after(
       async () => {
         /**
-         * Grants primeiro.
+         * Grant depende de Organization/User.
          */
         await prisma.accessGrant.deleteMany({
           where: {
-            OR: [
-              {
-                targetId:
-                  onboardingOrderId,
-              },
+            organizationId:
+              organizationAId,
 
-              {
-                organizationId:
-                  organizationAId,
-
-                type:
-                  AccessGrantType.CUSTOMER_ONBOARDING,
-              },
-            ],
+            type:
+              AccessGrantType
+                .CUSTOMER_ONBOARDING,
           },
         });
 
         /**
-         * Service Orders.
+         * OS primeiro.
          */
         await prisma.serviceOrder.deleteMany({
           where: {
@@ -1824,7 +1534,7 @@ describe(
         });
 
         /**
-         * Membership do ADMIN.
+         * Membership ADMIN.
          */
         await prisma.membership.deleteMany({
           where: {
@@ -1836,8 +1546,7 @@ describe(
         /**
          * Users.
          *
-         * Inclui o User criado dinamicamente
-         * pelo onboarding.
+         * Inclui o User criado pelo claim.
          */
         await prisma.user.deleteMany({
           where: {
@@ -1860,7 +1569,7 @@ describe(
         });
 
         /**
-         * CustomerOrganization.
+         * Relationships.
          */
         await prisma.customerOrganization.deleteMany({
           where: {
@@ -1916,25 +1625,12 @@ describe(
 
     /**
      * ========================================================
-     * C03.04
+     * T026 / C03.04
      * ========================================================
-     *
-     * Customer pré-cadastrado:
-     *
-     * Customer
-     *   ↓
-     * ServiceOrder
-     *   ↓
-     * CUSTOMER_ONBOARDING
-     *   ↓
-     * User ACTIVE
      */
     test(
       'Customer onboarding claim activates an account for the Customer resolved from the Service Order',
       async () => {
-        /**
-         * Login ADMIN.
-         */
         const adminLogin =
           await login(
             adminAEmail,
@@ -1953,7 +1649,8 @@ describe(
           adminLogin.json();
 
         /**
-         * Gera grant.
+         * A assistência gera o grant
+         * a partir da própria OS.
          */
         const grantResponse =
           await app.inject({
@@ -1992,9 +1689,9 @@ describe(
         );
 
         /**
-         * Banco possui somente hash.
+         * Token bruto não é armazenado.
          */
-        const grant =
+        const persistedGrant =
           await prisma.accessGrant.findFirst({
             where: {
               organizationId:
@@ -2015,26 +1712,28 @@ describe(
           });
 
         assert.ok(
-          grant
+          persistedGrant
         );
 
         assert.equal(
-          grant.status,
+          persistedGrant.status,
           AccessGrantStatus.ACTIVE
         );
 
         assert.equal(
-          grant.tokenHash.length,
+          persistedGrant
+            .tokenHash
+            .length,
           64
         );
 
         assert.notEqual(
-          grant.tokenHash,
+          persistedGrant.tokenHash,
           grantBody.grant.token
         );
 
         /**
-         * Customer executa o claim.
+         * Cliente executa claim.
          */
         const claimResponse =
           await app.inject({
@@ -2082,7 +1781,7 @@ describe(
         );
 
         /**
-         * Confirma persistência.
+         * Confirma User persistido.
          */
         const activatedUser =
           await prisma.user.findUnique({
@@ -2102,18 +1801,17 @@ describe(
         );
 
         assert.equal(
-          activatedUser.status,
-          UserStatus.ACTIVE
-        );
-
-        assert.equal(
           activatedUser.role,
           Role.CUSTOMER
         );
 
+        assert.equal(
+          activatedUser.status,
+          UserStatus.ACTIVE
+        );
+
         /**
-         * CUSTOMER global NÃO precisa
-         * de Membership.
+         * CUSTOMER não precisa de Membership.
          */
         assert.equal(
           activatedUser
@@ -2123,13 +1821,13 @@ describe(
         );
 
         /**
-         * Grant virou USED.
+         * Grant é one-shot.
          */
         const usedGrant =
           await prisma.accessGrant.findUnique({
             where: {
               id:
-                grant.id,
+                persistedGrant.id,
             },
           });
 
@@ -2147,7 +1845,7 @@ describe(
         );
 
         /**
-         * Token é de uso único.
+         * Reutilização é rejeitada.
          */
         const secondClaim =
           await app.inject({
@@ -2172,8 +1870,7 @@ describe(
         );
 
         /**
-         * Conta criada pelo onboarding
-         * já consegue autenticar.
+         * Conta criada já pode logar.
          */
         const customerLogin =
           await login(
@@ -2186,17 +1883,18 @@ describe(
           200
         );
 
+        const customerLoginBody =
+          customerLogin.json();
+
         assert.equal(
-          customerLogin
-            .json()
+          customerLoginBody
             .user
             .customerId,
           onboardingCustomerId
         );
 
         assert.equal(
-          customerLogin
-            .json()
+          customerLoginBody
             .user
             .organizationId,
           null
@@ -2206,16 +1904,8 @@ describe(
 
     /**
      * ========================================================
-     * C03.05
+     * T027 / C03.05
      * ========================================================
-     *
-     * CUSTOMER ACTIVE autentica somente com:
-     *
-     * User
-     *   +
-     * customerId
-     *
-     * Membership NÃO é necessária.
      */
     test(
       'ACTIVE CUSTOMER can authenticate without Membership and receives a global Customer JWT',
@@ -2262,10 +1952,6 @@ describe(
           globalCustomerId
         );
 
-        /**
-         * CUSTOMER não fica preso
-         * a uma Organization.
-         */
         assert.equal(
           body.user.organizationId,
           null
@@ -2306,7 +1992,7 @@ describe(
         );
 
         /**
-         * /auth/me também deve funcionar
+         * /auth/me também precisa funcionar
          * sem Membership.
          */
         const meResponse =
@@ -2350,13 +2036,8 @@ describe(
 
     /**
      * ========================================================
-     * C03.06
+     * T028 / C03.06
      * ========================================================
-     *
-     * João não acessa OS da Maria.
-     *
-     * Retornamos 404 para não revelar
-     * a existência do recurso.
      */
     test(
       'CUSTOMER can access own Service Order but cannot access another Customer Service Order',
@@ -2413,7 +2094,7 @@ describe(
         );
 
         /**
-         * OS da Maria.
+         * OS de outro Customer.
          */
         const foreignResponse =
           await app.inject({
@@ -2445,19 +2126,15 @@ describe(
 
     /**
      * ========================================================
-     * C03.07
+     * T029 / C03.07
      * ========================================================
      *
-     * Customer possui visão global.
-     *
-     * João:
+     * João possui:
      *
      * Organization A → OS A
      * Organization B → OS B
      *
-     * Ambas precisam aparecer.
-     *
-     * OS da Maria não pode aparecer.
+     * As duas precisam aparecer.
      */
     test(
       'CUSTOMER global history returns own Service Orders from multiple Organizations only',
@@ -2507,7 +2184,7 @@ describe(
         );
 
         const orderIds =
-          new Set(
+          new Set<string>(
             body.orders.map(
               (
                 order:
@@ -2518,7 +2195,7 @@ describe(
           );
 
         /**
-         * Próprias OS das duas assistências.
+         * Próprias OS A + B.
          */
         assert.equal(
           orderIds.has(
@@ -2535,7 +2212,7 @@ describe(
         );
 
         /**
-         * OS alheia nunca aparece.
+         * Maria não aparece.
          */
         assert.equal(
           orderIds.has(
@@ -2545,8 +2222,7 @@ describe(
         );
 
         /**
-         * Nenhuma OS retornada pode
-         * pertencer a outro Customer.
+         * Nenhuma OS alheia pode aparecer.
          */
         assert.ok(
           body.orders.every(
@@ -2563,34 +2239,32 @@ describe(
         );
 
         /**
-         * Confirma explicitamente
-         * visão multi-Organization.
+         * Prova explícita de duas Organizations.
          */
+        const ownOrders =
+          body.orders.filter(
+            (
+              order:
+                { id: string }
+            ) =>
+              order.id ===
+              globalOrderAId ||
+              order.id ===
+              globalOrderBId
+          );
+
         const organizationIds =
-          new Set(
-            body.orders
-              .filter(
-                (
-                  order:
-                    {
-                      id: string;
-                    }
-                ) =>
-                  order.id ===
-                  globalOrderAId ||
-                  order.id ===
-                  globalOrderBId
-              )
-              .map(
-                (
-                  order:
-                    {
-                      organizationId:
-                      string;
-                    }
-                ) =>
-                  order.organizationId
-              )
+          new Set<string>(
+            ownOrders.map(
+              (
+                order:
+                  {
+                    organizationId:
+                    string;
+                  }
+              ) =>
+                order.organizationId
+            )
           );
 
         assert.equal(

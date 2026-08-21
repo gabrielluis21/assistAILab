@@ -3,10 +3,13 @@ import {
   FastifyRequest,
 } from 'fastify';
 
-import { z } from 'zod';
+import {
+  z,
+} from 'zod';
 
 import {
   CustomerEventType,
+  EquipmentOwnerType,
 } from '@prisma/client';
 
 import {
@@ -15,6 +18,7 @@ import {
 
 import {
   getAuthUser,
+  requireOrganizationId,
 } from '../../core/middleware/auth.middleware.js';
 
 import {
@@ -31,62 +35,79 @@ import {
   customerProfileService,
 } from '../customer_relationship/customer_profile.service.js';
 
-const customerSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(2)
-    .max(120),
+const customerSchema =
+  z.object({
+    name:
+      z.string()
+        .trim()
+        .min(2)
+        .max(120),
 
-  document: z
-    .string()
-    .trim()
-    .min(1)
-    .max(50)
-    .optional(),
+    document:
+      z.string()
+        .trim()
+        .min(1)
+        .max(50)
+        .optional(),
 
-  email: z
-    .string()
-    .trim()
-    .email()
-    .max(191)
-    .optional(),
+    email:
+      z.string()
+        .trim()
+        .email()
+        .max(191)
+        .optional(),
 
-  phone: z
-    .string()
-    .trim()
-    .min(1)
-    .max(20)
-    .optional(),
+    phone:
+      z.string()
+        .trim()
+        .min(1)
+        .max(20)
+        .optional(),
 
-  address: z
-    .string()
-    .trim()
-    .min(1)
-    .max(500)
-    .optional(),
-});
+    address:
+      z.string()
+        .trim()
+        .min(1)
+        .max(500)
+        .optional(),
+  });
 
 /**
- * Lista somente clientes vinculados
- * à organização autenticada.
+ * ============================================================
+ * LIST CUSTOMERS
+ * ============================================================
  *
- * ADMIN / TECHNICIAN.
+ * ADMIN / TECHNICIAN:
+ *
+ * lista somente Customers vinculados
+ * à Organization autenticada.
  */
 export async function listCustomersHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
   const authUser =
-    getAuthUser(request);
+    getAuthUser(
+      request
+    );
+
+  /**
+   * Esta operação é organizacional.
+   *
+   * CUSTOMER não possui organizationId
+   * no JWT global.
+   */
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
 
   const customers =
     await prisma.customer.findMany({
       where: {
         organizations: {
           some: {
-            organizationId:
-              authUser.organizationId,
+            organizationId,
           },
         },
       },
@@ -94,18 +115,19 @@ export async function listCustomersHandler(
       include: {
         organizations: {
           where: {
-            organizationId:
-              authUser.organizationId,
+            organizationId,
           },
 
           include: {
-            profile: true,
+            profile:
+              true,
           },
         },
       },
 
       orderBy: {
-        name: 'asc',
+        name:
+          'asc',
       },
     });
 
@@ -115,10 +137,15 @@ export async function listCustomersHandler(
 }
 
 /**
- * Cria um cliente e imediatamente
- * cria seu vínculo com a organização.
+ * ============================================================
+ * CREATE CUSTOMER
+ * ============================================================
  *
- * ADMIN / TECHNICIAN.
+ * ADMIN / TECHNICIAN:
+ *
+ * cria a identidade global Customer
+ * e imediatamente cria o vínculo
+ * CustomerOrganization com o tenant atual.
  */
 export async function createCustomerHandler(
   request: FastifyRequest,
@@ -130,7 +157,18 @@ export async function createCustomerHandler(
     );
 
   const authUser =
-    getAuthUser(request);
+    getAuthUser(
+      request
+    );
+
+  /**
+   * Criação feita pela assistência sempre
+   * exige contexto organizacional.
+   */
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
 
   /**
    * Customer.document é globalmente único.
@@ -141,10 +179,11 @@ export async function createCustomerHandler(
    * porque alguém informou o mesmo documento.
    *
    * Esse vínculo entre organizações deverá
-   * futuramente passar pelo onboarding/
-   * AccessGrant do cliente.
+   * passar por onboarding verificado.
    */
-  if (body.document) {
+  if (
+    body.document
+  ) {
     const existingCustomer =
       await prisma.customer.findUnique({
         where: {
@@ -153,19 +192,29 @@ export async function createCustomerHandler(
         },
 
         include: {
-          organizations: true,
+          organizations:
+            true,
         },
       });
 
-    if (existingCustomer) {
+    if (
+      existingCustomer
+    ) {
       const currentRelationship =
-        existingCustomer.organizations.find(
-          (relationship) =>
-            relationship.organizationId ===
-            authUser.organizationId
-        );
+        existingCustomer
+          .organizations
+          .find(
+            (
+              relationship
+            ) =>
+              relationship
+                .organizationId ===
+              organizationId
+          );
 
-      if (currentRelationship) {
+      if (
+        currentRelationship
+      ) {
         throw new ConflictError(
           'Customer already belongs to the current organization'
         );
@@ -179,9 +228,11 @@ export async function createCustomerHandler(
 
   const result =
     await prisma.$transaction(
-      async (tx) => {
+      async (
+        tx
+      ) => {
         /**
-         * 1. Identidade do cliente.
+         * 1. Identidade global do Customer.
          */
         const customer =
           await tx.customer.create({
@@ -207,18 +258,19 @@ export async function createCustomerHandler(
          * 2. Relacionamento com o tenant.
          */
         const relationship =
-          await tx.customerOrganization.create({
-            data: {
-              customerId:
-                customer.id,
+          await tx
+            .customerOrganization
+            .create({
+              data: {
+                customerId:
+                  customer.id,
 
-              organizationId:
-                authUser.organizationId,
+                organizationId,
 
-              status:
-                'ACTIVE',
-            },
-          });
+                status:
+                  'ACTIVE',
+              },
+            });
 
         /**
          * 3. Timeline do Customer Relationship.
@@ -228,8 +280,7 @@ export async function createCustomerHandler(
             customerId:
               customer.id,
 
-            organizationId:
-              authUser.organizationId,
+            organizationId,
 
             type:
               CustomerEventType
@@ -257,16 +308,18 @@ export async function createCustomerHandler(
          * 4. Cria/recalcula o perfil CRM inicial.
          *
          * Cliente novo:
+         *
          * totalServiceOrders = 0
          * riskScore = 0
          * riskLevel = LOW
          */
         const profile =
-          await customerProfileService.recalculate(
-            customer.id,
-            authUser.organizationId,
-            tx
-          );
+          await customerProfileService
+            .recalculate(
+              customer.id,
+              organizationId,
+              tx
+            );
 
         return {
           customer,
@@ -278,44 +331,140 @@ export async function createCustomerHandler(
 
   return reply
     .status(201)
-    .send(result);
+    .send(
+      result
+    );
 }
 
 /**
- * Recupera cliente somente se ele fizer
- * parte da organização autenticada.
+ * ============================================================
+ * GET CUSTOMER
+ * ============================================================
+ *
+ * CUSTOMER:
+ *
+ * acessa somente a própria identidade global.
+ *
+ * ADMIN / TECHNICIAN:
+ *
+ * acessa o Customer somente dentro
+ * da Organization autenticada.
  */
 export async function getCustomerHandler(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const { id } =
+  const {
+    id,
+  } =
     request.params as {
       id: string;
     };
 
   const authUser =
-    getAuthUser(request);
+    getAuthUser(
+      request
+    );
 
   /**
-   * CUSTOMER só pode pedir a própria identidade.
+   * ==========================================================
+   * CUSTOMER GLOBAL
+   * ==========================================================
    */
   if (
-    authUser.role === 'CUSTOMER' &&
-    (
-      !authUser.customerId ||
-      authUser.customerId !== id
-    )
+    authUser.role ===
+    'CUSTOMER'
   ) {
-    throw new ForbiddenError(
-      'Access denied: you can only access your own Customer record'
-    );
+    if (
+      !authUser.customerId ||
+      authUser.customerId !==
+      id
+    ) {
+      throw new ForbiddenError(
+        'Access denied: you can only access your own Customer record'
+      );
+    }
+
+    const customer =
+      await prisma.customer.findUnique({
+        where: {
+          id:
+            authUser.customerId,
+        },
+
+        include: {
+          /**
+           * O Customer pode possuir relações
+           * com mais de uma assistência.
+           *
+           * Cada profile continua pertencendo
+           * ao respectivo CustomerOrganization.
+           */
+          organizations: {
+            include: {
+              organization: {
+                select: {
+                  id:
+                    true,
+
+                  name:
+                    true,
+                },
+              },
+
+              profile:
+                true,
+            },
+          },
+
+          /**
+           * Equipment atualmente pertencente
+           * ao próprio Customer.
+           *
+           * Equipment transferido para Organization
+           * passa a possuir customerId = null.
+           */
+          equipments: {
+            where: {
+              ownerType:
+                EquipmentOwnerType
+                  .CUSTOMER,
+            },
+
+            orderBy: {
+              updatedAt:
+                'desc',
+            },
+          },
+        },
+      });
+
+    if (
+      !customer
+    ) {
+      throw new NotFoundError(
+        'Customer not found'
+      );
+    }
+
+    return reply.send({
+      customer,
+    });
   }
 
   /**
-   * Mesmo ADMIN/TECHNICIAN precisa estar
-   * no tenant ao qual o Customer pertence.
+   * ==========================================================
+   * ADMIN / TECHNICIAN
+   * ==========================================================
+   *
+   * Neste ramo organizationId obrigatoriamente
+   * precisa existir.
    */
+  const organizationId =
+    requireOrganizationId(
+      authUser
+    );
+
   const customer =
     await prisma.customer.findFirst({
       where: {
@@ -323,30 +472,41 @@ export async function getCustomerHandler(
 
         organizations: {
           some: {
-            organizationId:
-              authUser.organizationId,
+            organizationId,
           },
         },
       },
 
       include: {
+        /**
+         * Retorna somente o relacionamento
+         * com a Organization autenticada.
+         */
         organizations: {
           where: {
-            organizationId:
-              authUser.organizationId,
+            organizationId,
           },
 
           include: {
-            profile: true,
+            profile:
+              true,
           },
         },
 
+        /**
+         * A assistência somente enxerga
+         * Equipment CUSTOMER que já tenha
+         * aparecido em uma OS própria.
+         */
         equipments: {
           where: {
+            ownerType:
+              EquipmentOwnerType
+                .CUSTOMER,
+
             serviceOrders: {
               some: {
-                organizationId:
-                  authUser.organizationId,
+                organizationId,
               },
             },
           },
@@ -359,7 +519,9 @@ export async function getCustomerHandler(
       },
     });
 
-  if (!customer) {
+  if (
+    !customer
+  ) {
     throw new NotFoundError(
       'Customer not found in the current organization'
     );
