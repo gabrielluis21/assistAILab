@@ -1,4 +1,4 @@
-import {
+﻿import {
   after,
   before,
   describe,
@@ -18,6 +18,7 @@ import type {
 } from 'fastify';
 
 import {
+  CustomerEventType,
   CustomerOrganizationStatus,
   EquipmentOwnerType,
   Role,
@@ -1853,3 +1854,2309 @@ describe(
     );
   }
 );
+
+/**
+ * ============================================================
+ * C5 — CUSTOMER CANCELS OS + REQUESTS EQUIPMENT RETURN
+ * ============================================================
+ *
+ * Cobertura existente:
+ *
+ * T006 → CANCELADO gera SERVICE_ORDER_CANCELLED
+ * T010 → cancellation é permitida a partir de estados válidos
+ *
+ * Novos:
+ *
+ * T038 → Customer cancela própria OS + solicita devolução
+ * T039 → idempotência + isolamento por customerId
+ * T040 → staff confirma devolução física sem alterar ownership
+ */
+describe(
+  'C5 - Customer Cancellation & Equipment Return',
+  {
+    concurrency:
+      false,
+  },
+  () => {
+    let app:
+      FastifyInstance;
+
+    let oldJwtSecret:
+      string | undefined;
+
+    const runId =
+      randomUUID();
+
+    const organizationId =
+      randomUUID();
+
+    const adminId =
+      randomUUID();
+
+    const adminEmail =
+      `c5-admin-${runId}@assistailab.test`;
+
+    const customerId =
+      randomUUID();
+
+    const customerUserId =
+      randomUUID();
+
+    const customerEmail =
+      `c5-customer-${runId}@assistailab.test`;
+
+    const otherCustomerId =
+      randomUUID();
+
+    const otherCustomerUserId =
+      randomUUID();
+
+    const otherCustomerEmail =
+      `c5-other-${runId}@assistailab.test`;
+
+    const password =
+      'C5-Test@123456';
+
+    const equipmentIds =
+      [
+        randomUUID(),
+        randomUUID(),
+        randomUUID(),
+      ];
+
+    const orderIds =
+      [
+        randomUUID(),
+        randomUUID(),
+        randomUUID(),
+      ];
+
+    let adminToken:
+      string;
+
+    let customerToken:
+      string;
+
+    let otherCustomerToken:
+      string;
+
+    async function login(
+      email:
+        string
+    ) {
+      return app.inject({
+        method:
+          'POST',
+
+        url:
+          '/api/v1/auth/login',
+
+        payload: {
+          email,
+          password,
+        },
+      });
+    }
+
+    before(
+      async () => {
+        oldJwtSecret =
+          process.env.JWT_SECRET;
+
+        process.env.JWT_SECRET =
+          'c5-integration-test-secret-2026';
+
+        const passwordHash =
+          await bcrypt.hash(
+            password,
+            12
+          );
+
+        await prisma.organization.create({
+          data: {
+            id:
+              organizationId,
+
+            name:
+              `C5 Organization ${runId}`,
+          },
+        });
+
+        await prisma.customer.createMany({
+          data: [
+            {
+              id:
+                customerId,
+
+              name:
+                'C5 Customer',
+
+              email:
+                customerEmail,
+            },
+
+            {
+              id:
+                otherCustomerId,
+
+              name:
+                'C5 Other Customer',
+
+              email:
+                otherCustomerEmail,
+            },
+          ],
+        });
+
+        await prisma.user.createMany({
+          data: [
+            {
+              id:
+                adminId,
+
+              name:
+                'C5 Admin',
+
+              email:
+                adminEmail,
+
+              passwordHash,
+
+              role:
+                Role.ADMIN,
+
+              status:
+                UserStatus.ACTIVE,
+            },
+
+            {
+              id:
+                customerUserId,
+
+              name:
+                'C5 Customer',
+
+              email:
+                customerEmail,
+
+              passwordHash,
+
+              role:
+                Role.CUSTOMER,
+
+              status:
+                UserStatus.ACTIVE,
+
+              customerId,
+            },
+
+            {
+              id:
+                otherCustomerUserId,
+
+              name:
+                'C5 Other Customer',
+
+              email:
+                otherCustomerEmail,
+
+              passwordHash,
+
+              role:
+                Role.CUSTOMER,
+
+              status:
+                UserStatus.ACTIVE,
+
+              customerId:
+                otherCustomerId,
+            },
+          ],
+        });
+
+        await prisma.membership.create({
+          data: {
+            userId:
+              adminId,
+
+            organizationId,
+
+            role:
+              Role.ADMIN,
+          },
+        });
+
+        await prisma.customerOrganization.createMany({
+          data: [
+            {
+              customerId,
+
+              organizationId,
+
+              status:
+                CustomerOrganizationStatus.ACTIVE,
+            },
+
+            {
+              customerId:
+                otherCustomerId,
+
+              organizationId,
+
+              status:
+                CustomerOrganizationStatus.ACTIVE,
+            },
+          ],
+        });
+
+        for (
+          let index =
+            0;
+          index <
+          orderIds.length;
+          index +=
+            1
+        ) {
+          await prisma.equipment.create({
+            data: {
+              id:
+                equipmentIds[
+                  index
+                ],
+
+              customerId,
+
+              organizationId:
+                null,
+
+              ownerType:
+                EquipmentOwnerType.CUSTOMER,
+
+              organizationPurpose:
+                null,
+
+              type:
+                'NOTEBOOK',
+
+              brand:
+                'C5 Brand',
+
+              model:
+                `C5 Equipment ${index}`,
+            },
+          });
+
+          await prisma.serviceOrder.create({
+            data: {
+              id:
+                orderIds[
+                  index
+                ],
+
+              organizationId,
+
+              customerId,
+
+              equipmentId:
+                equipmentIds[
+                  index
+                ],
+
+              status:
+                ServiceOrderStatus.DIAGNOSTICO,
+
+              problemDescription:
+                `C5 cancellation order ${index}`,
+            },
+          });
+        }
+
+        app =
+          buildApp();
+
+        await app.ready();
+
+        const adminLogin =
+          await login(
+            adminEmail
+          );
+
+        const customerLogin =
+          await login(
+            customerEmail
+          );
+
+        const otherLogin =
+          await login(
+            otherCustomerEmail
+          );
+
+        assert.equal(
+          adminLogin.statusCode,
+          200
+        );
+
+        assert.equal(
+          customerLogin.statusCode,
+          200
+        );
+
+        assert.equal(
+          otherLogin.statusCode,
+          200
+        );
+
+        adminToken =
+          adminLogin.json().token;
+
+        customerToken =
+          customerLogin.json().token;
+
+        otherCustomerToken =
+          otherLogin.json().token;
+      }
+    );
+
+    after(
+      async () => {
+        await prisma.customerEvent.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrderStatusHistory.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrder.deleteMany({
+          where: {
+            id: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.equipment.deleteMany({
+          where: {
+            id: {
+              in:
+                equipmentIds,
+            },
+          },
+        });
+
+        await prisma.membership.deleteMany({
+          where: {
+            userId:
+              adminId,
+          },
+        });
+
+        await prisma.user.deleteMany({
+          where: {
+            id: {
+              in: [
+                adminId,
+                customerUserId,
+                otherCustomerUserId,
+              ],
+            },
+          },
+        });
+
+        await prisma.customerOrganization.deleteMany({
+          where: {
+            customerId: {
+              in: [
+                customerId,
+                otherCustomerId,
+              ],
+            },
+          },
+        });
+
+        await prisma.customer.deleteMany({
+          where: {
+            id: {
+              in: [
+                customerId,
+                otherCustomerId,
+              ],
+            },
+          },
+        });
+
+        await prisma.organization.delete({
+          where: {
+            id:
+              organizationId,
+          },
+        });
+
+        await app.close();
+
+        if (
+          oldJwtSecret
+        ) {
+          process.env.JWT_SECRET =
+            oldJwtSecret;
+        } else {
+          delete process
+            .env
+            .JWT_SECRET;
+        }
+      }
+    );
+
+    /**
+     * T038
+     */
+    test(
+      'CUSTOMER cancels own Service Order and explicitly requests Equipment return',
+      async () => {
+        const response =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[0]}/customer-cancel-return`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              reason:
+                'Não desejo prosseguir com o atendimento',
+            },
+          });
+
+        assert.equal(
+          response.statusCode,
+          200
+        );
+
+        const body =
+          response.json();
+
+        assert.equal(
+          body.order.status,
+          ServiceOrderStatus.CANCELADO
+        );
+
+        assert.equal(
+          body.returnRequested,
+          true
+        );
+
+        assert.equal(
+          body.statusChanged,
+          true
+        );
+
+        const cancellationEvents =
+          await prisma.customerEvent.findMany({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_CANCELLED,
+            },
+          });
+
+        assert.equal(
+          cancellationEvents.length,
+          1
+        );
+
+        const returnRequests =
+          await prisma.customerEvent.findMany({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+
+              type:
+                CustomerEventType.OTHER,
+
+              title:
+                'Devolução solicitada',
+            },
+          });
+
+        assert.equal(
+          returnRequests.length,
+          1
+        );
+
+        const history =
+          await prisma.serviceOrderStatusHistory.findMany({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+            },
+          });
+
+        assert.equal(
+          history.length,
+          1
+        );
+
+        assert.equal(
+          history[0].previousStatus,
+          ServiceOrderStatus.DIAGNOSTICO
+        );
+
+        assert.equal(
+          history[0].newStatus,
+          ServiceOrderStatus.CANCELADO
+        );
+
+        assert.equal(
+          history[0].changedById,
+          customerUserId
+        );
+      }
+    );
+
+    /**
+     * T039
+     */
+    test(
+      'CUSTOMER cancellation-return request is idempotent and another Customer receives 404',
+      async () => {
+        const first =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[1]}/customer-cancel-return`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {},
+          });
+
+        assert.equal(
+          first.statusCode,
+          200
+        );
+
+        const second =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[1]}/customer-cancel-return`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {},
+          });
+
+        assert.equal(
+          second.statusCode,
+          200
+        );
+
+        assert.equal(
+          second.json().alreadyProcessed,
+          true
+        );
+
+        const cancellationCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[1],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_CANCELLED,
+            },
+          });
+
+        const requestCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[1],
+
+              type:
+                CustomerEventType.OTHER,
+
+              title:
+                'Devolução solicitada',
+            },
+          });
+
+        const historyCount =
+          await prisma.serviceOrderStatusHistory.count({
+            where: {
+              serviceOrderId:
+                orderIds[1],
+            },
+          });
+
+        assert.equal(
+          cancellationCount,
+          1
+        );
+
+        assert.equal(
+          requestCount,
+          1
+        );
+
+        assert.equal(
+          historyCount,
+          1
+        );
+
+        const foreign =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[1]}/customer-cancel-return`,
+
+            headers: {
+              authorization:
+                `Bearer ${otherCustomerToken}`,
+            },
+
+            payload: {},
+          });
+
+        assert.equal(
+          foreign.statusCode,
+          404
+        );
+      }
+    );
+
+    /**
+     * T040
+     */
+    test(
+      'staff confirms physical Equipment return idempotently and ownership remains with the Customer',
+      async () => {
+        const requestReturn =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[2]}/customer-cancel-return`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              reason:
+                'Solicito retirada do equipamento',
+            },
+          });
+
+        assert.equal(
+          requestReturn.statusCode,
+          200
+        );
+
+        const returned =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[2]}/mark-returned`,
+
+            headers: {
+              authorization:
+                `Bearer ${adminToken}`,
+            },
+
+            payload: {
+              notes:
+                'Equipamento entregue ao titular',
+            },
+          });
+
+        assert.equal(
+          returned.statusCode,
+          200
+        );
+
+        assert.equal(
+          returned.json().returned,
+          true
+        );
+
+        const retry =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[2]}/mark-returned`,
+
+            headers: {
+              authorization:
+                `Bearer ${adminToken}`,
+            },
+
+            payload: {},
+          });
+
+        assert.equal(
+          retry.statusCode,
+          200
+        );
+
+        assert.equal(
+          retry.json().alreadyProcessed,
+          true
+        );
+
+        const returnedCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[2],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_RETURNED,
+            },
+          });
+
+        assert.equal(
+          returnedCount,
+          1
+        );
+
+        const equipment =
+          await prisma.equipment.findUniqueOrThrow({
+            where: {
+              id:
+                equipmentIds[2],
+            },
+          });
+
+        assert.equal(
+          equipment.ownerType,
+          EquipmentOwnerType.CUSTOMER
+        );
+
+        assert.equal(
+          equipment.customerId,
+          customerId
+        );
+
+        assert.equal(
+          equipment.organizationId,
+          null
+        );
+      }
+    );
+  }
+);
+
+
+/**
+ * ============================================================
+ * C6 — CUSTOMER DOES NOT APPROVE QUOTE
+ * ============================================================
+ *
+ * Cobertura existente:
+ *
+ * T007 → AGUARDANDO_APROVACAO não significa NOT_APPROVED
+ *
+ * Novos:
+ *
+ * T041 → rejeição explícita do próprio Customer
+ * T042 → idempotência sem evento/histórico duplicado
+ * T043 → rejeição fora do estado permitido é bloqueada
+ * T044 → outro Customer recebe 404
+ * T045 → rejeição não pode ser convertida em aprovação
+ */
+describe(
+  'C6 - Customer Quote Rejection',
+  {
+    concurrency:
+      false,
+  },
+  () => {
+    let app:
+      FastifyInstance;
+
+    let oldJwtSecret:
+      string | undefined;
+
+    const runId =
+      randomUUID();
+
+    const organizationId =
+      randomUUID();
+
+    const customerId =
+      randomUUID();
+
+    const customerUserId =
+      randomUUID();
+
+    const customerEmail =
+      `c6-customer-${runId}@assistailab.test`;
+
+    const otherCustomerId =
+      randomUUID();
+
+    const otherCustomerUserId =
+      randomUUID();
+
+    const otherCustomerEmail =
+      `c6-other-${runId}@assistailab.test`;
+
+    const password =
+      'C6-Test@123456';
+
+    const equipmentIds =
+      Array.from(
+        {
+          length:
+            5,
+        },
+        () =>
+          randomUUID()
+      );
+
+    const orderIds =
+      Array.from(
+        {
+          length:
+            5,
+        },
+        () =>
+          randomUUID()
+      );
+
+    let customerToken:
+      string;
+
+    let otherCustomerToken:
+      string;
+
+    async function login(
+      email:
+        string
+    ) {
+      return app.inject({
+        method:
+          'POST',
+
+        url:
+          '/api/v1/auth/login',
+
+        payload: {
+          email,
+          password,
+        },
+      });
+    }
+
+    before(
+      async () => {
+        oldJwtSecret =
+          process.env.JWT_SECRET;
+
+        process.env.JWT_SECRET =
+          'c6-integration-test-secret-2026';
+
+        const passwordHash =
+          await bcrypt.hash(
+            password,
+            12
+          );
+
+        await prisma.organization.create({
+          data: {
+            id:
+              organizationId,
+
+            name:
+              `C6 Organization ${runId}`,
+          },
+        });
+
+        await prisma.customer.createMany({
+          data: [
+            {
+              id:
+                customerId,
+
+              name:
+                'C6 Customer',
+
+              email:
+                customerEmail,
+            },
+
+            {
+              id:
+                otherCustomerId,
+
+              name:
+                'C6 Other Customer',
+
+              email:
+                otherCustomerEmail,
+            },
+          ],
+        });
+
+        await prisma.user.createMany({
+          data: [
+            {
+              id:
+                customerUserId,
+
+              name:
+                'C6 Customer',
+
+              email:
+                customerEmail,
+
+              passwordHash,
+
+              role:
+                Role.CUSTOMER,
+
+              status:
+                UserStatus.ACTIVE,
+
+              customerId,
+            },
+
+            {
+              id:
+                otherCustomerUserId,
+
+              name:
+                'C6 Other Customer',
+
+              email:
+                otherCustomerEmail,
+
+              passwordHash,
+
+              role:
+                Role.CUSTOMER,
+
+              status:
+                UserStatus.ACTIVE,
+
+              customerId:
+                otherCustomerId,
+            },
+          ],
+        });
+
+        await prisma.customerOrganization.createMany({
+          data: [
+            {
+              customerId,
+
+              organizationId,
+
+              status:
+                CustomerOrganizationStatus.ACTIVE,
+            },
+
+            {
+              customerId:
+                otherCustomerId,
+
+              organizationId,
+
+              status:
+                CustomerOrganizationStatus.ACTIVE,
+            },
+          ],
+        });
+
+        for (
+          let index =
+            0;
+          index <
+          orderIds.length;
+          index +=
+            1
+        ) {
+          await prisma.equipment.create({
+            data: {
+              id:
+                equipmentIds[
+                  index
+                ],
+
+              customerId,
+
+              organizationId:
+                null,
+
+              ownerType:
+                EquipmentOwnerType.CUSTOMER,
+
+              organizationPurpose:
+                null,
+
+              type:
+                'NOTEBOOK',
+
+              brand:
+                'C6 Brand',
+
+              model:
+                `C6 Equipment ${index}`,
+            },
+          });
+
+          await prisma.serviceOrder.create({
+            data: {
+              id:
+                orderIds[
+                  index
+                ],
+
+              organizationId,
+
+              customerId,
+
+              equipmentId:
+                equipmentIds[
+                  index
+                ],
+
+              status:
+                index ===
+                  2
+                  ? ServiceOrderStatus
+                      .DIAGNOSTICO
+                  : ServiceOrderStatus
+                      .AGUARDANDO_APROVACAO,
+
+              problemDescription:
+                `C6 quote order ${index}`,
+            },
+          });
+        }
+
+        app =
+          buildApp();
+
+        await app.ready();
+
+        const ownLogin =
+          await login(
+            customerEmail
+          );
+
+        const otherLogin =
+          await login(
+            otherCustomerEmail
+          );
+
+        assert.equal(
+          ownLogin.statusCode,
+          200
+        );
+
+        assert.equal(
+          otherLogin.statusCode,
+          200
+        );
+
+        customerToken =
+          ownLogin.json().token;
+
+        otherCustomerToken =
+          otherLogin.json().token;
+      }
+    );
+
+    after(
+      async () => {
+        await prisma.customerEvent.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrderStatusHistory.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrder.deleteMany({
+          where: {
+            id: {
+              in:
+                orderIds,
+            },
+          },
+        });
+
+        await prisma.equipment.deleteMany({
+          where: {
+            id: {
+              in:
+                equipmentIds,
+            },
+          },
+        });
+
+        await prisma.user.deleteMany({
+          where: {
+            id: {
+              in: [
+                customerUserId,
+                otherCustomerUserId,
+              ],
+            },
+          },
+        });
+
+        await prisma.customerOrganization.deleteMany({
+          where: {
+            customerId: {
+              in: [
+                customerId,
+                otherCustomerId,
+              ],
+            },
+          },
+        });
+
+        await prisma.customer.deleteMany({
+          where: {
+            id: {
+              in: [
+                customerId,
+                otherCustomerId,
+              ],
+            },
+          },
+        });
+
+        await prisma.organization.delete({
+          where: {
+            id:
+              organizationId,
+          },
+        });
+
+        await app.close();
+
+        if (
+          oldJwtSecret
+        ) {
+          process.env.JWT_SECRET =
+            oldJwtSecret;
+        } else {
+          delete process
+            .env
+            .JWT_SECRET;
+        }
+      }
+    );
+
+    /**
+     * T041
+     */
+    test(
+      'CUSTOMER explicitly rejects own quote and creates NOT_APPROVED without generic CANCELLED CRM event',
+      async () => {
+        const response =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[0]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              decision:
+                'REJECT',
+
+              reason:
+                'Valor acima do esperado',
+            },
+          });
+
+        assert.equal(
+          response.statusCode,
+          200
+        );
+
+        assert.equal(
+          response.json().decision,
+          'REJECT'
+        );
+
+        assert.equal(
+          response.json().order.status,
+          ServiceOrderStatus.CANCELADO
+        );
+
+        const notApproved =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_NOT_APPROVED,
+            },
+          });
+
+        const genericCancelled =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_CANCELLED,
+            },
+          });
+
+        assert.equal(
+          notApproved,
+          1
+        );
+
+        assert.equal(
+          genericCancelled,
+          0
+        );
+
+        const history =
+          await prisma.serviceOrderStatusHistory.findFirst({
+            where: {
+              serviceOrderId:
+                orderIds[0],
+            },
+          });
+
+        assert.ok(
+          history
+        );
+
+        assert.equal(
+          history.changedById,
+          customerUserId
+        );
+      }
+    );
+
+    /**
+     * T042
+     */
+    test(
+      'quote rejection is idempotent and does not duplicate NOT_APPROVED event or status history',
+      async () => {
+        const request = () =>
+          app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[1]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              decision:
+                'REJECT',
+            },
+          });
+
+        const first =
+          await request();
+
+        const second =
+          await request();
+
+        assert.equal(
+          first.statusCode,
+          200
+        );
+
+        assert.equal(
+          second.statusCode,
+          200
+        );
+
+        assert.equal(
+          second.json().alreadyProcessed,
+          true
+        );
+
+        const eventCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                orderIds[1],
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_NOT_APPROVED,
+            },
+          });
+
+        const historyCount =
+          await prisma.serviceOrderStatusHistory.count({
+            where: {
+              serviceOrderId:
+                orderIds[1],
+            },
+          });
+
+        assert.equal(
+          eventCount,
+          1
+        );
+
+        assert.equal(
+          historyCount,
+          1
+        );
+      }
+    );
+
+    /**
+     * T043
+     */
+    test(
+      'CUSTOMER cannot reject a quote when Service Order is not awaiting approval',
+      async () => {
+        const response =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[2]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              decision:
+                'REJECT',
+            },
+          });
+
+        assert.equal(
+          response.statusCode,
+          409
+        );
+
+        const persisted =
+          await prisma.serviceOrder.findUniqueOrThrow({
+            where: {
+              id:
+                orderIds[2],
+            },
+          });
+
+        assert.equal(
+          persisted.status,
+          ServiceOrderStatus.DIAGNOSTICO
+        );
+      }
+    );
+
+    /**
+     * T044
+     */
+    test(
+      'another CUSTOMER cannot reject someone else Service Order',
+      async () => {
+        const response =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[3]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${otherCustomerToken}`,
+            },
+
+            payload: {
+              decision:
+                'REJECT',
+            },
+          });
+
+        assert.equal(
+          response.statusCode,
+          404
+        );
+
+        const persisted =
+          await prisma.serviceOrder.findUniqueOrThrow({
+            where: {
+              id:
+                orderIds[3],
+            },
+          });
+
+        assert.equal(
+          persisted.status,
+          ServiceOrderStatus
+            .AGUARDANDO_APROVACAO
+        );
+      }
+    );
+
+    /**
+     * T045
+     */
+    test(
+      'a rejected quote cannot later be converted into approval',
+      async () => {
+        const reject =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[4]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              decision:
+                'REJECT',
+            },
+          });
+
+        assert.equal(
+          reject.statusCode,
+          200
+        );
+
+        const approve =
+          await app.inject({
+            method:
+              'POST',
+
+            url:
+              `/api/v1/service-orders/${orderIds[4]}/quote-decision`,
+
+            headers: {
+              authorization:
+                `Bearer ${customerToken}`,
+            },
+
+            payload: {
+              decision:
+                'APPROVE',
+            },
+          });
+
+        assert.equal(
+          approve.statusCode,
+          409
+        );
+
+        const persisted =
+          await prisma.serviceOrder.findUniqueOrThrow({
+            where: {
+              id:
+                orderIds[4],
+            },
+          });
+
+        assert.equal(
+          persisted.status,
+          ServiceOrderStatus.CANCELADO
+        );
+      }
+    );
+  }
+);
+
+
+/**
+ * ============================================================
+ * C7 — SUCCESSFUL SERVICE ORDER FLOW
+ * ============================================================
+ *
+ * Cobertura existente:
+ *
+ * T005 → ENTREGUE gera SERVICE_ORDER_COMPLETED
+ * T008 → estados operacionais não geram lifecycle indevido
+ * T009 → transições válidas
+ * T011 → transições inválidas são rejeitadas
+ *
+ * Novos:
+ *
+ * T046 → fluxo API completo + aprovação pelo CUSTOMER
+ * T047 → histórico completo e ator correto da aprovação
+ * T048 → conclusão é idempotente e CRM final é único
+ */
+describe(
+  'C7 - Successful Service Order End-to-End Flow',
+  {
+    concurrency:
+      false,
+  },
+  () => {
+    let app:
+      FastifyInstance;
+
+    let oldJwtSecret:
+      string | undefined;
+
+    const runId =
+      randomUUID();
+
+    const organizationId =
+      randomUUID();
+
+    const adminId =
+      randomUUID();
+
+    const adminEmail =
+      `c7-admin-${runId}@assistailab.test`;
+
+    const customerId =
+      randomUUID();
+
+    const customerUserId =
+      randomUUID();
+
+    const customerEmail =
+      `c7-customer-${runId}@assistailab.test`;
+
+    const password =
+      'C7-Test@123456';
+
+    let adminToken:
+      string;
+
+    let customerToken:
+      string;
+
+    const createdOrderIds:
+      string[] =
+      [];
+
+    const createdEquipmentIds:
+      string[] =
+      [];
+
+    async function login(
+      email:
+        string
+    ) {
+      return app.inject({
+        method:
+          'POST',
+
+        url:
+          '/api/v1/auth/login',
+
+        payload: {
+          email,
+          password,
+        },
+      });
+    }
+
+    async function createAndCompleteOrder(
+      suffix:
+        string
+    ) {
+      const createResponse =
+        await app.inject({
+          method:
+            'POST',
+
+          url:
+            '/api/v1/service-orders',
+
+          headers: {
+            authorization:
+              `Bearer ${adminToken}`,
+          },
+
+          payload: {
+            customerId,
+
+            equipment: {
+              type:
+                'NOTEBOOK',
+
+              brand:
+                'C7 Brand',
+
+              model:
+                `C7 Model ${suffix}`,
+
+              serialNumber:
+                `C7-${suffix}-${runId}`,
+            },
+
+            problemDescription:
+              `C7 full flow ${suffix}`,
+          },
+        });
+
+      assert.equal(
+        createResponse.statusCode,
+        201
+      );
+
+      const created =
+        createResponse.json().order;
+
+      createdOrderIds.push(
+        created.id
+      );
+
+      createdEquipmentIds.push(
+        created.equipmentId
+      );
+
+      assert.equal(
+        created.status,
+        ServiceOrderStatus.DIAGNOSTICO
+      );
+
+      const awaiting =
+        await app.inject({
+          method:
+            'PATCH',
+
+          url:
+            `/api/v1/service-orders/${created.id}/status`,
+
+          headers: {
+            authorization:
+              `Bearer ${adminToken}`,
+          },
+
+          payload: {
+            newStatus:
+              ServiceOrderStatus
+                .AGUARDANDO_APROVACAO,
+
+            notes:
+              'Diagnóstico concluído e orçamento apresentado',
+          },
+        });
+
+      assert.equal(
+        awaiting.statusCode,
+        200
+      );
+
+      const approved =
+        await app.inject({
+          method:
+            'POST',
+
+          url:
+            `/api/v1/service-orders/${created.id}/quote-decision`,
+
+          headers: {
+            authorization:
+              `Bearer ${customerToken}`,
+          },
+
+          payload: {
+            decision:
+              'APPROVE',
+          },
+        });
+
+      assert.equal(
+        approved.statusCode,
+        200
+      );
+
+      assert.equal(
+        approved.json().order.status,
+        ServiceOrderStatus.EM_EXECUCAO
+      );
+
+      const ready =
+        await app.inject({
+          method:
+            'PATCH',
+
+          url:
+            `/api/v1/service-orders/${created.id}/status`,
+
+          headers: {
+            authorization:
+              `Bearer ${adminToken}`,
+          },
+
+          payload: {
+            newStatus:
+              ServiceOrderStatus.PRONTO,
+          },
+        });
+
+      assert.equal(
+        ready.statusCode,
+        200
+      );
+
+      const delivered =
+        await app.inject({
+          method:
+            'PATCH',
+
+          url:
+            `/api/v1/service-orders/${created.id}/status`,
+
+          headers: {
+            authorization:
+              `Bearer ${adminToken}`,
+          },
+
+          payload: {
+            newStatus:
+              ServiceOrderStatus.ENTREGUE,
+          },
+        });
+
+      assert.equal(
+        delivered.statusCode,
+        200
+      );
+
+      return {
+        orderId:
+          created.id,
+
+        equipmentId:
+          created.equipmentId,
+
+        delivered:
+          delivered.json().order,
+      };
+    }
+
+    before(
+      async () => {
+        oldJwtSecret =
+          process.env.JWT_SECRET;
+
+        process.env.JWT_SECRET =
+          'c7-integration-test-secret-2026';
+
+        const passwordHash =
+          await bcrypt.hash(
+            password,
+            12
+          );
+
+        await prisma.organization.create({
+          data: {
+            id:
+              organizationId,
+
+            name:
+              `C7 Organization ${runId}`,
+          },
+        });
+
+        await prisma.customer.create({
+          data: {
+            id:
+              customerId,
+
+            name:
+              'C7 Customer',
+
+            email:
+              customerEmail,
+          },
+        });
+
+        await prisma.user.createMany({
+          data: [
+            {
+              id:
+                adminId,
+
+              name:
+                'C7 Admin',
+
+              email:
+                adminEmail,
+
+              passwordHash,
+
+              role:
+                Role.ADMIN,
+
+              status:
+                UserStatus.ACTIVE,
+            },
+
+            {
+              id:
+                customerUserId,
+
+              name:
+                'C7 Customer',
+
+              email:
+                customerEmail,
+
+              passwordHash,
+
+              role:
+                Role.CUSTOMER,
+
+              status:
+                UserStatus.ACTIVE,
+
+              customerId,
+            },
+          ],
+        });
+
+        await prisma.membership.create({
+          data: {
+            userId:
+              adminId,
+
+            organizationId,
+
+            role:
+              Role.ADMIN,
+          },
+        });
+
+        await prisma.customerOrganization.create({
+          data: {
+            customerId,
+
+            organizationId,
+
+            status:
+              CustomerOrganizationStatus.ACTIVE,
+          },
+        });
+
+        app =
+          buildApp();
+
+        await app.ready();
+
+        const adminLogin =
+          await login(
+            adminEmail
+          );
+
+        const customerLogin =
+          await login(
+            customerEmail
+          );
+
+        assert.equal(
+          adminLogin.statusCode,
+          200
+        );
+
+        assert.equal(
+          customerLogin.statusCode,
+          200
+        );
+
+        adminToken =
+          adminLogin.json().token;
+
+        customerToken =
+          customerLogin.json().token;
+      }
+    );
+
+    after(
+      async () => {
+        await prisma.customerEvent.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                createdOrderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrderStatusHistory.deleteMany({
+          where: {
+            serviceOrderId: {
+              in:
+                createdOrderIds,
+            },
+          },
+        });
+
+        await prisma.serviceOrder.deleteMany({
+          where: {
+            id: {
+              in:
+                createdOrderIds,
+            },
+          },
+        });
+
+        await prisma.equipment.deleteMany({
+          where: {
+            id: {
+              in:
+                createdEquipmentIds,
+            },
+          },
+        });
+
+        await prisma.membership.deleteMany({
+          where: {
+            userId:
+              adminId,
+          },
+        });
+
+        await prisma.user.deleteMany({
+          where: {
+            id: {
+              in: [
+                adminId,
+                customerUserId,
+              ],
+            },
+          },
+        });
+
+        await prisma.customerOrganization.deleteMany({
+          where: {
+            customerId,
+          },
+        });
+
+        await prisma.customer.delete({
+          where: {
+            id:
+              customerId,
+          },
+        });
+
+        await prisma.organization.delete({
+          where: {
+            id:
+              organizationId,
+          },
+        });
+
+        await app.close();
+
+        if (
+          oldJwtSecret
+        ) {
+          process.env.JWT_SECRET =
+            oldJwtSecret;
+        } else {
+          delete process
+            .env
+            .JWT_SECRET;
+        }
+      }
+    );
+
+    /**
+     * T046
+     */
+    test(
+      'Service Order completes the full API flow with explicit CUSTOMER approval',
+      async () => {
+        const result =
+          await createAndCompleteOrder(
+            'FLOW'
+          );
+
+        assert.equal(
+          result.delivered.status,
+          ServiceOrderStatus.ENTREGUE
+        );
+
+        assert.equal(
+          result.delivered.customerId,
+          customerId
+        );
+
+        assert.equal(
+          result.delivered.organizationId,
+          organizationId
+        );
+
+        const equipment =
+          await prisma.equipment.findUniqueOrThrow({
+            where: {
+              id:
+                result.equipmentId,
+            },
+          });
+
+        /**
+         * Atendimento concluído não transfere
+         * propriedade do Equipment.
+         */
+        assert.equal(
+          equipment.ownerType,
+          EquipmentOwnerType.CUSTOMER
+        );
+
+        assert.equal(
+          equipment.customerId,
+          customerId
+        );
+      }
+    );
+
+    /**
+     * T047
+     */
+    test(
+      'successful Service Order records ordered status history and CUSTOMER is the approval actor',
+      async () => {
+        const result =
+          await createAndCompleteOrder(
+            'HISTORY'
+          );
+
+        const history =
+          await prisma.serviceOrderStatusHistory.findMany({
+            where: {
+              serviceOrderId:
+                result.orderId,
+            },
+
+            orderBy: {
+              createdAt:
+                'asc',
+            },
+          });
+
+        assert.equal(
+          history.length,
+          4
+        );
+
+        assert.deepEqual(
+          history.map(
+            (
+              entry
+            ) =>
+              entry.newStatus
+          ),
+          [
+            ServiceOrderStatus
+              .AGUARDANDO_APROVACAO,
+
+            ServiceOrderStatus
+              .EM_EXECUCAO,
+
+            ServiceOrderStatus
+              .PRONTO,
+
+            ServiceOrderStatus
+              .ENTREGUE,
+          ]
+        );
+
+        const approvalHistory =
+          history.find(
+            (
+              entry
+            ) =>
+              entry.newStatus ===
+              ServiceOrderStatus
+                .EM_EXECUCAO
+          );
+
+        assert.ok(
+          approvalHistory
+        );
+
+        assert.equal(
+          approvalHistory.changedById,
+          customerUserId
+        );
+      }
+    );
+
+    /**
+     * T048
+     */
+    test(
+      'ENTREGUE retry is idempotent and produces exactly one completion CRM event',
+      async () => {
+        const result =
+          await createAndCompleteOrder(
+            'CRM'
+          );
+
+        const retry =
+          await app.inject({
+            method:
+              'PATCH',
+
+            url:
+              `/api/v1/service-orders/${result.orderId}/status`,
+
+            headers: {
+              authorization:
+                `Bearer ${adminToken}`,
+            },
+
+            payload: {
+              newStatus:
+                ServiceOrderStatus.ENTREGUE,
+            },
+          });
+
+        assert.equal(
+          retry.statusCode,
+          200
+        );
+
+        assert.equal(
+          retry.json().order.status,
+          ServiceOrderStatus.ENTREGUE
+        );
+
+        const completedCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                result.orderId,
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_COMPLETED,
+            },
+          });
+
+        const cancelledCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                result.orderId,
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_CANCELLED,
+            },
+          });
+
+        const notApprovedCount =
+          await prisma.customerEvent.count({
+            where: {
+              serviceOrderId:
+                result.orderId,
+
+              type:
+                CustomerEventType
+                  .SERVICE_ORDER_NOT_APPROVED,
+            },
+          });
+
+        assert.equal(
+          completedCount,
+          1
+        );
+
+        assert.equal(
+          cancelledCount,
+          0
+        );
+
+        assert.equal(
+          notApprovedCount,
+          0
+        );
+
+        const historyCount =
+          await prisma.serviceOrderStatusHistory.count({
+            where: {
+              serviceOrderId:
+                result.orderId,
+            },
+          });
+
+        assert.equal(
+          historyCount,
+          4
+        );
+      }
+    );
+  }
+);
+
