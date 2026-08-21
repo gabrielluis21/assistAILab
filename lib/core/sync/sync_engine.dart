@@ -13,7 +13,8 @@ class SyncEngine {
 
   Future<String?> getLocalCursor() async {
     final db = await SqliteDatabase.instance;
-    final res = await db.query('sync_metadata', where: 'key = ?', whereArgs: ['last_cursor']);
+    final res = await db
+        .query('sync_metadata', where: 'key = ?', whereArgs: ['last_cursor']);
     if (res.isNotEmpty) {
       return res.first['value'] as String;
     }
@@ -52,10 +53,12 @@ class SyncEngine {
     }
 
     try {
-      final response = await apiClient.post(
-        '/sync/push',
-        body: payload,
-      ).timeout(const Duration(seconds: 15));
+      final response = await apiClient
+          .post(
+            '/sync/push',
+            body: payload,
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
@@ -69,9 +72,11 @@ class SyncEngine {
           if (status == 'SYNCED') {
             await _outboxDao.updateStatus(opId, 'SYNCED');
           } else {
-            final existing = pendingEntries.firstWhere((e) => e.operationId == opId);
+            final existing =
+                pendingEntries.firstWhere((e) => e.operationId == opId);
             final newAttempts = existing.attemptCount + 1;
-            final nextRetry = calculateNextRetryAt(newAttempts).toIso8601String();
+            final nextRetry =
+                calculateNextRetryAt(newAttempts).toIso8601String();
             final finalStatus = status == 'CONFLICT' ? 'CONFLICT' : 'FAILED';
 
             await _outboxDao.updateStatus(
@@ -118,7 +123,8 @@ class SyncEngine {
 
   Future<void> pullIncrementalChanges() async {
     final cursor = await getLocalCursor();
-    final response = await apiClient.get('/sync/changes?cursor=${cursor ?? ''}&limit=50')
+    final response = await apiClient
+        .get('/sync/changes?cursor=${cursor ?? ''}&limit=50')
         .timeout(const Duration(seconds: 15));
 
     if (response.statusCode == 200) {
@@ -151,7 +157,8 @@ class SyncEngine {
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
             } else if (opType == 'DELETE') {
-              await txn.delete('customers', where: 'id = ?', whereArgs: [entityId]);
+              await txn
+                  .delete('customers', where: 'id = ?', whereArgs: [entityId]);
             }
           } else if (entityType == 'EQUIPMENT') {
             if (opType == 'CREATE' || opType == 'UPDATE') {
@@ -160,20 +167,25 @@ class SyncEngine {
                 {
                   'id': entityId,
                   'customer_id': data['customer_id'] ?? data['customerId'],
-                  'organization_id': data['organization_id'] ?? data['organizationId'],
-                  'owner_type': data['owner_type'] ?? data['ownerType'] ?? 'CUSTOMER',
-                  'organization_purpose': data['organization_purpose'] ?? data['organizationPurpose'],
+                  'organization_id':
+                      data['organization_id'] ?? data['organizationId'],
+                  'owner_type':
+                      data['owner_type'] ?? data['ownerType'] ?? 'CUSTOMER',
+                  'organization_purpose': data['organization_purpose'] ??
+                      data['organizationPurpose'],
                   'type': data['type'],
                   'brand': data['brand'],
                   'model': data['model'],
-                  'serial_number': data['serial_number'] ?? data['serialNumber'],
+                  'serial_number':
+                      data['serial_number'] ?? data['serialNumber'],
                   'notes': data['notes'],
                   'updated_at': DateTime.now().toIso8601String(),
                 },
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
             } else if (opType == 'DELETE') {
-              await txn.delete('equipments', where: 'id = ?', whereArgs: [entityId]);
+              await txn
+                  .delete('equipments', where: 'id = ?', whereArgs: [entityId]);
             }
           } else if (entityType == 'SERVICE_ORDER') {
             if (opType == 'CREATE' || opType == 'UPDATE') {
@@ -184,18 +196,22 @@ class SyncEngine {
                   'friendly_id': data['friendly_id'] ?? data['friendlyId'],
                   'customer_id': data['customer_id'] ?? data['customerId'],
                   'equipment_id': data['equipment_id'] ?? data['equipmentId'],
-                  'technician_id': data['technician_id'] ?? data['technicianId'],
+                  'technician_id':
+                      data['technician_id'] ?? data['technicianId'],
                   'status': data['status'] ?? 'DIAGNOSTICO',
-                  'problem_description': data['problem_description'] ?? data['problemDescription'],
+                  'problem_description':
+                      data['problem_description'] ?? data['problemDescription'],
                   'diagnosis': data['diagnosis'],
                   'solution': data['solution'],
-                  'total_amount': data['total_amount'] ?? data['totalAmount'] ?? 0.0,
+                  'total_amount':
+                      data['total_amount'] ?? data['totalAmount'] ?? 0.0,
                   'updated_at': DateTime.now().toIso8601String(),
                 },
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
             } else if (opType == 'DELETE') {
-              await txn.delete('service_orders', where: 'id = ?', whereArgs: [entityId]);
+              await txn.delete('service_orders',
+                  where: 'id = ?', whereArgs: [entityId]);
             }
           } else if (entityType == 'SERVICE_ORDER_ITEM') {
             if (opType == 'CREATE' || opType == 'UPDATE') {
@@ -203,18 +219,21 @@ class SyncEngine {
                 'service_order_items',
                 {
                   'id': entityId,
-                  'service_order_id': data['service_order_id'] ?? data['serviceOrderId'],
+                  'service_order_id':
+                      data['service_order_id'] ?? data['serviceOrderId'],
                   'part_id': data['part_id'] ?? data['partId'],
                   'description': data['description'],
                   'quantity': data['quantity'] ?? 1,
                   'unit_price': data['unit_price'] ?? data['unitPrice'] ?? 0.0,
-                  'total_price': data['total_price'] ?? data['totalPrice'] ?? 0.0,
+                  'total_price':
+                      data['total_price'] ?? data['totalPrice'] ?? 0.0,
                   'updated_at': DateTime.now().toIso8601String(),
                 },
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
             } else if (opType == 'DELETE') {
-              await txn.delete('service_order_items', where: 'id = ?', whereArgs: [entityId]);
+              await txn.delete('service_order_items',
+                  where: 'id = ?', whereArgs: [entityId]);
             }
           } else if (entityType == 'PART') {
             if (opType == 'CREATE' || opType == 'UPDATE') {
@@ -226,7 +245,8 @@ class SyncEngine {
                   'sku': data['sku'],
                   'price': data['price'] ?? 0.0,
                   'cost_price': data['cost_price'] ?? data['costPrice'] ?? 0.0,
-                  'stock_quantity': data['stock_quantity'] ?? data['stockQuantity'] ?? 0,
+                  'stock_quantity':
+                      data['stock_quantity'] ?? data['stockQuantity'] ?? 0,
                   'updated_at': DateTime.now().toIso8601String(),
                 },
                 conflictAlgorithm: ConflictAlgorithm.replace,
@@ -240,20 +260,24 @@ class SyncEngine {
                 'payments',
                 {
                   'id': entityId,
-                  'service_order_id': data['service_order_id'] ?? data['serviceOrderId'],
+                  'service_order_id':
+                      data['service_order_id'] ?? data['serviceOrderId'],
                   'customer_id': data['customer_id'] ?? data['customerId'],
                   'amount': data['amount'] ?? 0.0,
                   'method': data['method'],
                   'status': data['status'] ?? 'PENDING',
                   'notes': data['notes'],
                   'paid_at': data['paid_at'] ?? data['paidAt'],
-                  'created_at': data['created_at'] ?? data['createdAt'] ?? DateTime.now().toIso8601String(),
+                  'created_at': data['created_at'] ??
+                      data['createdAt'] ??
+                      DateTime.now().toIso8601String(),
                   'updated_at': DateTime.now().toIso8601String(),
                 },
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
             } else if (opType == 'DELETE') {
-              await txn.delete('payments', where: 'id = ?', whereArgs: [entityId]);
+              await txn
+                  .delete('payments', where: 'id = ?', whereArgs: [entityId]);
             }
           }
         }

@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import 'service_order_item_entity.dart';
 import '../../core/database/service_order_item_repository.dart';
-import '../../core/database/service_order_repository.dart';
 import '../../core/database/outbox_dao.dart';
 import '../customers/customers_provider.dart' show outboxDaoProvider;
 import 'service_orders_provider.dart';
