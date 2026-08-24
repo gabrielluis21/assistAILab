@@ -362,6 +362,24 @@ void main() {
       expect(fakeDao.recoveredCount, equals(0)); // Reset after recovery
     });
 
+    test(
+        'Coordinator.initialize() is idempotent across multiple concurrent calls',
+        () async {
+      fakeDao.recoveredCount = 5;
+      fakeDao.pendingCount = 3;
+
+      // Call initialize multiple times in parallel and sequentially
+      await Future.wait([
+        coordinator.initialize(),
+        coordinator.initialize(),
+        coordinator.initialize(),
+      ]);
+      await coordinator.initialize();
+
+      // Only the first call should trigger recovery; state should remain consistent
+      expect(coordinator.state.pendingOutboxCount, equals(3));
+    });
+
     test('Coordinator performs push then pull successfully and emits states',
         () async {
       final states = <SyncState>[];
@@ -674,6 +692,108 @@ void main() {
       // Clean up
       await db
           .delete('outbox', where: 'operation_id = ?', whereArgs: [staleOpId]);
+    });
+
+    test(
+        'pushPendingOutbox sets last_attempt_at when transitioning to PROCESSING, and recovery respects 5min threshold',
+        () async {
+      final db = await SqliteDatabase.instance;
+      final opId = 'op-push-proc-${DateTime.now().millisecondsSinceEpoch}';
+
+      // 1. Insert a PENDING item
+      await db.insert('outbox', {
+        'operation_id': opId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'cust-push-1',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode({'name': 'Test Cust'}),
+        'status': 'PENDING',
+        'attempt_count': 0,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      final outboxDao = OutboxDao();
+      String? inFlightStatus;
+      String? inFlightAttemptAt;
+
+      // Mock API client that inspects DB in-flight to verify PROCESSING state & timestamp
+      final client = MockHttpClientWithCustomResponses((request) async {
+        final inFlight = await db
+            .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+        if (inFlight.isNotEmpty) {
+          inFlightStatus = inFlight.first['status'] as String?;
+          inFlightAttemptAt = inFlight.first['last_attempt_at'] as String?;
+        }
+        return http.Response(
+          jsonEncode({
+            'results': [
+              {'operationId': opId, 'status': 'SYNCED'}
+            ]
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient, outboxDao: outboxDao);
+
+      // Verify before push: status is PENDING, last_attempt_at is null
+      final beforeRows = await db
+          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+      expect(beforeRows.first['status'], equals('PENDING'));
+      expect(beforeRows.first['last_attempt_at'], isNull);
+
+      // 2. Perform push
+      await engine.pushPendingOutbox();
+
+      // 3. Confirm that while in-flight, item had PROCESSING status and last_attempt_at timestamp
+      expect(inFlightStatus, equals('PROCESSING'));
+      expect(inFlightAttemptAt, isNotNull);
+
+      // 4. Reset item to PROCESSING (simulate crash during network transit)
+      final nowTime = DateTime.now();
+      await db.update(
+        'outbox',
+        {
+          'status': 'PROCESSING',
+          'last_attempt_at': nowTime.toIso8601String(),
+        },
+        where: 'operation_id = ?',
+        whereArgs: [opId],
+      );
+
+      // 5. Immediate recovery (<5min) must NOT recover this fresh item
+      final recoveredFresh = await outboxDao.recoverProcessingEntries(
+        timeout: const Duration(minutes: 5),
+      );
+      expect(recoveredFresh, equals(0));
+
+      final checkFresh = await db
+          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+      expect(checkFresh.first['status'], equals('PROCESSING'));
+
+      // 6. Artificially age last_attempt_at to 6 minutes ago (>5min timeout)
+      final agedTime =
+          nowTime.subtract(const Duration(minutes: 6)).toIso8601String();
+      await db.update(
+        'outbox',
+        {'last_attempt_at': agedTime},
+        where: 'operation_id = ?',
+        whereArgs: [opId],
+      );
+
+      // 7. Recovery must now recover this aged PROCESSING item to FAILED
+      final recoveredAged = await outboxDao.recoverProcessingEntries(
+        timeout: const Duration(minutes: 5),
+      );
+      expect(recoveredAged, greaterThanOrEqualTo(1));
+
+      final checkAged = await db
+          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+      expect(checkAged.first['status'], equals('FAILED'));
+
+      // Clean up
+      await db.delete('outbox', where: 'operation_id = ?', whereArgs: [opId]);
     });
   });
 

@@ -50,8 +50,25 @@ class BackgroundSyncCoordinator {
   /// Stream of synchronization state transitions.
   Stream<SyncState> get stateStream => _stateController.stream;
 
+  bool _isInitialized = false;
+  Future<void>? _initFuture;
+
   /// Initializes coordinator and recovers any interrupted operations from prior sessions.
+  /// Idempotent: repeated or concurrent invocations do not duplicate recovery or state calls.
   Future<void> initialize() async {
+    if (_isInitialized) return;
+    if (_initFuture != null) return _initFuture;
+
+    _initFuture = _performInitialization();
+    try {
+      await _initFuture;
+      _isInitialized = true;
+    } finally {
+      _initFuture = null;
+    }
+  }
+
+  Future<void> _performInitialization() async {
     await recoverInterruptedOperations();
     await _refreshPendingCount();
   }

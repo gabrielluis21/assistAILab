@@ -80,8 +80,13 @@ class SyncEngine {
       'entries': pendingEntries.map((e) => e.toMap()).toList(),
     };
 
+    final nowIso = DateTime.now().toIso8601String();
     for (final item in pendingEntries) {
-      await outboxDao.updateStatus(item.operationId, 'PROCESSING');
+      await outboxDao.updateStatus(
+        item.operationId,
+        'PROCESSING',
+        lastAttemptAt: nowIso,
+      );
     }
 
     int synced = 0;
