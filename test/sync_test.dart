@@ -189,6 +189,150 @@ void main() {
     });
   });
 
+  group('OutboxItem API Contract & Serialization Tests', () {
+    test(
+        'toApiPayload formats item as camelCase with payload as Map (backend contract)',
+        () {
+      final item = OutboxItem(
+        operationId: '11111111-2222-3333-4444-555555555555',
+        deviceId: 'device-abc',
+        userId: 'user-xyz',
+        entityType: 'CUSTOMER',
+        entityId: 'cust-123',
+        operationType: 'CREATE',
+        payload: {'name': 'John Doe', 'document': '12345678900'},
+        createdAt: '2026-08-24T12:00:00.000Z',
+        attemptCount: 2,
+        lastAttemptAt: '2026-08-24T12:01:00.000Z',
+        status: 'PROCESSING',
+      );
+
+      final apiPayload = item.toApiPayload();
+
+      // Must be camelCase
+      expect(apiPayload['operationId'],
+          equals('11111111-2222-3333-4444-555555555555'));
+      expect(apiPayload['deviceId'], equals('device-abc'));
+      expect(apiPayload['userId'], equals('user-xyz'));
+      expect(apiPayload['entityType'], equals('CUSTOMER'));
+      expect(apiPayload['entityId'], equals('cust-123'));
+      expect(apiPayload['operationType'], equals('CREATE'));
+      expect(apiPayload['createdAt'], equals('2026-08-24T12:00:00.000Z'));
+
+      // Payload must be a Map, NEVER a jsonEncoded String
+      expect(apiPayload['payload'], isA<Map<String, dynamic>>());
+      expect(apiPayload['payload'], isNot(isA<String>()));
+      expect(apiPayload['payload']['name'], equals('John Doe'));
+
+      // SQLite internals must NOT be sent to HTTP API
+      expect(apiPayload.containsKey('operation_id'), isFalse);
+      expect(apiPayload.containsKey('entity_type'), isFalse);
+      expect(apiPayload.containsKey('entity_id'), isFalse);
+      expect(apiPayload.containsKey('operation_type'), isFalse);
+      expect(apiPayload.containsKey('created_at'), isFalse);
+      expect(apiPayload.containsKey('attempt_count'), isFalse);
+      expect(apiPayload.containsKey('last_attempt_at'), isFalse);
+      expect(apiPayload.containsKey('status'), isFalse);
+    });
+
+    test(
+        'toMap formats item for SQLite with snake_case and payload as jsonEncoded String',
+        () {
+      final item = OutboxItem(
+        operationId: '11111111-2222-3333-4444-555555555555',
+        entityType: 'CUSTOMER',
+        entityId: 'cust-123',
+        operationType: 'CREATE',
+        payload: {'name': 'John Doe'},
+        createdAt: '2026-08-24T12:00:00.000Z',
+      );
+
+      final dbMap = item.toMap();
+
+      // Must be snake_case for SQLite
+      expect(dbMap['operation_id'],
+          equals('11111111-2222-3333-4444-555555555555'));
+      expect(dbMap['entity_type'], equals('CUSTOMER'));
+      expect(dbMap['entity_id'], equals('cust-123'));
+      expect(dbMap['operation_type'], equals('CREATE'));
+      expect(dbMap['created_at'], equals('2026-08-24T12:00:00.000Z'));
+
+      // Payload must be a String in SQLite column
+      expect(dbMap['payload'], isA<String>());
+      expect(dbMap['payload'], equals('{"name":"John Doe"}'));
+    });
+
+    test('pushPendingOutbox sends HTTP payload matching backend pushSyncSchema',
+        () async {
+      final db = await SqliteDatabase.instance;
+      const opId = '22222222-3333-4444-5555-666666666666';
+
+      await db.insert(
+        'outbox',
+        {
+          'operation_id': opId,
+          'entity_type': 'CUSTOMER',
+          'entity_id': 'cust-push-schema',
+          'operation_type': 'CREATE',
+          'payload': jsonEncode({'name': 'Schema Test', 'email': 't@t.com'}),
+          'status': 'PENDING',
+          'attempt_count': 0,
+          'created_at': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      Map<String, dynamic>? receivedHttpBody;
+
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path.contains('/sync/push')) {
+          receivedHttpBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {'operationId': opId, 'status': 'SYNCED'}
+              ]
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient, outboxDao: OutboxDao());
+
+      final summary = await engine.pushPendingOutbox();
+
+      expect(summary.syncedCount, equals(1));
+      expect(receivedHttpBody, isNotNull);
+      expect(receivedHttpBody!['entries'], isA<List>());
+
+      final firstEntry =
+          receivedHttpBody!['entries'][0] as Map<String, dynamic>;
+
+      // Verify contract against backend pushSyncSchema:
+      expect(firstEntry['operationId'], equals(opId));
+      expect(firstEntry['entityType'], equals('CUSTOMER'));
+      expect(firstEntry['entityId'], equals('cust-push-schema'));
+      expect(firstEntry['operationType'], equals('CREATE'));
+      expect(firstEntry['createdAt'], isNotNull);
+
+      // payload must be Map/object in JSON, NOT a string
+      expect(firstEntry['payload'], isA<Map<String, dynamic>>());
+      expect(firstEntry['payload']['name'], equals('Schema Test'));
+
+      // Ensure no snake_case leaks
+      expect(firstEntry.containsKey('operation_id'), isFalse);
+      expect(firstEntry.containsKey('entity_type'), isFalse);
+      expect(firstEntry.containsKey('attempt_count'), isFalse);
+
+      // Clean up
+      await db.delete('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+    });
+  });
+
   group('SyncEngine Retry, Backoff & Atomic Cursor Tests', () {
     test('calculateNextRetryAt grows exponentially and respects max boundary',
         () {

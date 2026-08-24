@@ -33,6 +33,7 @@ class OutboxItem {
     this.status = 'PENDING',
   });
 
+  /// Formats outbox item for SQLite table persistence (snake_case + json-encoded payload string)
   Map<String, dynamic> toMap() {
     return {
       'operation_id': operationId,
@@ -48,6 +49,20 @@ class OutboxItem {
       'next_retry_at': nextRetryAt,
       'last_error': lastError,
       'status': status,
+    };
+  }
+
+  /// Formats outbox item for backend HTTP `/sync/push` API (camelCase + payload as Map)
+  Map<String, dynamic> toApiPayload() {
+    return {
+      'operationId': operationId,
+      if (deviceId != null) 'deviceId': deviceId,
+      if (userId != null) 'userId': userId,
+      'entityType': entityType,
+      'entityId': entityId,
+      'operationType': operationType,
+      'payload': payload,
+      'createdAt': createdAt,
     };
   }
 

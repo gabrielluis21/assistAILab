@@ -77,7 +77,7 @@ class SyncEngine {
     }
 
     final payload = {
-      'entries': pendingEntries.map((e) => e.toMap()).toList(),
+      'entries': pendingEntries.map((e) => e.toApiPayload()).toList(),
     };
 
     final nowIso = DateTime.now().toIso8601String();
