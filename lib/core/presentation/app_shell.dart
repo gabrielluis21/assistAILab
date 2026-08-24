@@ -6,6 +6,9 @@ import '../../features/customers/customers_page.dart';
 import '../../features/equipment/equipments_page.dart';
 import '../../features/parts/parts_page.dart';
 import '../../features/finance/finance_page.dart';
+import '../sync/sync_providers.dart';
+import '../sync/sync_state.dart';
+import '../sync/sync_trigger.dart';
 
 // Selected navigation index provider
 final _navIndexProvider = StateProvider<int>((ref) => 0);
@@ -182,34 +185,101 @@ class AppShell extends ConsumerWidget {
   }
 }
 
-/// Simple sync status indicator shown at bottom of nav rail
+/// Dynamic sync status indicator shown at bottom of nav rail
 class _SyncStatusIndicator extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    final syncState = ref.watch(syncStateProvider);
+
+    Color dotColor = const Color(0xFF10B981); // Emerald / synced
+    String label = 'Sincronizado';
+    Widget icon = Container(
+      width: 8,
+      height: 8,
       decoration: BoxDecoration(
-        color: const Color(0xFF0F172A),
-        borderRadius: BorderRadius.circular(8),
+        color: dotColor,
+        shape: BoxShape.circle,
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: const BoxDecoration(
-              color: Color(0xFF10B981),
-              shape: BoxShape.circle,
+    );
+
+    if (syncState.isSyncing) {
+      dotColor = const Color(0xFF38BDF8); // Sky blue
+      label = 'Sincronizando...';
+      icon = const SizedBox(
+        width: 10,
+        height: 10,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: Color(0xFF38BDF8),
+        ),
+      );
+    } else if (syncState.status == SyncStatus.error) {
+      dotColor = const Color(0xFFEF4444); // Red
+      label = syncState.hasPendingMutations
+          ? 'Erro (${syncState.pendingOutboxCount} pendentes)'
+          : 'Erro de Sync';
+      icon = Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          color: dotColor,
+          shape: BoxShape.circle,
+        ),
+      );
+    } else if (syncState.hasPendingMutations) {
+      dotColor = const Color(0xFFF59E0B); // Amber
+      label = '${syncState.pendingOutboxCount} pendente(s)';
+      icon = Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          color: dotColor,
+          shape: BoxShape.circle,
+        ),
+      );
+    }
+
+    final tooltip = syncState.lastError != null
+        ? 'Erro: ${syncState.lastError}\nClique para sincronizar agora'
+        : 'Clique para sincronizar agora';
+
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () {
+          ref.read(syncSchedulerProvider).requestSync(SyncTrigger.manual);
+        },
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F172A),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: dotColor.withOpacity(0.3),
+              width: 1,
             ),
           ),
-          const SizedBox(width: 8),
-          const Text(
-            'Local Service',
-            style: TextStyle(color: Colors.white54, fontSize: 11),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              icon,
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: dotColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

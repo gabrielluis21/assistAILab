@@ -3,7 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'equipment_entity.dart';
 import 'equipment_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../customers/customers_provider.dart' show outboxDaoProvider;
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 
 final equipmentRepositoryProvider = Provider<EquipmentRepository>(
   (ref) => EquipmentLocalDataSource(),
@@ -54,6 +55,8 @@ class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
       createdAt: DateTime.now().toIso8601String(),
     ));
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -71,6 +74,8 @@ class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
       payload: {'id': id},
       createdAt: DateTime.now().toIso8601String(),
     ));
+
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
     state = AsyncData(await _load());
   }

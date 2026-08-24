@@ -3,7 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'service_order_entity.dart';
 import '../../core/database/service_order_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../customers/customers_provider.dart' show outboxDaoProvider;
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 
 final serviceOrderRepositoryProvider = Provider<ServiceOrderRepository>(
   (ref) => ServiceOrderLocalDataSource(),
@@ -77,6 +78,8 @@ class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
       createdAt: DateTime.now().toIso8601String(),
     ));
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -100,6 +103,8 @@ class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
       payload: {'id': id, 'status': newStatus.toDbString()},
       createdAt: DateTime.now().toIso8601String(),
     ));
+
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
     state = AsyncData(await _load());
     return true;

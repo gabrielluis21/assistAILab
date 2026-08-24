@@ -3,7 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'part_entity.dart';
 import 'part_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../customers/customers_provider.dart' show outboxDaoProvider;
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 
 final partRepositoryProvider = Provider<PartRepository>(
   (ref) => PartLocalDataSource(),
@@ -52,6 +53,8 @@ class PartsNotifier extends AsyncNotifier<List<PartEntity>> {
       createdAt: DateTime.now().toIso8601String(),
     ));
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -69,6 +72,8 @@ class PartsNotifier extends AsyncNotifier<List<PartEntity>> {
       payload: {'id': id},
       createdAt: DateTime.now().toIso8601String(),
     ));
+
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
     state = AsyncData(await _load());
   }

@@ -3,7 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'payment_entity.dart';
 import 'payment_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../customers/customers_provider.dart' show outboxDaoProvider;
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 
 final paymentRepositoryProvider = Provider<PaymentRepository>(
   (ref) => PaymentLocalDataSource(),
@@ -71,6 +72,8 @@ class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
       createdAt: now,
     ));
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -90,6 +93,8 @@ class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
       createdAt: now,
     ));
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -108,6 +113,8 @@ class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
       payload: {'id': id, 'status': PaymentStatus.cancelled.toDbString()},
       createdAt: now,
     ));
+
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
     state = AsyncData(await _load());
   }

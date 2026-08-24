@@ -3,7 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'service_order_item_entity.dart';
 import '../../core/database/service_order_item_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../customers/customers_provider.dart' show outboxDaoProvider;
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 import 'service_orders_provider.dart';
 
 final serviceOrderItemRepositoryProvider = Provider<ServiceOrderItemRepository>(
@@ -79,6 +80,7 @@ class ServiceOrderItemsNotifier
       ));
     }
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
     ref.read(serviceOrdersProvider.notifier).refresh();
     state = AsyncData(await _load(serviceOrderId));
   }
@@ -121,6 +123,7 @@ class ServiceOrderItemsNotifier
       ));
     }
 
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
     ref.read(serviceOrdersProvider.notifier).refresh();
     state = AsyncData(await _load(serviceOrderId));
   }

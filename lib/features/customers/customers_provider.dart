@@ -3,14 +3,13 @@ import 'package:uuid/uuid.dart';
 import 'customer_entity.dart';
 import 'customer_repository.dart';
 import '../../core/database/outbox_dao.dart';
+import '../../core/sync/sync_providers.dart';
+import '../../core/sync/sync_trigger.dart';
 
 // Repository provider
 final customerRepositoryProvider = Provider<CustomerRepository>(
   (ref) => CustomerLocalDataSource(),
 );
-
-// Outbox DAO provider
-final outboxDaoProvider = Provider<OutboxDao>((ref) => OutboxDao());
 
 // Customers state
 class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
@@ -58,6 +57,9 @@ class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
       createdAt: DateTime.now().toIso8601String(),
     ));
 
+    // Request background sync
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+
     state = AsyncData(await _load());
   }
 
@@ -75,6 +77,9 @@ class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
       payload: {'id': id},
       createdAt: DateTime.now().toIso8601String(),
     ));
+
+    // Request background sync
+    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
     state = AsyncData(await _load());
   }

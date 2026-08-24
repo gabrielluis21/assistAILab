@@ -131,4 +131,29 @@ class OutboxDao {
       whereArgs: [operationId],
     );
   }
+
+  /// Recovers entries stuck in PROCESSING state (e.g. after crash or sudden termination)
+  /// by returning them to PENDING state for retry.
+  Future<int> recoverProcessingEntries() async {
+    final db = await SqliteDatabase.instance;
+    return db.update(
+      'outbox',
+      {'status': 'PENDING'},
+      where: 'status = ?',
+      whereArgs: ['PROCESSING'],
+    );
+  }
+
+  /// Returns total count of pending and failed entries waiting for synchronization.
+  Future<int> getPendingCount() async {
+    final db = await SqliteDatabase.instance;
+    final res = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM outbox WHERE status IN (?, ?, ?)',
+      ['PENDING', 'PROCESSING', 'FAILED'],
+    );
+    if (res.isNotEmpty) {
+      return (res.first['count'] as num?)?.toInt() ?? 0;
+    }
+    return 0;
+  }
 }
