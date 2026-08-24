@@ -3,16 +3,18 @@ import 'sqlite_database.dart';
 import '../../features/service_orders/service_order_item_entity.dart';
 
 abstract class ServiceOrderItemRepository {
-  Future<List<ServiceOrderItemEntity>> listByOrder(String serviceOrderId);
-  Future<void> upsert(ServiceOrderItemEntity item);
-  Future<void> delete(String id);
+  Future<List<ServiceOrderItemEntity>> listByOrder(String serviceOrderId,
+      {DatabaseExecutor? executor});
+  Future<void> upsert(ServiceOrderItemEntity item,
+      {DatabaseExecutor? executor});
+  Future<void> delete(String id, {DatabaseExecutor? executor});
 }
 
 class ServiceOrderItemLocalDataSource implements ServiceOrderItemRepository {
   @override
-  Future<List<ServiceOrderItemEntity>> listByOrder(
-      String serviceOrderId) async {
-    final db = await SqliteDatabase.instance;
+  Future<List<ServiceOrderItemEntity>> listByOrder(String serviceOrderId,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query(
       'service_order_items',
       where: 'service_order_id = ?',
@@ -23,8 +25,9 @@ class ServiceOrderItemLocalDataSource implements ServiceOrderItemRepository {
   }
 
   @override
-  Future<void> upsert(ServiceOrderItemEntity item) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> upsert(ServiceOrderItemEntity item,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'service_order_items',
       item.toMap(),
@@ -33,8 +36,8 @@ class ServiceOrderItemLocalDataSource implements ServiceOrderItemRepository {
   }
 
   @override
-  Future<void> delete(String id) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> delete(String id, {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.delete('service_order_items', where: 'id = ?', whereArgs: [id]);
   }
 }

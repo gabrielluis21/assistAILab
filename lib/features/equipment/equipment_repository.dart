@@ -3,24 +3,26 @@ import '../../core/database/sqlite_database.dart';
 import 'equipment_entity.dart';
 
 abstract class EquipmentRepository {
-  Future<List<EquipmentEntity>> listAll();
-  Future<List<EquipmentEntity>> listByCustomer(String customerId);
-  Future<EquipmentEntity?> findById(String id);
-  Future<void> upsert(EquipmentEntity equipment);
-  Future<void> delete(String id);
+  Future<List<EquipmentEntity>> listAll({DatabaseExecutor? executor});
+  Future<List<EquipmentEntity>> listByCustomer(String customerId,
+      {DatabaseExecutor? executor});
+  Future<EquipmentEntity?> findById(String id, {DatabaseExecutor? executor});
+  Future<void> upsert(EquipmentEntity equipment, {DatabaseExecutor? executor});
+  Future<void> delete(String id, {DatabaseExecutor? executor});
 }
 
 class EquipmentLocalDataSource implements EquipmentRepository {
   @override
-  Future<List<EquipmentEntity>> listAll() async {
-    final db = await SqliteDatabase.instance;
+  Future<List<EquipmentEntity>> listAll({DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query('equipments', orderBy: 'brand ASC, model ASC');
     return maps.map(EquipmentEntity.fromMap).toList();
   }
 
   @override
-  Future<List<EquipmentEntity>> listByCustomer(String customerId) async {
-    final db = await SqliteDatabase.instance;
+  Future<List<EquipmentEntity>> listByCustomer(String customerId,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query(
       'equipments',
       where: 'customer_id = ?',
@@ -31,16 +33,18 @@ class EquipmentLocalDataSource implements EquipmentRepository {
   }
 
   @override
-  Future<EquipmentEntity?> findById(String id) async {
-    final db = await SqliteDatabase.instance;
+  Future<EquipmentEntity?> findById(String id,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query('equipments', where: 'id = ?', whereArgs: [id]);
     if (maps.isEmpty) return null;
     return EquipmentEntity.fromMap(maps.first);
   }
 
   @override
-  Future<void> upsert(EquipmentEntity equipment) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> upsert(EquipmentEntity equipment,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'equipments',
       equipment.toMap(),
@@ -49,8 +53,8 @@ class EquipmentLocalDataSource implements EquipmentRepository {
   }
 
   @override
-  Future<void> delete(String id) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> delete(String id, {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.delete('equipments', where: 'id = ?', whereArgs: [id]);
   }
 }

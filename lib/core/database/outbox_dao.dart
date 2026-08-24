@@ -86,8 +86,8 @@ class OutboxItem {
 }
 
 class OutboxDao {
-  Future<void> insert(OutboxItem item) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> insert(OutboxItem item, {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'outbox',
       item.toMap(),

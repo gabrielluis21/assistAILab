@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'equipment_entity.dart';
 import 'equipment_repository.dart';
 import '../../core/database/outbox_dao.dart';
+import '../../core/database/sqlite_database.dart';
+import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
 
@@ -44,16 +46,22 @@ class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
     final repo = ref.read(equipmentRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    await repo.upsert(equipment);
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await repo.upsert(equipment, executor: txn);
 
-    await outbox.insert(OutboxItem(
-      operationId: uuid.v4(),
-      entityType: 'EQUIPMENT',
-      entityId: equipment.id,
-      operationType: 'CREATE',
-      payload: equipment.toMap(),
-      createdAt: DateTime.now().toIso8601String(),
-    ));
+      await outbox.insert(
+        OutboxItem(
+          operationId: uuid.v4(),
+          entityType: 'EQUIPMENT',
+          entityId: equipment.id,
+          operationType: 'CREATE',
+          payload: SyncPayloadMapper.equipment(equipment),
+          createdAt: DateTime.now().toIso8601String(),
+        ),
+        executor: txn,
+      );
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
@@ -64,16 +72,22 @@ class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
     final repo = ref.read(equipmentRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    await repo.delete(id);
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await repo.delete(id, executor: txn);
 
-    await outbox.insert(OutboxItem(
-      operationId: const Uuid().v4(),
-      entityType: 'EQUIPMENT',
-      entityId: id,
-      operationType: 'DELETE',
-      payload: {'id': id},
-      createdAt: DateTime.now().toIso8601String(),
-    ));
+      await outbox.insert(
+        OutboxItem(
+          operationId: const Uuid().v4(),
+          entityType: 'EQUIPMENT',
+          entityId: id,
+          operationType: 'DELETE',
+          payload: SyncPayloadMapper.delete(id),
+          createdAt: DateTime.now().toIso8601String(),
+        ),
+        executor: txn,
+      );
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 

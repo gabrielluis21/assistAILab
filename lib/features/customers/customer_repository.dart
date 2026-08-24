@@ -3,31 +3,33 @@ import '../../core/database/sqlite_database.dart';
 import 'customer_entity.dart';
 
 abstract class CustomerRepository {
-  Future<List<CustomerEntity>> listAll();
-  Future<CustomerEntity?> findById(String id);
-  Future<void> upsert(CustomerEntity customer);
-  Future<void> delete(String id);
+  Future<List<CustomerEntity>> listAll({DatabaseExecutor? executor});
+  Future<CustomerEntity?> findById(String id, {DatabaseExecutor? executor});
+  Future<void> upsert(CustomerEntity customer, {DatabaseExecutor? executor});
+  Future<void> delete(String id, {DatabaseExecutor? executor});
 }
 
 class CustomerLocalDataSource implements CustomerRepository {
   @override
-  Future<List<CustomerEntity>> listAll() async {
-    final db = await SqliteDatabase.instance;
+  Future<List<CustomerEntity>> listAll({DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query('customers', orderBy: 'name ASC');
     return maps.map(CustomerEntity.fromMap).toList();
   }
 
   @override
-  Future<CustomerEntity?> findById(String id) async {
-    final db = await SqliteDatabase.instance;
+  Future<CustomerEntity?> findById(String id,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final maps = await db.query('customers', where: 'id = ?', whereArgs: [id]);
     if (maps.isEmpty) return null;
     return CustomerEntity.fromMap(maps.first);
   }
 
   @override
-  Future<void> upsert(CustomerEntity customer) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> upsert(CustomerEntity customer,
+      {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'customers',
       customer.toMap(),
@@ -36,8 +38,8 @@ class CustomerLocalDataSource implements CustomerRepository {
   }
 
   @override
-  Future<void> delete(String id) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> delete(String id, {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.delete('customers', where: 'id = ?', whereArgs: [id]);
   }
 }

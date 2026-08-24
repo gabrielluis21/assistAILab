@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'service_order_item_entity.dart';
 import '../../core/database/service_order_item_repository.dart';
 import '../../core/database/outbox_dao.dart';
+import '../../core/database/sqlite_database.dart';
+import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
 import 'service_orders_provider.dart';
@@ -47,38 +49,50 @@ class ServiceOrderItemsNotifier
     final orderRepo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    await itemRepo.upsert(item);
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await itemRepo.upsert(item, executor: txn);
 
-    await outbox.insert(OutboxItem(
-      operationId: uuid.v4(),
-      entityType: 'SERVICE_ORDER_ITEM',
-      entityId: item.id,
-      operationType: 'CREATE',
-      payload: item.toMap(),
-      createdAt: DateTime.now().toIso8601String(),
-    ));
-
-    // Recalculate OS total amount
-    final allItems = await itemRepo.listByOrder(serviceOrderId);
-    final newTotal = allItems.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
-
-    final existingOrder = await orderRepo.findById(serviceOrderId);
-    if (existingOrder != null) {
-      final updatedOrder = existingOrder.copyWith(
-        totalAmount: newTotal,
-        updatedAt: DateTime.now().toIso8601String(),
+      await outbox.insert(
+        OutboxItem(
+          operationId: uuid.v4(),
+          entityType: 'SERVICE_ORDER_ITEM',
+          entityId: item.id,
+          operationType: 'CREATE',
+          payload: SyncPayloadMapper.serviceOrderItem(item),
+          createdAt: DateTime.now().toIso8601String(),
+        ),
+        executor: txn,
       );
-      await orderRepo.upsert(updatedOrder);
 
-      await outbox.insert(OutboxItem(
-        operationId: uuid.v4(),
-        entityType: 'SERVICE_ORDER',
-        entityId: serviceOrderId,
-        operationType: 'UPDATE',
-        payload: updatedOrder.toMap(),
-        createdAt: DateTime.now().toIso8601String(),
-      ));
-    }
+      // Recalculate OS total amount inside transaction
+      final allItems =
+          await itemRepo.listByOrder(serviceOrderId, executor: txn);
+      final newTotal =
+          allItems.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
+
+      final existingOrder =
+          await orderRepo.findById(serviceOrderId, executor: txn);
+      if (existingOrder != null) {
+        final updatedOrder = existingOrder.copyWith(
+          totalAmount: newTotal,
+          updatedAt: DateTime.now().toIso8601String(),
+        );
+        await orderRepo.upsert(updatedOrder, executor: txn);
+
+        await outbox.insert(
+          OutboxItem(
+            operationId: uuid.v4(),
+            entityType: 'SERVICE_ORDER',
+            entityId: serviceOrderId,
+            operationType: 'UPDATE',
+            payload: SyncPayloadMapper.serviceOrder(updatedOrder),
+            createdAt: DateTime.now().toIso8601String(),
+          ),
+          executor: txn,
+        );
+      }
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
     ref.read(serviceOrdersProvider.notifier).refresh();
@@ -90,39 +104,50 @@ class ServiceOrderItemsNotifier
     final orderRepo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    await itemRepo.delete(itemId);
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await itemRepo.delete(itemId, executor: txn);
 
-    await outbox.insert(OutboxItem(
-      operationId: const Uuid().v4(),
-      entityType: 'SERVICE_ORDER_ITEM',
-      entityId: itemId,
-      operationType: 'DELETE',
-      payload: {'id': itemId},
-      createdAt: DateTime.now().toIso8601String(),
-    ));
-
-    // Recalculate OS total
-    final remaining = await itemRepo.listByOrder(serviceOrderId);
-    final newTotal =
-        remaining.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
-
-    final existingOrder = await orderRepo.findById(serviceOrderId);
-    if (existingOrder != null) {
-      final updatedOrder = existingOrder.copyWith(
-        totalAmount: newTotal,
-        updatedAt: DateTime.now().toIso8601String(),
+      await outbox.insert(
+        OutboxItem(
+          operationId: const Uuid().v4(),
+          entityType: 'SERVICE_ORDER_ITEM',
+          entityId: itemId,
+          operationType: 'DELETE',
+          payload: SyncPayloadMapper.delete(itemId),
+          createdAt: DateTime.now().toIso8601String(),
+        ),
+        executor: txn,
       );
-      await orderRepo.upsert(updatedOrder);
 
-      await outbox.insert(OutboxItem(
-        operationId: const Uuid().v4(),
-        entityType: 'SERVICE_ORDER',
-        entityId: serviceOrderId,
-        operationType: 'UPDATE',
-        payload: updatedOrder.toMap(),
-        createdAt: DateTime.now().toIso8601String(),
-      ));
-    }
+      // Recalculate OS total inside transaction
+      final remaining =
+          await itemRepo.listByOrder(serviceOrderId, executor: txn);
+      final newTotal =
+          remaining.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
+
+      final existingOrder =
+          await orderRepo.findById(serviceOrderId, executor: txn);
+      if (existingOrder != null) {
+        final updatedOrder = existingOrder.copyWith(
+          totalAmount: newTotal,
+          updatedAt: DateTime.now().toIso8601String(),
+        );
+        await orderRepo.upsert(updatedOrder, executor: txn);
+
+        await outbox.insert(
+          OutboxItem(
+            operationId: const Uuid().v4(),
+            entityType: 'SERVICE_ORDER',
+            entityId: serviceOrderId,
+            operationType: 'UPDATE',
+            payload: SyncPayloadMapper.serviceOrder(updatedOrder),
+            createdAt: DateTime.now().toIso8601String(),
+          ),
+          executor: txn,
+        );
+      }
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
     ref.read(serviceOrdersProvider.notifier).refresh();

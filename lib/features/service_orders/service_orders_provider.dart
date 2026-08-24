@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 import 'service_order_entity.dart';
 import '../../core/database/service_order_repository.dart';
 import '../../core/database/outbox_dao.dart';
+import '../../core/database/sqlite_database.dart';
+import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
 
@@ -72,16 +74,20 @@ class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
     final repo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    await repo.upsert(order);
-
-    await outbox.insert(OutboxItem(
+    final outboxItem = OutboxItem(
       operationId: uuid.v4(),
       entityType: 'SERVICE_ORDER',
       entityId: order.id,
       operationType: 'CREATE',
-      payload: order.toMap(),
+      payload: SyncPayloadMapper.serviceOrder(order),
       createdAt: DateTime.now().toIso8601String(),
-    ));
+    );
+
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await repo.upsert(order, executor: txn);
+      await outbox.insert(outboxItem, executor: txn);
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
@@ -98,16 +104,25 @@ class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
     final allowed = allowedTransitionsFor(order.status);
     if (!allowed.contains(newStatus)) return false;
 
-    await repo.updateStatus(id, newStatus);
+    final updatedOrder = order.copyWith(
+      status: newStatus,
+      updatedAt: DateTime.now().toIso8601String(),
+    );
 
-    await outbox.insert(OutboxItem(
+    final outboxItem = OutboxItem(
       operationId: const Uuid().v4(),
       entityType: 'SERVICE_ORDER',
       entityId: id,
       operationType: 'UPDATE',
-      payload: {'id': id, 'status': newStatus.toDbString()},
+      payload: SyncPayloadMapper.serviceOrder(updatedOrder),
       createdAt: DateTime.now().toIso8601String(),
-    ));
+    );
+
+    final db = await SqliteDatabase.instance;
+    await db.transaction((txn) async {
+      await repo.upsert(updatedOrder, executor: txn);
+      await outbox.insert(outboxItem, executor: txn);
+    });
 
     ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
 
