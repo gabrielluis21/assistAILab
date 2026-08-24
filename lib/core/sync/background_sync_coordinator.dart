@@ -13,7 +13,8 @@ import 'sync_trigger.dart';
 /// - Queue catch-up cycles when triggers occur during an active sync;
 /// - Debounce high-frequency triggers (like repeated local mutations);
 /// - Recover interrupted operations on initialization;
-/// - Expose reactive SyncState.
+/// - Expose reactive SyncState;
+/// - Expose [lastCycleDidWork] so the Scheduler can make accurate IDLE decisions.
 class BackgroundSyncCoordinator {
   final SyncEngine syncEngine;
   final OutboxDao outboxDao;
@@ -27,6 +28,13 @@ class BackgroundSyncCoordinator {
   bool _hasPendingCatchUp = false;
   SyncTrigger? _pendingCatchUpTrigger;
   Timer? _debounceTimer;
+
+  /// Whether the last completed sync cycle performed any real work.
+  ///
+  /// True when at least one Outbox entry was pushed OR at least one remote
+  /// change was pulled during the cycle. Used by [SyncScheduler] to decide
+  /// whether to increment [consecutiveEmptyCycles].
+  bool lastCycleDidWork = false;
 
   BackgroundSyncCoordinator({
     required this.syncEngine,
@@ -49,12 +57,13 @@ class BackgroundSyncCoordinator {
   }
 
   /// Recovers operations stuck in PROCESSING status (e.g. app terminated during push).
+  /// Only recovers entries stale for more than 5 minutes.
   Future<void> recoverInterruptedOperations() async {
     try {
       final recovered = await outboxDao.recoverProcessingEntries();
       if (recovered > 0) {
         debugPrint(
-            '🔄 BackgroundSyncCoordinator: Recovered $recovered interrupted PROCESSING entries to PENDING.');
+            '🔄 BackgroundSyncCoordinator: Recovered $recovered stale PROCESSING entries → FAILED.');
       }
     } catch (e) {
       debugPrint(
@@ -101,10 +110,16 @@ class BackgroundSyncCoordinator {
 
     try {
       // 1. Push Phase: process pending Outbox entries
-      await syncEngine.pushPendingOutbox();
+      final pushSummary = await syncEngine.pushPendingOutbox();
 
       // 2. Pull Phase: fetch incremental updates from server
-      await syncEngine.pullIncrementalChanges();
+      final pullSummary = await syncEngine.pullIncrementalChanges();
+
+      // Determine whether this cycle performed any real work.
+      // Push counts as work if at least one entry was processed.
+      // Pull counts as work if at least one change was applied.
+      lastCycleDidWork =
+          pushSummary.totalProcessed > 0 || pullSummary.totalChanges > 0;
 
       final remainingPending = await _getPendingOutboxCount();
       final now = DateTime.now();
@@ -118,6 +133,7 @@ class BackgroundSyncCoordinator {
       ));
     } catch (e) {
       debugPrint('❌ BackgroundSyncCoordinator Sync Error: $e');
+      lastCycleDidWork = false;
       final remainingPending = await _getPendingOutboxCount();
 
       _emitState(state.copyWith(

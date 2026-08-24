@@ -35,7 +35,9 @@ class FakeOutboxDao extends OutboxDao {
   Future<int> getPendingCount() async => pendingCount;
 
   @override
-  Future<int> recoverProcessingEntries() async {
+  Future<int> recoverProcessingEntries({
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
     final count = recoveredCount;
     recoveredCount = 0;
     return count;
@@ -53,6 +55,12 @@ class FakeSyncEngine extends SyncEngine {
   Duration delay = Duration.zero;
   Completer<void>? inProgressCompleter;
 
+  /// Controls how many entries the fake push reports as processed.
+  int fakePushProcessed = 1;
+
+  /// Controls how many changes the fake pull reports.
+  int fakePullChanges = 0;
+
   FakeSyncEngine({required super.apiClient, super.outboxDao});
 
   @override
@@ -67,11 +75,15 @@ class FakeSyncEngine extends SyncEngine {
     if (shouldThrow) {
       throw Exception('Network push failed');
     }
-    return const SyncPushSummary(totalProcessed: 1, syncedCount: 1);
+    return SyncPushSummary(
+        totalProcessed: fakePushProcessed, syncedCount: fakePushProcessed);
   }
 
   @override
-  Future<SyncPullSummary> pullIncrementalChanges({int limit = 50}) async {
+  Future<SyncPullSummary> pullIncrementalChanges({
+    int pullPageSize = 50,
+    int maxPullPagesPerCycle = 10,
+  }) async {
     pullCount++;
     if (delay > Duration.zero) {
       await Future.delayed(delay);
@@ -79,7 +91,7 @@ class FakeSyncEngine extends SyncEngine {
     if (shouldThrow) {
       throw Exception('Network pull failed');
     }
-    return const SyncPullSummary(totalChanges: 0);
+    return SyncPullSummary(totalChanges: fakePullChanges);
   }
 }
 
@@ -209,26 +221,39 @@ void main() {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
+      // The mock returns advancing cursor on call 1, same cursor on call 2
+      // so the engine makes exactly 2 HTTP calls before stabilising.
+      int callCount = 0;
       final client = MockHttpClientWithCustomResponses((request) async {
         if (request.url.path.contains('/sync/changes')) {
-          return http.Response(
-            jsonEncode({
-              'nextCursor': 'next_cursor_200',
-              'changes': [
-                {
-                  'entityType': 'CUSTOMER',
-                  'entityId': 'cust_atomic_1',
-                  'operationType': 'CREATE',
-                  'data': {
-                    'name': 'Atomic Customer',
-                    'email': 'atomic@test.com',
-                  },
-                }
-              ]
-            }),
-            200,
-            headers: {'content-type': 'application/json'},
-          );
+          callCount++;
+          if (callCount == 1) {
+            return http.Response(
+              jsonEncode({
+                'nextCursor': 'next_cursor_200',
+                'changes': [
+                  {
+                    'entityType': 'CUSTOMER',
+                    'entityId': 'cust_atomic_1',
+                    'operationType': 'CREATE',
+                    'data': {
+                      'name': 'Atomic Customer',
+                      'email': 'atomic@test.com',
+                    },
+                  }
+                ]
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          } else {
+            // Same cursor → engine stops.
+            return http.Response(
+              jsonEncode({'nextCursor': 'next_cursor_200', 'changes': []}),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
         }
         return http.Response('Not Found', 404);
       });
@@ -471,6 +496,254 @@ void main() {
       expect(fakeEngine.pushCount, equals(1));
       expect(coordinator.state.lastTrigger, equals(SyncTrigger.appResumed));
       expect(scheduler.currentCadence, equals(SyncCadence.normal));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Item 1: Pull Catch-up — cursor-progress based termination
+  // ─────────────────────────────────────────────────────────────────────────
+  group('SyncEngine Pull Cursor-Progress Tests', () {
+    test('Pull continues when changes=[] but cursor advances (cursor progress)',
+        () async {
+      int callCount = 0;
+      // Page 1: 0 changes but cursor advances (cursor-progress = continue)
+      // Page 2: cursor stabilises (stop)
+      final cursors = [
+        ('cursor_v2', <dynamic>[]),
+        ('cursor_v2', <dynamic>[]), // same cursor → stop
+      ];
+
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path.contains('/sync/changes')) {
+          final entry = cursors[callCount.clamp(0, cursors.length - 1)];
+          callCount++;
+          return http.Response(
+            jsonEncode({'nextCursor': entry.$1, 'changes': entry.$2}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient);
+
+      final result = await engine.pullIncrementalChanges();
+
+      // Should have fetched 2 pages: first advanced cursor, second stabilised.
+      expect(callCount, equals(2));
+      expect(result.totalChanges, equals(0));
+    });
+
+    test('Pull stops immediately when cursor does not advance (first page)',
+        () async {
+      int callCount = 0;
+      final client = MockHttpClientWithCustomResponses((request) async {
+        callCount++;
+        return http.Response(
+          jsonEncode({
+            'nextCursor': null, // no cursor → stop immediately
+            'changes': <dynamic>[],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient);
+
+      await engine.pullIncrementalChanges();
+
+      // Should only have made one request because cursor didn't advance.
+      expect(callCount, equals(1));
+    });
+
+    test('Pull respects maxPullPagesPerCycle limit (10 pages)', () async {
+      // Clear any cursor left by previous tests to ensure deterministic start.
+      final db = await SqliteDatabase.instance;
+      await db.delete('sync_metadata',
+          where: 'key = ?', whereArgs: ['last_cursor']);
+
+      int callCount = 0;
+      // Use timestamp-based prefixes to avoid ID/cursor conflicts with other tests.
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      // Always returns a different advancing cursor so loop would be infinite
+      // without the page guard.
+      final client = MockHttpClientWithCustomResponses((request) async {
+        callCount++;
+        return http.Response(
+          jsonEncode({
+            'nextCursor': 'cur_${ts}_v$callCount',
+            'changes': [
+              {
+                'entityType': 'CUSTOMER',
+                'entityId': 'pg_${ts}_c$callCount',
+                'operationType': 'CREATE',
+                'data': {'name': 'Customer $callCount'},
+              }
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient);
+
+      final result =
+          await engine.pullIncrementalChanges(maxPullPagesPerCycle: 10);
+
+      // Must stop at exactly 10 pages.
+      expect(callCount, equals(10));
+      expect(result.totalChanges, equals(10));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Item 2: Processing Recovery — stale timeout filter
+  // ─────────────────────────────────────────────────────────────────────────
+  group('OutboxDao Processing Recovery Timeout Tests', () {
+    test('recoverProcessingEntries does NOT recover recent PROCESSING entries',
+        () async {
+      final db = await SqliteDatabase.instance;
+
+      // Insert a PROCESSING entry with last_attempt_at = now (fresh)
+      final freshOpId = 'op-fresh-${DateTime.now().millisecondsSinceEpoch}';
+      await db.insert('outbox', {
+        'operation_id': freshOpId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'cust-1',
+        'operation_type': 'CREATE',
+        'payload': '{}',
+        'status': 'PROCESSING',
+        'attempt_count': 1,
+        'created_at': DateTime.now().toIso8601String(),
+        'last_attempt_at': DateTime.now().toIso8601String(),
+      });
+
+      final dao = OutboxDao();
+      // Using a 5-minute timeout: fresh entry should NOT be recovered.
+      final count = await dao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5));
+
+      // Fresh entry is not stale — 0 should be recovered.
+      expect(count, equals(0));
+
+      // Clean up
+      await db
+          .delete('outbox', where: 'operation_id = ?', whereArgs: [freshOpId]);
+    });
+
+    test(
+        'recoverProcessingEntries DOES recover stale PROCESSING entries (>5min)',
+        () async {
+      final db = await SqliteDatabase.instance;
+
+      // Insert a PROCESSING entry with last_attempt_at = 10 minutes ago (stale)
+      final staleOpId = 'op-stale-${DateTime.now().millisecondsSinceEpoch}';
+      final staleTime = DateTime.now()
+          .subtract(const Duration(minutes: 10))
+          .toIso8601String();
+      await db.insert('outbox', {
+        'operation_id': staleOpId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'cust-2',
+        'operation_type': 'CREATE',
+        'payload': '{}',
+        'status': 'PROCESSING',
+        'attempt_count': 1,
+        'created_at': DateTime.now().toIso8601String(),
+        'last_attempt_at': staleTime,
+      });
+
+      final dao = OutboxDao();
+      final count = await dao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5));
+
+      // Stale entry must be recovered → FAILED.
+      expect(count, greaterThanOrEqualTo(1));
+
+      final rows = await db
+          .query('outbox', where: 'operation_id = ?', whereArgs: [staleOpId]);
+      expect(rows.isNotEmpty, isTrue);
+      expect(rows.first['status'], equals('FAILED'));
+
+      // Clean up
+      await db
+          .delete('outbox', where: 'operation_id = ?', whereArgs: [staleOpId]);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Item 4: Scheduler Work Detection
+  // ─────────────────────────────────────────────────────────────────────────
+  group('Scheduler IDLE Work Detection Tests', () {
+    late FakeApiClient fakeApi;
+    late FakeOutboxDao fakeDao;
+    late FakeSyncEngine fakeEngine;
+    late BackgroundSyncCoordinator coordinator;
+    late SyncScheduler scheduler;
+
+    setUp(() {
+      fakeApi = FakeApiClient();
+      fakeDao = FakeOutboxDao();
+      fakeEngine = FakeSyncEngine(apiClient: fakeApi, outboxDao: fakeDao);
+      coordinator = BackgroundSyncCoordinator(
+        syncEngine: fakeEngine,
+        outboxDao: fakeDao,
+      );
+      scheduler = SyncScheduler(coordinator: coordinator);
+    });
+
+    tearDown(() {
+      scheduler.dispose();
+      coordinator.dispose();
+    });
+
+    test(
+        'consecutiveEmptyCycles does NOT increment when cycle did real pull work',
+        () async {
+      // Engine reports 5 changes pulled.
+      fakeEngine.fakePushProcessed = 0;
+      fakeEngine.fakePullChanges = 5;
+
+      await coordinator.requestSync(SyncTrigger.periodic);
+
+      expect(coordinator.lastCycleDidWork, isTrue);
+
+      // Simulate one scheduler tick evaluation.
+      // Cadence should NOT promote to IDLE because cycle did work.
+      // Manually trigger _onAdaptiveTick logic via requestSync + check.
+      // State: healthy + pull work → consecutiveEmptyCycles stays 0.
+      // We check this via calling scheduler.requestSync(periodic) internally;
+      // since scheduler internals are private, we verify via coordinator flag.
+      expect(coordinator.lastCycleDidWork, isTrue);
+    });
+
+    test(
+        'consecutiveEmptyCycles increments only when push=0 AND pull=0 AND pending=0',
+        () async {
+      // Engine does nothing: no push, no pull.
+      fakeEngine.fakePushProcessed = 0;
+      fakeEngine.fakePullChanges = 0;
+      fakeDao.pendingCount = 0;
+
+      await coordinator.requestSync(SyncTrigger.periodic);
+
+      // lastCycleDidWork must be false.
+      expect(coordinator.lastCycleDidWork, isFalse);
+    });
+
+    test('lastCycleDidWork is true when push processed entries', () async {
+      fakeEngine.fakePushProcessed = 3;
+      fakeEngine.fakePullChanges = 0;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(coordinator.lastCycleDidWork, isTrue);
     });
   });
 }

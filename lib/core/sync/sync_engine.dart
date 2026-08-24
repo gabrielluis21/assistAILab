@@ -178,16 +178,24 @@ class SyncEngine {
   }
 
   /// Executes pull to fetch incremental server changes using atomic cursor transactions.
-  Future<SyncPullSummary> pullIncrementalChanges({int limit = 50}) async {
+  ///
+  /// Termination criteria (cursor-progress based, not changes.length):
+  /// - previousCursor == nextCursor → cursor stabilised, stop.
+  /// - maxPullPagesPerCycle (10) reached → stop to avoid infinite loops.
+  /// - Server returns null/empty nextCursor → stop.
+  Future<SyncPullSummary> pullIncrementalChanges({
+    int pullPageSize = 50,
+    int maxPullPagesPerCycle = 10,
+  }) async {
     int totalPulled = 0;
-    String? latestCursor;
-    bool hasMore = true;
+    String? previousCursor = await getLocalCursor();
+    String? latestCursor = previousCursor;
+    int pageCount = 0;
 
-    while (hasMore) {
-      final cursor = latestCursor ?? await getLocalCursor();
-      final cursorParam = (cursor != null && cursor.isNotEmpty)
-          ? '?cursor=$cursor&limit=$limit'
-          : '?limit=$limit';
+    while (pageCount < maxPullPagesPerCycle) {
+      final cursorParam = (latestCursor != null && latestCursor.isNotEmpty)
+          ? '?cursor=$latestCursor&limit=$pullPageSize'
+          : '?limit=$pullPageSize';
 
       final response = await apiClient
           .get('/sync/changes$cursorParam')
@@ -200,6 +208,8 @@ class SyncEngine {
       final body = jsonDecode(response.body) as Map<String, dynamic>;
       final nextCursor = body['nextCursor'] as String?;
       final changes = body['changes'] as List<dynamic>? ?? [];
+
+      pageCount++;
 
       final db = await SqliteDatabase.instance;
 
@@ -372,7 +382,6 @@ class SyncEngine {
 
         // Persist nextCursor atomically inside the transaction
         if (nextCursor != null && nextCursor.isNotEmpty) {
-          latestCursor = nextCursor;
           await txn.insert(
             'sync_metadata',
             {'key': 'last_cursor', 'value': nextCursor},
@@ -381,13 +390,20 @@ class SyncEngine {
         }
       });
 
-      if (changes.isNotEmpty) {
-        totalPulled += changes.length;
-      }
+      totalPulled += changes.length;
 
-      // If page had fewer items than limit or no changes, we have caught up
-      if (changes.length < limit || nextCursor == null || nextCursor.isEmpty) {
-        hasMore = false;
+      // Cursor-progress termination:
+      // Stop when cursor did not advance (stabilised) or server sent no cursor.
+      final cursorAdvanced = nextCursor != null &&
+          nextCursor.isNotEmpty &&
+          nextCursor != latestCursor;
+
+      if (cursorAdvanced) {
+        previousCursor = latestCursor;
+        latestCursor = nextCursor;
+      } else {
+        // Cursor stabilised or exhausted — no more pages.
+        break;
       }
     }
 

@@ -133,15 +133,21 @@ class OutboxDao {
     );
   }
 
-  /// Recovers entries stuck in PROCESSING state (e.g. after crash or sudden termination)
-  /// by returning them to PENDING state for retry.
-  Future<int> recoverProcessingEntries() async {
+  /// Recovers entries stuck in PROCESSING state for more than [timeout] (default 5 minutes)
+  /// by transitioning them to FAILED so they can be diagnosed and retried.
+  Future<int> recoverProcessingEntries({
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
     final db = await SqliteDatabase.instance;
+    final cutoff = DateTime.now().subtract(timeout).toIso8601String();
     return db.update(
       'outbox',
-      {'status': 'PENDING'},
-      where: 'status = ?',
-      whereArgs: ['PROCESSING'],
+      {
+        'status': 'FAILED',
+        'last_error': 'Operation timeout: stuck in PROCESSING for > 5 minutes',
+      },
+      where: 'status = ? AND (last_attempt_at IS NULL OR last_attempt_at <= ?)',
+      whereArgs: ['PROCESSING', cutoff],
     );
   }
 

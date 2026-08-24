@@ -9,23 +9,29 @@ import '../core/network/api_environment.dart';
 
 class LocalServiceRunner {
   final int port;
-  final String remoteApiUrl;
   HttpServer? _server;
-  late final OutboxDao _outboxDao;
-  late final SyncEngine _syncEngine;
-  late final BackgroundSyncCoordinator _coordinator;
-  late final ApiClient _apiClient;
+  final BackgroundSyncCoordinator _coordinator;
 
+  /// Creates a [LocalServiceRunner] that delegates to the [coordinator] provided
+  /// by the Riverpod container (shared singleton).
+  ///
+  /// When [coordinator] is not provided (e.g. standalone tests or non-Riverpod
+  /// contexts), an isolated coordinator is constructed internally.
   LocalServiceRunner({
     this.port = 8080,
+    BackgroundSyncCoordinator? coordinator,
     String? remoteApiUrl,
-  }) : remoteApiUrl = remoteApiUrl ?? ApiEnvironment.centralApiBaseUrl {
-    _outboxDao = OutboxDao();
-    _apiClient = ApiClient(baseUrl: this.remoteApiUrl);
-    _syncEngine = SyncEngine(apiClient: _apiClient, outboxDao: _outboxDao);
-    _coordinator = BackgroundSyncCoordinator(
-      syncEngine: _syncEngine,
-      outboxDao: _outboxDao,
+  }) : _coordinator = coordinator ?? _buildStandaloneCoordinator(remoteApiUrl);
+
+  static BackgroundSyncCoordinator _buildStandaloneCoordinator(
+      String? remoteApiUrl) {
+    final url = remoteApiUrl ?? ApiEnvironment.centralApiBaseUrl;
+    final outboxDao = OutboxDao();
+    final apiClient = ApiClient(baseUrl: url);
+    final syncEngine = SyncEngine(apiClient: apiClient, outboxDao: outboxDao);
+    return BackgroundSyncCoordinator(
+      syncEngine: syncEngine,
+      outboxDao: outboxDao,
     );
   }
 

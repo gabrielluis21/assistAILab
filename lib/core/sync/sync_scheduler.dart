@@ -66,18 +66,26 @@ class SyncScheduler with WidgetsBindingObserver {
 
     await coordinator.requestSync(SyncTrigger.periodic);
 
-    // Evaluate state after cycle to adapt cadence
+    // Evaluate state after cycle to adapt cadence.
+    // Only count a cycle as "empty" (eligible for IDLE promotion) when:
+    //   push = 0 AND pull = 0 AND pendingOutbox = 0.
     final state = coordinator.state;
     if (state.hasPendingMutations) {
+      // Still has pending work — stay HOT.
       _currentCadence = SyncCadence.hot;
       _consecutiveEmptyCycles = 0;
-    } else if (state.isHealthy) {
+    } else if (!coordinator.lastCycleDidWork && state.isHealthy) {
+      // No push, no pull, nothing pending: genuinely idle cycle.
       _consecutiveEmptyCycles++;
       if (_consecutiveEmptyCycles >= 3) {
         _currentCadence = SyncCadence.idle;
       } else {
         _currentCadence = SyncCadence.normal;
       }
+    } else {
+      // Cycle did real work (push or pull) but outbox is clear — stay NORMAL.
+      _consecutiveEmptyCycles = 0;
+      _currentCadence = SyncCadence.normal;
     }
 
     _scheduleNextTick();
