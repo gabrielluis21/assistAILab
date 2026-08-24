@@ -24,7 +24,8 @@ class _FakeApiClient extends ApiClient {
   }
 
   @override
-  Future<http.Response> post(String endpoint, {Map<String, dynamic>? body}) async {
+  Future<http.Response> post(String endpoint,
+      {Map<String, dynamic>? body}) async {
     throw UnimplementedError('POST $endpoint');
   }
 }
@@ -78,7 +79,8 @@ void main() {
 
     test('lança Exception genérica para outros status HTTP', () async {
       final ds = AuthRemoteDataSource(
-        _FakeApiClient(getMeStatus: 500, getMeBody: '{"error":"Internal Server Error"}'),
+        _FakeApiClient(
+            getMeStatus: 500, getMeBody: '{"error":"Internal Server Error"}'),
       );
       expect(ds.getMe(), throwsA(isA<Exception>()));
     });
@@ -103,7 +105,9 @@ void main() {
       expect(ds.getMe(), throwsA(isA<UnauthorizedException>()));
     });
 
-    test('current_user local SEM token não deve autenticar (sem token = null retornado)', () {
+    test(
+        'current_user local SEM token não deve autenticar (sem token = null retornado)',
+        () {
       // O repositório verifica jwt_token ANTES de chamar /auth/me.
       // Sem Hive disponível no test runner, validamos apenas que
       // a fonte remota não é chamada sem necessidade.

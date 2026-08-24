@@ -22,6 +22,9 @@ class OutboxProcessor {
   }
 
   int calculateBackoffDelay(int attemptCount) {
-    return _syncEngine.calculateNextRetryAt(attemptCount).difference(DateTime.now()).inSeconds;
+    return _syncEngine
+        .calculateNextRetryAt(attemptCount)
+        .difference(DateTime.now())
+        .inSeconds;
   }
 }

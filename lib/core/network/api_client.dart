@@ -33,7 +33,8 @@ class ApiClient {
     return _client.get(Uri.parse('$baseUrl$endpoint'), headers: headers);
   }
 
-  Future<http.Response> post(String endpoint, {Map<String, dynamic>? body}) async {
+  Future<http.Response> post(String endpoint,
+      {Map<String, dynamic>? body}) async {
     final headers = await _getHeaders();
     return _client.post(
       Uri.parse('$baseUrl$endpoint'),
@@ -42,7 +43,8 @@ class ApiClient {
     );
   }
 
-  Future<http.Response> put(String endpoint, {Map<String, dynamic>? body}) async {
+  Future<http.Response> put(String endpoint,
+      {Map<String, dynamic>? body}) async {
     final headers = await _getHeaders();
     return _client.put(
       Uri.parse('$baseUrl$endpoint'),

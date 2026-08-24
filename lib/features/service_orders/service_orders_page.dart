@@ -26,7 +26,8 @@ class ServiceOrdersPage extends ConsumerWidget {
             SizedBox(width: 10),
             Text(
               'Ordens de Serviço',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+              style:
+                  TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ],
         ),
@@ -43,7 +44,8 @@ class ServiceOrdersPage extends ConsumerWidget {
           child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
         ),
         error: (err, _) => Center(
-          child: Text('Erro: $err', style: const TextStyle(color: Colors.redAccent)),
+          child: Text('Erro: $err',
+              style: const TextStyle(color: Colors.redAccent)),
         ),
         data: (orders) {
           if (orders.isEmpty) {
@@ -51,7 +53,8 @@ class ServiceOrdersPage extends ConsumerWidget {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.assignment_outlined, size: 64, color: Colors.grey.shade700),
+                  Icon(Icons.assignment_outlined,
+                      size: 64, color: Colors.grey.shade700),
                   const SizedBox(height: 16),
                   const Text(
                     'Nenhuma ordem de serviço',
@@ -64,7 +67,8 @@ class ServiceOrdersPage extends ConsumerWidget {
           return ListView.builder(
             padding: const EdgeInsets.all(16),
             itemCount: orders.length,
-            itemBuilder: (context, index) => _ServiceOrderCard(order: orders[index]),
+            itemBuilder: (context, index) =>
+                _ServiceOrderCard(order: orders[index]),
           );
         },
       ),
@@ -92,23 +96,29 @@ class ServiceOrdersPage extends ConsumerWidget {
     List<dynamic> equipments,
   ) {
     final descController = TextEditingController();
-    String? selectedCustomerId = customers.isNotEmpty ? customers.first.id : null;
-    String? selectedEquipmentId = equipments.isNotEmpty ? equipments.first.id : null;
+    String? selectedCustomerId =
+        customers.isNotEmpty ? customers.first.id : null;
+    String? selectedEquipmentId =
+        equipments.isNotEmpty ? equipments.first.id : null;
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setState) {
           final filteredEquipments = selectedCustomerId != null
-              ? equipments.where((e) => e.customerId == selectedCustomerId).toList()
+              ? equipments
+                  .where((e) => e.customerId == selectedCustomerId)
+                  .toList()
               : equipments;
 
           return AlertDialog(
             backgroundColor: const Color(0xFF1E293B),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text(
               'Nova Ordem de Serviço',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
             ),
             content: SingleChildScrollView(
               child: Column(
@@ -122,14 +132,17 @@ class ServiceOrdersPage extends ConsumerWidget {
                       decoration: InputDecoration(
                         labelText: 'Cliente *',
                         labelStyle: const TextStyle(color: Colors.white54),
-                        prefixIcon: const Icon(Icons.person, color: Color(0xFF38BDF8), size: 20),
+                        prefixIcon: const Icon(Icons.person,
+                            color: Color(0xFF38BDF8), size: 20),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF334155)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF334155)),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF38BDF8)),
                         ),
                         filled: true,
                         fillColor: const Color(0xFF0F172A),
@@ -137,14 +150,19 @@ class ServiceOrdersPage extends ConsumerWidget {
                       items: customers.map<DropdownMenuItem<String>>((c) {
                         return DropdownMenuItem<String>(
                           value: c.id as String,
-                          child: Text(c.name as String, style: const TextStyle(color: Colors.white)),
+                          child: Text(c.name as String,
+                              style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
                       onChanged: (val) {
                         setState(() {
                           selectedCustomerId = val;
-                          final newFiltered = equipments.where((e) => e.customerId == val).toList();
-                          selectedEquipmentId = newFiltered.isNotEmpty ? newFiltered.first.id : null;
+                          final newFiltered = equipments
+                              .where((e) => e.customerId == val)
+                              .toList();
+                          selectedEquipmentId = newFiltered.isNotEmpty
+                              ? newFiltered.first.id
+                              : null;
                         });
                       },
                     ),
@@ -157,25 +175,31 @@ class ServiceOrdersPage extends ConsumerWidget {
                       decoration: InputDecoration(
                         labelText: 'Equipamento *',
                         labelStyle: const TextStyle(color: Colors.white54),
-                        prefixIcon: const Icon(Icons.devices, color: Color(0xFF38BDF8), size: 20),
+                        prefixIcon: const Icon(Icons.devices,
+                            color: Color(0xFF38BDF8), size: 20),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF334155)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF334155)),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF38BDF8)),
                         ),
                         filled: true,
                         fillColor: const Color(0xFF0F172A),
                       ),
-                      items: filteredEquipments.map<DropdownMenuItem<String>>((e) {
+                      items:
+                          filteredEquipments.map<DropdownMenuItem<String>>((e) {
                         return DropdownMenuItem<String>(
                           value: e.id as String,
-                          child: Text('${e.brand} ${e.model}', style: const TextStyle(color: Colors.white)),
+                          child: Text('${e.brand} ${e.model}',
+                              style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
-                      onChanged: (val) => setState(() => selectedEquipmentId = val),
+                      onChanged: (val) =>
+                          setState(() => selectedEquipmentId = val),
                     )
                   else
                     const Padding(
@@ -193,7 +217,8 @@ class ServiceOrdersPage extends ConsumerWidget {
                     decoration: InputDecoration(
                       labelText: 'Descrição do Problema *',
                       labelStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon: const Icon(Icons.description, color: Color(0xFF38BDF8), size: 20),
+                      prefixIcon: const Icon(Icons.description,
+                          color: Color(0xFF38BDF8), size: 20),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: const BorderSide(color: Color(0xFF334155)),
@@ -212,10 +237,12 @@ class ServiceOrdersPage extends ConsumerWidget {
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+                child: const Text('Cancelar',
+                    style: TextStyle(color: Colors.white54)),
               ),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7)),
                 onPressed: () async {
                   if (descController.text.trim().isEmpty) return;
                   final custId = selectedCustomerId ?? 'cust-placeholder';
@@ -227,7 +254,8 @@ class ServiceOrdersPage extends ConsumerWidget {
                       );
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
-                child: const Text('Criar OS', style: TextStyle(color: Colors.white)),
+                child: const Text('Criar OS',
+                    style: TextStyle(color: Colors.white)),
               ),
             ],
           );
@@ -265,18 +293,22 @@ class _ServiceOrderCard extends ConsumerWidget {
                     Text(
                       'OS #${order.friendlyId ?? '—'}',
                       style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF38BDF8),
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF38BDF8),
                       ),
                     ),
                     const SizedBox(width: 8),
                     IconButton(
-                      icon: const Icon(Icons.open_in_new, color: Color(0xFF38BDF8), size: 18),
+                      icon: const Icon(Icons.open_in_new,
+                          color: Color(0xFF38BDF8), size: 18),
                       tooltip: 'Abrir Detalhes / Peças',
                       onPressed: () {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (ctx) => ServiceOrderDetailPage(order: order),
+                            builder: (ctx) =>
+                                ServiceOrderDetailPage(order: order),
                           ),
                         );
                       },
@@ -295,35 +327,44 @@ class _ServiceOrderCard extends ConsumerWidget {
               const SizedBox(height: 8),
               Text(
                 'Total: R\$ ${order.totalAmount.toStringAsFixed(2)}',
-                style: const TextStyle(fontSize: 14, color: Color(0xFF4ADE80), fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xFF4ADE80),
+                    fontWeight: FontWeight.w600),
               ),
             ],
             if (allowed.isNotEmpty) ...[
               const SizedBox(height: 12),
               const Divider(color: Color(0xFF334155)),
               const SizedBox(height: 4),
-              const Text('Avançar para:', style: TextStyle(fontSize: 12, color: Colors.white54)),
+              const Text('Avançar para:',
+                  style: TextStyle(fontSize: 12, color: Colors.white54)),
               const SizedBox(height: 6),
               Wrap(
                 spacing: 6,
-                children: allowed.map((next) => ActionChip(
-                  backgroundColor: const Color(0xFF0F172A),
-                  side: const BorderSide(color: Color(0xFF334155)),
-                  label: Text(
-                    next.toDbString().replaceAll('_', ' '),
-                    style: const TextStyle(fontSize: 11, color: Colors.white70),
-                  ),
-                  onPressed: () async {
-                    final ok = await ref
-                        .read(serviceOrdersProvider.notifier)
-                        .updateStatus(order.id, next);
-                    if (!ok && context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Transição de status inválida')),
-                      );
-                    }
-                  },
-                )).toList(),
+                children: allowed
+                    .map((next) => ActionChip(
+                          backgroundColor: const Color(0xFF0F172A),
+                          side: const BorderSide(color: Color(0xFF334155)),
+                          label: Text(
+                            next.toDbString().replaceAll('_', ' '),
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white70),
+                          ),
+                          onPressed: () async {
+                            final ok = await ref
+                                .read(serviceOrdersProvider.notifier)
+                                .updateStatus(order.id, next);
+                            if (!ok && context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content:
+                                        Text('Transição de status inválida')),
+                              );
+                            }
+                          },
+                        ))
+                    .toList(),
               ),
             ],
           ],
@@ -359,19 +400,46 @@ class _StatusBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (bg, fg, label) = switch (status) {
-      ServiceOrderStatusEnum.diagnostico => (const Color(0xFFFEF3C7), const Color(0xFFD97706), 'DIAGNÓSTICO'),
-      ServiceOrderStatusEnum.aguardandoAprovacao => (const Color(0xFFEDE9FE), const Color(0xFF7C3AED), 'AG. APROVAÇÃO'),
-      ServiceOrderStatusEnum.emExecucao => (const Color(0xFFDBEAFE), const Color(0xFF2563EB), 'EM EXECUÇÃO'),
-      ServiceOrderStatusEnum.pronto => (const Color(0xFFDCFCE7), const Color(0xFF16A34A), 'PRONTO'),
-      ServiceOrderStatusEnum.entregue => (const Color(0xFFBBF7D0), const Color(0xFF15803D), 'ENTREGUE'),
-      ServiceOrderStatusEnum.cancelado => (const Color(0xFFFEE2E2), const Color(0xFFDC2626), 'CANCELADO'),
+      ServiceOrderStatusEnum.diagnostico => (
+          const Color(0xFFFEF3C7),
+          const Color(0xFFD97706),
+          'DIAGNÓSTICO'
+        ),
+      ServiceOrderStatusEnum.aguardandoAprovacao => (
+          const Color(0xFFEDE9FE),
+          const Color(0xFF7C3AED),
+          'AG. APROVAÇÃO'
+        ),
+      ServiceOrderStatusEnum.emExecucao => (
+          const Color(0xFFDBEAFE),
+          const Color(0xFF2563EB),
+          'EM EXECUÇÃO'
+        ),
+      ServiceOrderStatusEnum.pronto => (
+          const Color(0xFFDCFCE7),
+          const Color(0xFF16A34A),
+          'PRONTO'
+        ),
+      ServiceOrderStatusEnum.entregue => (
+          const Color(0xFFBBF7D0),
+          const Color(0xFF15803D),
+          'ENTREGUE'
+        ),
+      ServiceOrderStatusEnum.cancelado => (
+          const Color(0xFFFEE2E2),
+          const Color(0xFFDC2626),
+          'CANCELADO'
+        ),
       _ => (Colors.grey.shade800, Colors.white, 'DRAFT'),
     };
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
-      child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: fg)),
+      decoration:
+          BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      child: Text(label,
+          style:
+              TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: fg)),
     );
   }
 }

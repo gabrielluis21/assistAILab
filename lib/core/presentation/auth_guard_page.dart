@@ -21,9 +21,11 @@ class AuthGuardPage extends ConsumerWidget {
               Modular.to.navigate('/home');
             }
           });
-          return const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8)));
+          return const Center(
+              child: CircularProgressIndicator(color: Color(0xFF38BDF8)));
         },
-        loading: () => const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+        loading: () => const Center(
+            child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
         error: (e, _) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             Modular.to.navigate('/login');

@@ -4,7 +4,8 @@ import 'package:assistailab/features/service_orders/service_orders_provider.dart
 
 void main() {
   group('Service Order State Machine Tests', () {
-    test('DIAGNOSTICO allows transition to AGUARDANDO_APROVACAO and CANCELADO', () {
+    test('DIAGNOSTICO allows transition to AGUARDANDO_APROVACAO and CANCELADO',
+        () {
       final allowed = allowedTransitionsFor(ServiceOrderStatusEnum.diagnostico);
       expect(allowed, contains(ServiceOrderStatusEnum.aguardandoAprovacao));
       expect(allowed, contains(ServiceOrderStatusEnum.cancelado));
@@ -24,7 +25,8 @@ void main() {
 
     test('EM_EXECUCAO does NOT allow going to AGUARDANDO_APROVACAO', () {
       final allowed = allowedTransitionsFor(ServiceOrderStatusEnum.emExecucao);
-      expect(allowed, isNot(contains(ServiceOrderStatusEnum.aguardandoAprovacao)));
+      expect(
+          allowed, isNot(contains(ServiceOrderStatusEnum.aguardandoAprovacao)));
     });
   });
 

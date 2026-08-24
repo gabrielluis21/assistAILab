@@ -40,7 +40,8 @@ class DashboardPage extends ConsumerWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 48),
+              const Icon(Icons.error_outline,
+                  color: Color(0xFFEF4444), size: 48),
               const SizedBox(height: 16),
               Text('Erro ao carregar: $e',
                   style: const TextStyle(color: Colors.white54)),
@@ -70,9 +71,7 @@ class DashboardPage extends ConsumerWidget {
           const Text(
             'Ordens de Serviço',
             style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold),
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           _buildOsBreakdown(metrics),
@@ -82,9 +81,7 @@ class DashboardPage extends ConsumerWidget {
           const Text(
             'Financeiro',
             style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold),
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           _buildRevenueSection(metrics),
@@ -94,9 +91,7 @@ class DashboardPage extends ConsumerWidget {
           const Text(
             'Pagamentos Pendentes',
             style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold),
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           _PendingPaymentsList(),
@@ -106,9 +101,7 @@ class DashboardPage extends ConsumerWidget {
           const Text(
             'Últimas OS',
             style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold),
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           _RecentOrdersList(),
@@ -150,8 +143,18 @@ class DashboardPage extends ConsumerWidget {
   String _formattedDate() {
     final now = DateTime.now();
     const months = [
-      'jan', 'fev', 'mar', 'abr', 'mai', 'jun',
-      'jul', 'ago', 'set', 'out', 'nov', 'dez'
+      'jan',
+      'fev',
+      'mar',
+      'abr',
+      'mai',
+      'jun',
+      'jul',
+      'ago',
+      'set',
+      'out',
+      'nov',
+      'dez'
     ];
     const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
     return '${days[now.weekday % 7]}, ${now.day} de ${months[now.month - 1]} de ${now.year}';
@@ -216,7 +219,8 @@ class DashboardPage extends ConsumerWidget {
   Widget _buildOsBreakdown(DashboardMetrics metrics) {
     final items = [
       _StatusRow('Em aberto', metrics.ordersOpen, const Color(0xFFF59E0B)),
-      _StatusRow('Em execução', metrics.ordersInExecution, const Color(0xFF38BDF8)),
+      _StatusRow(
+          'Em execução', metrics.ordersInExecution, const Color(0xFF38BDF8)),
       _StatusRow('Prontas', metrics.ordersReady, const Color(0xFF10B981)),
       _StatusRow('Entregues', metrics.ordersDelivered, const Color(0xFF8B5CF6)),
     ];
@@ -230,7 +234,8 @@ class DashboardPage extends ConsumerWidget {
       child: Column(
         children: items
             .map((item) => Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   child: Row(
                     children: [
                       Container(
@@ -244,7 +249,8 @@ class DashboardPage extends ConsumerWidget {
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(item.label,
-                            style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 13)),
                       ),
                       Text(
                         item.count.toString(),
@@ -474,8 +480,7 @@ class _PendingPaymentsList extends ConsumerWidget {
                               Text(p.method.label,
                                   style: const TextStyle(
                                       color: Colors.white, fontSize: 13)),
-                              Text(
-                                  'OS: ${p.serviceOrderId.substring(0, 8)}...',
+                              Text('OS: ${p.serviceOrderId.substring(0, 8)}...',
                                   style: const TextStyle(
                                       color: Colors.white38, fontSize: 11)),
                             ],
@@ -509,8 +514,8 @@ class _PendingPaymentsList extends ConsumerWidget {
           height: 60,
           child: Center(
               child: CircularProgressIndicator(color: Color(0xFF38BDF8)))),
-      error: (e, _) => Text('Erro: $e',
-          style: const TextStyle(color: Colors.red)),
+      error: (e, _) =>
+          Text('Erro: $e', style: const TextStyle(color: Colors.red)),
     );
   }
 }
@@ -537,9 +542,7 @@ class _RecentOrdersList extends ConsumerWidget {
           );
         }
         return Column(
-          children: recent
-              .map((o) => _RecentOrderTile(order: o))
-              .toList(),
+          children: recent.map((o) => _RecentOrderTile(order: o)).toList(),
         );
       },
       loading: () => const SizedBox(
@@ -643,7 +646,8 @@ class _RecentOrderTile extends StatelessWidget {
             ),
             child: Text(
               _statusLabel(order.status),
-              style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                  color: color, fontSize: 10, fontWeight: FontWeight.w600),
             ),
           ),
         ],

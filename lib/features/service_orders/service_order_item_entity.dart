@@ -35,12 +35,15 @@ class ServiceOrderItemEntity {
   factory ServiceOrderItemEntity.fromMap(Map<String, dynamic> map) {
     return ServiceOrderItemEntity(
       id: map['id'] as String,
-      serviceOrderId: (map['service_order_id'] ?? map['serviceOrderId']) as String,
+      serviceOrderId:
+          (map['service_order_id'] ?? map['serviceOrderId']) as String,
       partId: (map['part_id'] ?? map['partId']) as String?,
       description: map['description'] as String,
       quantity: (map['quantity'] as num).toInt(),
-      unitPrice: ((map['unit_price'] ?? map['unitPrice'] ?? 0.0) as num).toDouble(),
-      totalPrice: ((map['total_price'] ?? map['totalPrice'] ?? 0.0) as num).toDouble(),
+      unitPrice:
+          ((map['unit_price'] ?? map['unitPrice'] ?? 0.0) as num).toDouble(),
+      totalPrice:
+          ((map['total_price'] ?? map['totalPrice'] ?? 0.0) as num).toDouble(),
       updatedAt: (map['updated_at'] ?? map['updatedAt'] ?? '') as String,
     );
   }

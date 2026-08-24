@@ -24,11 +24,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   Future<void> _doLogin() async {
     if (!_formKey.currentState!.validate()) return;
-    
+
     await ref.read(authStateProvider.notifier).login(
-      _emailCtrl.text.trim(),
-      _passwordCtrl.text,
-    );
+          _emailCtrl.text.trim(),
+          _passwordCtrl.text,
+        );
   }
 
   @override
@@ -77,7 +77,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(Icons.construction, color: Color(0xFF38BDF8), size: 48),
+                  const Icon(Icons.construction,
+                      color: Color(0xFF38BDF8), size: 48),
                   const SizedBox(height: 16),
                   const Text(
                     'AssistAILab',
@@ -101,7 +102,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     decoration: InputDecoration(
                       labelText: 'E-mail',
                       labelStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon: const Icon(Icons.email_outlined, color: Colors.white54),
+                      prefixIcon: const Icon(Icons.email_outlined,
+                          color: Colors.white54),
                       filled: true,
                       fillColor: const Color(0xFF0F172A),
                       border: OutlineInputBorder(
@@ -119,7 +121,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     decoration: InputDecoration(
                       labelText: 'Senha',
                       labelStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon: const Icon(Icons.lock_outline, color: Colors.white54),
+                      prefixIcon:
+                          const Icon(Icons.lock_outline, color: Colors.white54),
                       filled: true,
                       fillColor: const Color(0xFF0F172A),
                       border: OutlineInputBorder(
@@ -148,7 +151,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                                 color: Colors.white, strokeWidth: 2),
                           )
                         : const Text('Entrar',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold)),
                   ),
                 ],
               ),

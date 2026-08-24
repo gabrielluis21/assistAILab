@@ -10,18 +10,22 @@ class ServiceOrderDetailPage extends ConsumerStatefulWidget {
   const ServiceOrderDetailPage({super.key, required this.order});
 
   @override
-  ConsumerState<ServiceOrderDetailPage> createState() => _ServiceOrderDetailPageState();
+  ConsumerState<ServiceOrderDetailPage> createState() =>
+      _ServiceOrderDetailPageState();
 }
 
-class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage> {
+class _ServiceOrderDetailPageState
+    extends ConsumerState<ServiceOrderDetailPage> {
   late TextEditingController _diagnosisController;
   late TextEditingController _solutionController;
 
   @override
   void initState() {
     super.initState();
-    _diagnosisController = TextEditingController(text: widget.order.diagnosis ?? '');
-    _solutionController = TextEditingController(text: widget.order.solution ?? '');
+    _diagnosisController =
+        TextEditingController(text: widget.order.diagnosis ?? '');
+    _solutionController =
+        TextEditingController(text: widget.order.solution ?? '');
   }
 
   @override
@@ -42,7 +46,8 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
         backgroundColor: const Color(0xFF1E293B),
         title: Text(
           'Detalhes da OS #${widget.order.friendlyId ?? '—'}',
-          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+          style:
+              const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
       body: SingleChildScrollView(
@@ -84,9 +89,12 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                       ],
                     ),
                     const SizedBox(height: 12),
-                    const Text('Descrição do Problema:', style: TextStyle(color: Colors.white54, fontSize: 13)),
+                    const Text('Descrição do Problema:',
+                        style: TextStyle(color: Colors.white54, fontSize: 13)),
                     const SizedBox(height: 4),
-                    Text(widget.order.problemDescription, style: const TextStyle(color: Colors.white, fontSize: 15)),
+                    Text(widget.order.problemDescription,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 15)),
                   ],
                 ),
               ),
@@ -107,11 +115,15 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.assignment, color: Color(0xFF38BDF8), size: 20),
+                        Icon(Icons.assignment,
+                            color: Color(0xFF38BDF8), size: 20),
                         SizedBox(width: 8),
                         Text(
                           'Laudo Técnico & Solução',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white),
                         ),
                       ],
                     ),
@@ -145,23 +157,31 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                     SizedBox(width: 8),
                     Text(
                       'Peças & Mão de Obra',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
                     ),
                   ],
                 ),
                 ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0284C7)),
                   icon: const Icon(Icons.add, color: Colors.white, size: 18),
-                  label: const Text('Adicionar Item', style: TextStyle(color: Colors.white)),
-                  onPressed: () => _showAddItemDialog(context, partsAsync.value ?? []),
+                  label: const Text('Adicionar Item',
+                      style: TextStyle(color: Colors.white)),
+                  onPressed: () =>
+                      _showAddItemDialog(context, partsAsync.value ?? []),
                 ),
               ],
             ),
             const SizedBox(height: 12),
 
             itemsAsync.when(
-              loading: () => const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
-              error: (err, _) => Text('Erro ao carregar itens: $err', style: const TextStyle(color: Colors.redAccent)),
+              loading: () => const Center(
+                  child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+              error: (err, _) => Text('Erro ao carregar itens: $err',
+                  style: const TextStyle(color: Colors.redAccent)),
               data: (items) {
                 if (items.isEmpty) {
                   return Container(
@@ -181,7 +201,10 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                 }
 
                 return Column(
-                  children: items.map((item) => _ItemTile(item: item, orderId: widget.order.id)).toList(),
+                  children: items
+                      .map((item) =>
+                          _ItemTile(item: item, orderId: widget.order.id))
+                      .toList(),
                 );
               },
             ),
@@ -220,10 +243,12 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
         builder: (context, setState) {
           return AlertDialog(
             backgroundColor: const Color(0xFF1E293B),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text(
               'Adicionar Peça / Serviço',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
             ),
             content: SingleChildScrollView(
               child: Column(
@@ -238,16 +263,19 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                       items: availableParts.map<DropdownMenuItem<String>>((p) {
                         return DropdownMenuItem<String>(
                           value: p.id as String,
-                          child: Text('${p.name} (R\$ ${p.price})', style: const TextStyle(color: Colors.white)),
+                          child: Text('${p.name} (R\$ ${p.price})',
+                              style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
                       onChanged: (val) {
-                        final found = availableParts.firstWhere((p) => p.id == val, orElse: () => null);
+                        final found = availableParts
+                            .firstWhere((p) => p.id == val, orElse: () => null);
                         if (found != null) {
                           setState(() {
                             selectedPartId = val;
                             descController.text = found.name;
-                            priceController.text = found.price.toStringAsFixed(2);
+                            priceController.text =
+                                found.price.toStringAsFixed(2);
                           });
                         }
                       },
@@ -257,7 +285,8 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                   TextFormField(
                     controller: descController,
                     style: const TextStyle(color: Colors.white),
-                    decoration: _inputDecoration('Descrição (Peça ou Serviço) *'),
+                    decoration:
+                        _inputDecoration('Descrição (Peça ou Serviço) *'),
                   ),
                   const SizedBox(height: 12),
                   Row(
@@ -287,16 +316,22 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+                child: const Text('Cancelar',
+                    style: TextStyle(color: Colors.white54)),
               ),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7)),
                 onPressed: () async {
                   if (descController.text.trim().isEmpty) return;
                   final qty = int.tryParse(qtyController.text.trim()) ?? 1;
-                  final price = double.tryParse(priceController.text.trim().replaceAll(',', '.')) ?? 0.0;
+                  final price = double.tryParse(
+                          priceController.text.trim().replaceAll(',', '.')) ??
+                      0.0;
 
-                  await ref.read(serviceOrderItemsProvider(widget.order.id).notifier).addItem(
+                  await ref
+                      .read(serviceOrderItemsProvider(widget.order.id).notifier)
+                      .addItem(
                         serviceOrderId: widget.order.id,
                         partId: selectedPartId,
                         description: descController.text.trim(),
@@ -305,7 +340,8 @@ class _ServiceOrderDetailPageState extends ConsumerState<ServiceOrderDetailPage>
                       );
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
-                child: const Text('Adicionar', style: TextStyle(color: Colors.white)),
+                child: const Text('Adicionar',
+                    style: TextStyle(color: Colors.white)),
               ),
             ],
           );
@@ -330,7 +366,9 @@ class _ItemTile extends ConsumerWidget {
         side: const BorderSide(color: Color(0xFF334155)),
       ),
       child: ListTile(
-        title: Text(item.description, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        title: Text(item.description,
+            style: const TextStyle(
+                color: Colors.white, fontWeight: FontWeight.bold)),
         subtitle: Text(
           '${item.quantity}x  R\$ ${item.unitPrice.toStringAsFixed(2)}',
           style: const TextStyle(color: Colors.white70),
@@ -340,13 +378,19 @@ class _ItemTile extends ConsumerWidget {
           children: [
             Text(
               'R\$ ${item.totalPrice.toStringAsFixed(2)}',
-              style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.bold, fontSize: 15),
+              style: const TextStyle(
+                  color: Color(0xFF4ADE80),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15),
             ),
             const SizedBox(width: 8),
             IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+              icon: const Icon(Icons.delete_outline,
+                  color: Colors.redAccent, size: 20),
               onPressed: () {
-                ref.read(serviceOrderItemsProvider(orderId).notifier).deleteItem(item.id, orderId);
+                ref
+                    .read(serviceOrderItemsProvider(orderId).notifier)
+                    .deleteItem(item.id, orderId);
               },
             ),
           ],

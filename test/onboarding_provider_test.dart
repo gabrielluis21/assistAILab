@@ -7,7 +7,8 @@ import 'package:http/http.dart' as http;
 
 class FakeApiClient extends ApiClient {
   @override
-  Future<http.Response> post(String endpoint, {Map<String, dynamic>? body}) async {
+  Future<http.Response> post(String endpoint,
+      {Map<String, dynamic>? body}) async {
     if (endpoint.contains('grant')) {
       return http.Response('{"token": "fake_qr_token_123"}', 201);
     } else if (endpoint.contains('claim')) {
@@ -16,7 +17,6 @@ class FakeApiClient extends ApiClient {
     throw UnimplementedError();
   }
 }
-
 
 void main() {
   group('Onboarding Tests', () {
@@ -28,7 +28,7 @@ void main() {
       expect(notifier.state.value, null);
 
       await notifier.generateToken('os_123');
-      
+
       expect(notifier.state.value, 'fake_qr_token_123');
     });
 
@@ -38,7 +38,7 @@ void main() {
       final notifier = OnboardingNotifier(dataSource);
 
       await notifier.claimToken('fake_qr_token_123');
-      
+
       expect(notifier.state.value, 'CLAIM_SUCCESS');
     });
   });

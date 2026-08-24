@@ -35,8 +35,10 @@ class PartEntity {
       name: map['name'] as String,
       sku: map['sku'] as String,
       price: (map['price'] as num).toDouble(),
-      costPrice: ((map['cost_price'] ?? map['costPrice'] ?? 0.0) as num).toDouble(),
-      stockQuantity: (map['stock_quantity'] ?? map['stockQuantity'] ?? 0) as int,
+      costPrice:
+          ((map['cost_price'] ?? map['costPrice'] ?? 0.0) as num).toDouble(),
+      stockQuantity:
+          (map['stock_quantity'] ?? map['stockQuantity'] ?? 0) as int,
       updatedAt: (map['updated_at'] ?? map['updatedAt'] ?? '') as String,
     );
   }

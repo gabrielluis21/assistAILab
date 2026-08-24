@@ -10,7 +10,8 @@ abstract class ServiceOrderItemRepository {
 
 class ServiceOrderItemLocalDataSource implements ServiceOrderItemRepository {
   @override
-  Future<List<ServiceOrderItemEntity>> listByOrder(String serviceOrderId) async {
+  Future<List<ServiceOrderItemEntity>> listByOrder(
+      String serviceOrderId) async {
     final db = await SqliteDatabase.instance;
     final maps = await db.query(
       'service_order_items',

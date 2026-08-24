@@ -1,12 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
+import 'package:http/http.dart' as http;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:assistailab/core/sync/sync_trigger.dart';
 import 'package:assistailab/core/sync/sync_state.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
 import 'package:assistailab/core/sync/background_sync_coordinator.dart';
 import 'package:assistailab/core/sync/sync_scheduler.dart';
 import 'package:assistailab/core/database/outbox_dao.dart';
+import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:assistailab/core/network/api_client.dart';
 
 class FakeApiClient extends ApiClient {
@@ -35,7 +42,8 @@ class FakeOutboxDao extends OutboxDao {
   }
 
   @override
-  Future<List<OutboxItem>> getPendingEntries({int limit = 20}) async => pendingItems;
+  Future<List<OutboxItem>> getPendingEntries({int limit = 20}) async =>
+      pendingItems;
 }
 
 class FakeSyncEngine extends SyncEngine {
@@ -75,20 +83,51 @@ class FakeSyncEngine extends SyncEngine {
   }
 }
 
+class MockHttpClientWithCustomResponses extends http.BaseClient {
+  final Future<http.Response> Function(http.Request request) handler;
+  MockHttpClientWithCustomResponses(this.handler);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final response = await handler(request as http.Request);
+    return http.StreamedResponse(
+      Stream.value(utf8.encode(response.body)),
+      response.statusCode,
+      headers: response.headers,
+    );
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('plugins.flutter.io/path_provider'),
+      (methodCall) async {
+        return Directory.systemTemp.path;
+      },
+    );
+    final tempDir = Directory.systemTemp.createTempSync();
+    Hive.init(tempDir.path);
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  });
+
   group('SyncTrigger & SyncState Unit Tests', () {
     test('SyncTrigger enum contains all required triggers', () {
-      expect(SyncTrigger.values, containsAll([
-        SyncTrigger.authenticated,
-        SyncTrigger.localMutation,
-        SyncTrigger.periodic,
-        SyncTrigger.connectivityRestored,
-        SyncTrigger.appResumed,
-        SyncTrigger.manual,
-        SyncTrigger.scheduledConsolidation,
-      ]));
+      expect(
+          SyncTrigger.values,
+          containsAll([
+            SyncTrigger.authenticated,
+            SyncTrigger.localMutation,
+            SyncTrigger.periodic,
+            SyncTrigger.connectivityRestored,
+            SyncTrigger.appResumed,
+            SyncTrigger.manual,
+            SyncTrigger.scheduledConsolidation,
+          ]));
     });
 
     test('SyncState initial state has default values', () {
@@ -138,9 +177,11 @@ void main() {
     });
   });
 
-  group('SyncEngine Retry & Backoff Tests', () {
-    test('calculateNextRetryAt grows exponentially and respects max boundary', () {
-      final engine = SyncEngine(apiClient: FakeApiClient(), outboxDao: FakeOutboxDao());
+  group('SyncEngine Retry, Backoff & Atomic Cursor Tests', () {
+    test('calculateNextRetryAt grows exponentially and respects max boundary',
+        () {
+      final engine =
+          SyncEngine(apiClient: FakeApiClient(), outboxDao: FakeOutboxDao());
       final now = DateTime.now();
 
       final retry0 = engine.calculateNextRetryAt(0);
@@ -155,6 +196,113 @@ void main() {
       // Max backoff capped at 300 seconds (+ 2s max jitter)
       final maxDiff = retry8.difference(now).inSeconds;
       expect(maxDiff, lessThanOrEqualTo(305));
+    });
+
+    test(
+        'pullIncrementalChanges persists cursor and changes atomically in same transaction',
+        () async {
+      // 1. Set initial cursor
+      final db = await SqliteDatabase.instance;
+      await db.insert(
+        'sync_metadata',
+        {'key': 'last_cursor', 'value': 'initial_cursor_100'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path.contains('/sync/changes')) {
+          return http.Response(
+            jsonEncode({
+              'nextCursor': 'next_cursor_200',
+              'changes': [
+                {
+                  'entityType': 'CUSTOMER',
+                  'entityId': 'cust_atomic_1',
+                  'operationType': 'CREATE',
+                  'data': {
+                    'name': 'Atomic Customer',
+                    'email': 'atomic@test.com',
+                  },
+                }
+              ]
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient);
+
+      final result = await engine.pullIncrementalChanges();
+      expect(result.totalChanges, equals(1));
+      expect(result.nextCursor, equals('next_cursor_200'));
+
+      final storedCursor = await engine.getLocalCursor();
+      expect(storedCursor, equals('next_cursor_200'));
+
+      final customerRow = await db.query(
+        'customers',
+        where: 'id = ?',
+        whereArgs: ['cust_atomic_1'],
+      );
+      expect(customerRow, isNotEmpty);
+      expect(customerRow.first['name'], equals('Atomic Customer'));
+    });
+
+    test(
+        'pullIncrementalChanges rolls back cursor if applying changes throws error',
+        () async {
+      final db = await SqliteDatabase.instance;
+      await db.insert(
+        'sync_metadata',
+        {'key': 'last_cursor', 'value': 'stable_cursor_v1'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      // We send invalid customer change that will cause SQLite error
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path.contains('/sync/changes')) {
+          return http.Response(
+            jsonEncode({
+              'nextCursor': 'uncommitted_cursor_v2',
+              'changes': [
+                {
+                  'entityType': 'CUSTOMER',
+                  'entityId': 'valid_cust',
+                  'operationType': 'CREATE',
+                  'data': {'name': 'Valid'},
+                },
+                {
+                  // Corrupted payload that causes transaction exception
+                  'entityType': 'CUSTOMER',
+                  'entityId': 'fail_cust',
+                  'operationType': null, // Throws TypeError inside transaction
+                  'data': {},
+                }
+              ]
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
+      final engine = SyncEngine(apiClient: apiClient);
+
+      // Verify that pull throws due to transaction failure
+      await expectLater(
+        engine.pullIncrementalChanges(),
+        throwsA(anything),
+      );
+
+      // Verify transaction rolled back and cursor was NOT updated
+      final cursorAfter = await engine.getLocalCursor();
+      expect(cursorAfter, equals('stable_cursor_v1'));
     });
   });
 
@@ -178,7 +326,8 @@ void main() {
       coordinator.dispose();
     });
 
-    test('Coordinator initializes and recovers interrupted operations', () async {
+    test('Coordinator initializes and recovers interrupted operations',
+        () async {
       fakeDao.recoveredCount = 4;
       fakeDao.pendingCount = 2;
 
@@ -188,7 +337,8 @@ void main() {
       expect(fakeDao.recoveredCount, equals(0)); // Reset after recovery
     });
 
-    test('Coordinator performs push then pull successfully and emits states', () async {
+    test('Coordinator performs push then pull successfully and emits states',
+        () async {
       final states = <SyncState>[];
       coordinator.stateStream.listen(states.add);
 
@@ -202,7 +352,9 @@ void main() {
       expect(coordinator.state.isHealthy, isTrue);
     });
 
-    test('Coordinator prevents concurrent executions and executes catch-up cycle', () async {
+    test(
+        'Coordinator prevents concurrent executions and executes catch-up cycle',
+        () async {
       fakeEngine.inProgressCompleter = Completer<void>();
 
       // 1. Start first sync (it will pause in push)
@@ -232,7 +384,9 @@ void main() {
       expect(coordinator.state.isSyncing, isFalse);
     });
 
-    test('Coordinator handles failures gracefully without crashing and updates state', () async {
+    test(
+        'Coordinator handles failures gracefully without crashing and updates state',
+        () async {
       fakeEngine.shouldThrow = true;
 
       await coordinator.requestSync(SyncTrigger.manual);
@@ -268,7 +422,7 @@ void main() {
     });
   });
 
-  group('SyncScheduler Tests', () {
+  group('SyncScheduler Adaptive Cadence Tests', () {
     late FakeApiClient fakeApi;
     late FakeOutboxDao fakeDao;
     late FakeSyncEngine fakeEngine;
@@ -283,11 +437,7 @@ void main() {
         syncEngine: fakeEngine,
         outboxDao: fakeDao,
       );
-      scheduler = SyncScheduler(
-        coordinator: coordinator,
-        periodicInterval: const Duration(milliseconds: 50),
-        consolidationInterval: const Duration(milliseconds: 100),
-      );
+      scheduler = SyncScheduler(coordinator: coordinator);
     });
 
     tearDown(() {
@@ -295,16 +445,24 @@ void main() {
       coordinator.dispose();
     });
 
-    test('Scheduler triggers periodic sync on timer expiration', () async {
-      scheduler.start();
-
-      // Wait for periodic timer to tick
-      await Future.delayed(const Duration(milliseconds: 70));
-
-      expect(fakeEngine.pushCount, greaterThanOrEqualTo(1));
+    test('Scheduler begins at NORMAL cadence (45s)', () {
+      expect(scheduler.currentCadence, equals(SyncCadence.normal));
+      expect(scheduler.currentCadence.interval,
+          equals(const Duration(seconds: 45)));
     });
 
-    test('Scheduler dispatches appResumed lifecycle event', () async {
+    test('localMutation trigger immediately transitions cadence to HOT (15s)',
+        () async {
+      scheduler.start();
+      await scheduler.requestSync(SyncTrigger.localMutation);
+
+      expect(scheduler.currentCadence, equals(SyncCadence.hot));
+      expect(scheduler.currentCadence.interval,
+          equals(const Duration(seconds: 15)));
+    });
+
+    test('Scheduler dispatches appResumed lifecycle event and resets to NORMAL',
+        () async {
       scheduler.start();
       scheduler.didChangeAppLifecycleState(AppLifecycleState.resumed);
 
@@ -312,6 +470,7 @@ void main() {
 
       expect(fakeEngine.pushCount, equals(1));
       expect(coordinator.state.lastTrigger, equals(SyncTrigger.appResumed));
+      expect(scheduler.currentCadence, equals(SyncCadence.normal));
     });
   });
 }

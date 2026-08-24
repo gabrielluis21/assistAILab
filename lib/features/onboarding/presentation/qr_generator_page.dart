@@ -16,7 +16,8 @@ class QrGeneratorPage extends ConsumerWidget {
       backgroundColor: const Color(0xFF0F172A),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E293B),
-        title: const Text('Compartilhar OS com Cliente', style: TextStyle(color: Colors.white)),
+        title: const Text('Compartilhar OS com Cliente',
+            style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: Center(
@@ -27,7 +28,10 @@ class QrGeneratorPage extends ConsumerWidget {
             children: [
               const Text(
                 'Gere um convite seguro para o cliente',
-                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
               const Text(
@@ -40,12 +44,18 @@ class QrGeneratorPage extends ConsumerWidget {
                 data: (token) {
                   if (token == null) {
                     return ElevatedButton.icon(
-                      onPressed: () => ref.read(onboardingProvider.notifier).generateToken(serviceOrderId),
+                      onPressed: () => ref
+                          .read(onboardingProvider.notifier)
+                          .generateToken(serviceOrderId),
                       icon: const Icon(Icons.qr_code, color: Colors.white),
-                      label: const Text('Gerar QR Code', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      label: const Text('Gerar QR Code',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF0284C7),
-                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 16),
                       ),
                     );
                   }
@@ -68,18 +78,24 @@ class QrGeneratorPage extends ConsumerWidget {
                       const SizedBox(height: 24),
                       Text(
                         'Token (Alternativo):',
-                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 12),
                       ),
                       const SizedBox(height: 4),
                       SelectableText(
                         token,
-                        style: const TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 14),
+                        style: const TextStyle(
+                            color: Color(0xFF38BDF8),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14),
                       ),
                     ],
                   );
                 },
-                loading: () => const CircularProgressIndicator(color: Color(0xFF38BDF8)),
-                error: (e, _) => Text('Erro ao gerar convite: $e', style: const TextStyle(color: Colors.red)),
+                loading: () =>
+                    const CircularProgressIndicator(color: Color(0xFF38BDF8)),
+                error: (e, _) => Text('Erro ao gerar convite: $e',
+                    style: const TextStyle(color: Colors.red)),
               ),
             ],
           ),

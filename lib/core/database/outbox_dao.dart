@@ -85,7 +85,8 @@ class OutboxDao {
     final nowIso = DateTime.now().toIso8601String();
     final maps = await db.query(
       'outbox',
-      where: '(status = ? OR status = ?) AND (next_retry_at IS NULL OR next_retry_at <= ?)',
+      where:
+          '(status = ? OR status = ?) AND (next_retry_at IS NULL OR next_retry_at <= ?)',
       whereArgs: ['PENDING', 'FAILED', nowIso],
       orderBy: 'created_at ASC',
       limit: limit,

@@ -21,7 +21,8 @@ class CustomersPage extends ConsumerWidget {
             SizedBox(width: 10),
             Text(
               'Clientes',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+              style:
+                  TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ],
         ),
@@ -37,7 +38,8 @@ class CustomersPage extends ConsumerWidget {
           child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
         ),
         error: (err, _) => Center(
-          child: Text('Erro: $err', style: const TextStyle(color: Colors.redAccent)),
+          child: Text('Erro: $err',
+              style: const TextStyle(color: Colors.redAccent)),
         ),
         data: (customers) {
           if (customers.isEmpty) {
@@ -101,26 +103,36 @@ class CustomersPage extends ConsumerWidget {
               const SizedBox(height: 12),
               _buildTextField(documentController, 'CPF / CNPJ', Icons.badge),
               const SizedBox(height: 12),
-              _buildTextField(emailController, 'E-mail', Icons.email, keyboardType: TextInputType.emailAddress),
+              _buildTextField(emailController, 'E-mail', Icons.email,
+                  keyboardType: TextInputType.emailAddress),
               const SizedBox(height: 12),
-              _buildTextField(phoneController, 'Telefone', Icons.phone, keyboardType: TextInputType.phone),
+              _buildTextField(phoneController, 'Telefone', Icons.phone,
+                  keyboardType: TextInputType.phone),
             ],
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+            child:
+                const Text('Cancelar', style: TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0284C7)),
             onPressed: () async {
               if (nameController.text.trim().isEmpty) return;
               await ref.read(customersProvider.notifier).createCustomer(
                     name: nameController.text.trim(),
-                    document: documentController.text.trim().isEmpty ? null : documentController.text.trim(),
-                    email: emailController.text.trim().isEmpty ? null : emailController.text.trim(),
-                    phone: phoneController.text.trim().isEmpty ? null : phoneController.text.trim(),
+                    document: documentController.text.trim().isEmpty
+                        ? null
+                        : documentController.text.trim(),
+                    email: emailController.text.trim().isEmpty
+                        ? null
+                        : emailController.text.trim(),
+                    phone: phoneController.text.trim().isEmpty
+                        ? null
+                        : phoneController.text.trim(),
                   );
               if (ctx.mounted) Navigator.pop(ctx);
             },
@@ -166,7 +178,12 @@ class _CustomerCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final initials = customer.name.trim().split(' ').take(2).map((w) => w[0].toUpperCase()).join();
+    final initials = customer.name
+        .trim()
+        .split(' ')
+        .take(2)
+        .map((w) => w[0].toUpperCase())
+        .join();
 
     return Card(
       color: const Color(0xFF1E293B),
@@ -181,22 +198,27 @@ class _CustomerCard extends ConsumerWidget {
           backgroundColor: const Color(0xFF0284C7),
           child: Text(
             initials,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            style: const TextStyle(
+                color: Colors.white, fontWeight: FontWeight.bold),
           ),
         ),
         title: Text(
           customer.name,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          style:
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (customer.email != null)
-              Text(customer.email!, style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
+              Text(customer.email!,
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
             if (customer.phone != null)
-              Text(customer.phone!, style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
+              Text(customer.phone!,
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
             if (customer.document != null)
-              Text('Doc: ${customer.document}', style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+              Text('Doc: ${customer.document}',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
           ],
         ),
         trailing: PopupMenuButton<String>(

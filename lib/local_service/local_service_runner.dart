@@ -75,8 +75,8 @@ class LocalServiceRunner {
               {'error': e.toString()});
         }
       } else {
-        _sendJsonResponse(
-            request.response, HttpStatus.notFound, {'error': 'Route not found'});
+        _sendJsonResponse(request.response, HttpStatus.notFound,
+            {'error': 'Route not found'});
       }
     });
   }

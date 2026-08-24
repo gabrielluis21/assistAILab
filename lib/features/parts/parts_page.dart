@@ -21,7 +21,8 @@ class PartsPage extends ConsumerWidget {
             SizedBox(width: 10),
             Text(
               'Peças & Estoque',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+              style:
+                  TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ],
         ),
@@ -37,7 +38,8 @@ class PartsPage extends ConsumerWidget {
           child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
         ),
         error: (err, _) => Center(
-          child: Text('Erro: $err', style: const TextStyle(color: Colors.redAccent)),
+          child: Text('Erro: $err',
+              style: const TextStyle(color: Colors.redAccent)),
         ),
         data: (parts) {
           if (parts.isEmpty) {
@@ -100,31 +102,44 @@ class PartsPage extends ConsumerWidget {
             children: [
               _buildTextField(nameController, 'Nome do Item *', Icons.label),
               const SizedBox(height: 12),
-              _buildTextField(skuController, 'SKU / Código *', Icons.qr_code_scanner),
+              _buildTextField(
+                  skuController, 'SKU / Código *', Icons.qr_code_scanner),
               const SizedBox(height: 12),
-              _buildTextField(priceController, 'Preço de Venda (R\$) *', Icons.attach_money, keyboardType: TextInputType.number),
+              _buildTextField(
+                  priceController, 'Preço de Venda (R\$) *', Icons.attach_money,
+                  keyboardType: TextInputType.number),
               const SizedBox(height: 12),
-              _buildTextField(costController, 'Preço de Custo (R\$)', Icons.money_off, keyboardType: TextInputType.number),
+              _buildTextField(
+                  costController, 'Preço de Custo (R\$)', Icons.money_off,
+                  keyboardType: TextInputType.number),
               const SizedBox(height: 12),
-              _buildTextField(stockController, 'Qtd em Estoque *', Icons.warehouse, keyboardType: TextInputType.number),
+              _buildTextField(
+                  stockController, 'Qtd em Estoque *', Icons.warehouse,
+                  keyboardType: TextInputType.number),
             ],
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+            child:
+                const Text('Cancelar', style: TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0284C7)),
             onPressed: () async {
               if (nameController.text.trim().isEmpty ||
                   skuController.text.trim().isEmpty ||
                   priceController.text.trim().isEmpty) {
                 return;
               }
-              final price = double.tryParse(priceController.text.trim().replaceAll(',', '.')) ?? 0.0;
-              final cost = double.tryParse(costController.text.trim().replaceAll(',', '.')) ?? 0.0;
+              final price = double.tryParse(
+                      priceController.text.trim().replaceAll(',', '.')) ??
+                  0.0;
+              final cost = double.tryParse(
+                      costController.text.trim().replaceAll(',', '.')) ??
+                  0.0;
               final stock = int.tryParse(stockController.text.trim()) ?? 0;
 
               await ref.read(partsProvider.notifier).createPart(
@@ -201,23 +216,31 @@ class _PartCard extends ConsumerWidget {
         ),
         title: Text(
           part.name,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          style:
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('SKU: ${part.sku}', style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            Text('SKU: ${part.sku}',
+                style: const TextStyle(color: Colors.white70, fontSize: 13)),
             Row(
               children: [
                 Text(
                   'Preço: R\$ ${part.price.toStringAsFixed(2)}',
-                  style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.w600, fontSize: 13),
+                  style: const TextStyle(
+                      color: Color(0xFF4ADE80),
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13),
                 ),
                 const SizedBox(width: 12),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: isLowStock ? Colors.amber.withOpacity(0.2) : const Color(0xFF334155),
+                    color: isLowStock
+                        ? Colors.amber.withOpacity(0.2)
+                        : const Color(0xFF334155),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(

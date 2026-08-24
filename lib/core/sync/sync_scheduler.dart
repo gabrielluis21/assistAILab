@@ -3,74 +3,104 @@ import 'package:flutter/widgets.dart';
 import 'background_sync_coordinator.dart';
 import 'sync_trigger.dart';
 
-/// Decides WHEN to request synchronization.
+/// Cadence of the adaptive synchronization scheduler.
+enum SyncCadence {
+  hot(Duration(seconds: 15)),
+  normal(Duration(seconds: 45)),
+  idle(Duration(minutes: 3));
+
+  final Duration interval;
+  const SyncCadence(this.interval);
+}
+
+/// Decides WHEN to request synchronization using an adaptive scheduler.
 ///
-/// Responsibilities:
-/// - Listens to application lifecycle events (e.g. appResumed);
-/// - Schedules periodic synchronization timers;
-/// - Schedules periodic consolidation timers;
-/// - Dispatches triggers to the BackgroundSyncCoordinator;
-/// - Does NOT access HTTP or SQLite directly.
+/// Cadence rules:
+/// - HOT (15s): Pending Outbox entries or recent local mutation.
+/// - NORMAL (45s): Active normal operation with periodic checks.
+/// - IDLE (3min): After consecutive empty cycles without changes.
+/// - Any local mutation immediately resets cadence to HOT and triggers sync.
 class SyncScheduler with WidgetsBindingObserver {
   final BackgroundSyncCoordinator coordinator;
-  final Duration periodicInterval;
-  final Duration consolidationInterval;
 
-  Timer? _periodicTimer;
-  Timer? _consolidationTimer;
+  SyncCadence _currentCadence = SyncCadence.normal;
+  int _consecutiveEmptyCycles = 0;
+  Timer? _adaptiveTimer;
   bool _isStarted = false;
 
   SyncScheduler({
     required this.coordinator,
-    this.periodicInterval = const Duration(seconds: 60),
-    this.consolidationInterval = const Duration(minutes: 15),
   });
 
-  /// Starts scheduler timers and registers lifecycle observer.
+  SyncCadence get currentCadence => _currentCadence;
+  int get consecutiveEmptyCycles => _consecutiveEmptyCycles;
+
+  /// Starts adaptive scheduler timer and registers lifecycle observer.
   void start() {
     if (_isStarted) return;
     _isStarted = true;
 
     WidgetsBinding.instance.addObserver(this);
-    _startTimers();
+    _scheduleNextTick();
   }
 
-  /// Stops scheduler timers and removes lifecycle observer.
+  /// Stops adaptive scheduler and removes lifecycle observer.
   void stop() {
     if (!_isStarted) return;
     _isStarted = false;
 
     WidgetsBinding.instance.removeObserver(this);
-    _stopTimers();
+    _adaptiveTimer?.cancel();
+    _adaptiveTimer = null;
   }
 
-  void _startTimers() {
-    _periodicTimer?.cancel();
-    _periodicTimer = Timer.periodic(periodicInterval, (_) {
-      requestSync(SyncTrigger.periodic);
-    });
+  void _scheduleNextTick() {
+    _adaptiveTimer?.cancel();
+    if (!_isStarted) return;
 
-    _consolidationTimer?.cancel();
-    _consolidationTimer = Timer.periodic(consolidationInterval, (_) {
-      requestSync(SyncTrigger.scheduledConsolidation);
-    });
+    _adaptiveTimer = Timer(_currentCadence.interval, _onAdaptiveTick);
   }
 
-  void _stopTimers() {
-    _periodicTimer?.cancel();
-    _periodicTimer = null;
-    _consolidationTimer?.cancel();
-    _consolidationTimer = null;
+  Future<void> _onAdaptiveTick() async {
+    if (!_isStarted) return;
+
+    await coordinator.requestSync(SyncTrigger.periodic);
+
+    // Evaluate state after cycle to adapt cadence
+    final state = coordinator.state;
+    if (state.hasPendingMutations) {
+      _currentCadence = SyncCadence.hot;
+      _consecutiveEmptyCycles = 0;
+    } else if (state.isHealthy) {
+      _consecutiveEmptyCycles++;
+      if (_consecutiveEmptyCycles >= 3) {
+        _currentCadence = SyncCadence.idle;
+      } else {
+        _currentCadence = SyncCadence.normal;
+      }
+    }
+
+    _scheduleNextTick();
   }
 
   /// Dispatches a sync trigger to the coordinator.
+  ///
+  /// Local mutations immediately exit IDLE mode and set cadence to HOT.
   Future<void> requestSync(SyncTrigger trigger) async {
+    if (trigger == SyncTrigger.localMutation) {
+      _currentCadence = SyncCadence.hot;
+      _consecutiveEmptyCycles = 0;
+      _scheduleNextTick();
+    }
     await coordinator.requestSync(trigger);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _currentCadence = SyncCadence.normal;
+      _consecutiveEmptyCycles = 0;
+      _scheduleNextTick();
       requestSync(SyncTrigger.appResumed);
     }
   }

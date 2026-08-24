@@ -2,12 +2,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../auth/application/auth_provider.dart';
 import '../data/onboarding_remote_datasource.dart';
 
-final onboardingDataSourceProvider = Provider<OnboardingRemoteDataSource>((ref) {
+final onboardingDataSourceProvider =
+    Provider<OnboardingRemoteDataSource>((ref) {
   final apiClient = ref.watch(apiClientProvider);
   return OnboardingRemoteDataSource(apiClient);
 });
 
-final onboardingProvider = StateNotifierProvider<OnboardingNotifier, AsyncValue<String?>>((ref) {
+final onboardingProvider =
+    StateNotifierProvider<OnboardingNotifier, AsyncValue<String?>>((ref) {
   return OnboardingNotifier(ref.watch(onboardingDataSourceProvider));
 });
 

@@ -3,7 +3,8 @@ class EquipmentEntity {
   final String? customerId;
   final String? organizationId;
   final String ownerType; // 'CUSTOMER' | 'ORGANIZATION'
-  final String? organizationPurpose; // 'RESALE' | 'PARTS_DONOR' | 'INTERNAL_USE' | null
+  final String?
+      organizationPurpose; // 'RESALE' | 'PARTS_DONOR' | 'INTERNAL_USE' | null
   final String type;
   final String brand;
   final String model;
@@ -45,9 +46,12 @@ class EquipmentEntity {
     return EquipmentEntity(
       id: map['id'] as String,
       customerId: (map['customer_id'] ?? map['customerId']) as String?,
-      organizationId: (map['organization_id'] ?? map['organizationId']) as String?,
-      ownerType: (map['owner_type'] ?? map['ownerType'] ?? 'CUSTOMER') as String,
-      organizationPurpose: (map['organization_purpose'] ?? map['organizationPurpose']) as String?,
+      organizationId:
+          (map['organization_id'] ?? map['organizationId']) as String?,
+      ownerType:
+          (map['owner_type'] ?? map['ownerType'] ?? 'CUSTOMER') as String,
+      organizationPurpose: (map['organization_purpose'] ??
+          map['organizationPurpose']) as String?,
       type: map['type'] as String,
       brand: map['brand'] as String,
       model: map['model'] as String,

@@ -21,7 +21,8 @@ class ServiceOrderLocalDataSource implements ServiceOrderRepository {
   @override
   Future<ServiceOrderEntity?> findById(String id) async {
     final db = await SqliteDatabase.instance;
-    final maps = await db.query('service_orders', where: 'id = ?', whereArgs: [id]);
+    final maps =
+        await db.query('service_orders', where: 'id = ?', whereArgs: [id]);
     if (maps.isEmpty) return null;
     return ServiceOrderEntity.fromMap(maps.first);
   }

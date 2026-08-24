@@ -15,7 +15,8 @@ class AuthRemoteDataSource {
     if (response.statusCode == 200) {
       return jsonDecode(response.body);
     } else {
-      throw Exception('Failed to login: ${response.statusCode} - ${response.body}');
+      throw Exception(
+          'Failed to login: ${response.statusCode} - ${response.body}');
     }
   }
 
@@ -30,7 +31,8 @@ class AuthRemoteDataSource {
     if (response.statusCode == 200) {
       return jsonDecode(response.body);
     } else if (response.statusCode == 401 || response.statusCode == 403) {
-      throw UnauthorizedException('Token inválido ou expirado (${response.statusCode})');
+      throw UnauthorizedException(
+          'Token inválido ou expirado (${response.statusCode})');
     } else {
       throw Exception('GET /auth/me falhou: ${response.statusCode}');
     }

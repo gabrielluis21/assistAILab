@@ -41,7 +41,8 @@ class FinancePage extends ConsumerWidget {
             data: (summary) => _buildSummarySection(summary),
             loading: () => const SizedBox(
               height: 120,
-              child: Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+              child: Center(
+                  child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
             ),
             error: (e, _) => Padding(
               padding: const EdgeInsets.all(16),
@@ -65,8 +66,8 @@ class FinancePage extends ConsumerWidget {
                 child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
               ),
               error: (e, _) => Center(
-                child: Text('Erro: $e',
-                    style: const TextStyle(color: Colors.red)),
+                child:
+                    Text('Erro: $e', style: const TextStyle(color: Colors.red)),
               ),
             ),
           ),
@@ -316,7 +317,8 @@ class _PaymentCard extends ConsumerWidget {
                       ),
                       Text(
                         'OS: ${payment.serviceOrderId.substring(0, 8)}...',
-                        style: const TextStyle(color: Colors.white54, fontSize: 11),
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 11),
                       ),
                     ],
                   ),
@@ -333,7 +335,8 @@ class _PaymentCard extends ConsumerWidget {
                       ),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color: _statusColor.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(4),
@@ -366,9 +369,11 @@ class _PaymentCard extends ConsumerWidget {
                         padding: const EdgeInsets.symmetric(vertical: 8),
                       ),
                       icon: const Icon(Icons.check_circle_outline, size: 16),
-                      label: const Text('Confirmar', style: TextStyle(fontSize: 12)),
-                      onPressed: () =>
-                          ref.read(paymentsProvider.notifier).confirmPayment(payment.id),
+                      label: const Text('Confirmar',
+                          style: TextStyle(fontSize: 12)),
+                      onPressed: () => ref
+                          .read(paymentsProvider.notifier)
+                          .confirmPayment(payment.id),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -380,9 +385,11 @@ class _PaymentCard extends ConsumerWidget {
                         padding: const EdgeInsets.symmetric(vertical: 8),
                       ),
                       icon: const Icon(Icons.cancel_outlined, size: 16),
-                      label: const Text('Cancelar', style: TextStyle(fontSize: 12)),
-                      onPressed: () =>
-                          ref.read(paymentsProvider.notifier).cancelPayment(payment.id),
+                      label: const Text('Cancelar',
+                          style: TextStyle(fontSize: 12)),
+                      onPressed: () => ref
+                          .read(paymentsProvider.notifier)
+                          .cancelPayment(payment.id),
                     ),
                   ),
                 ],
@@ -401,7 +408,8 @@ class _CreatePaymentDialog extends ConsumerStatefulWidget {
   const _CreatePaymentDialog({required this.ref});
 
   @override
-  ConsumerState<_CreatePaymentDialog> createState() => _CreatePaymentDialogState();
+  ConsumerState<_CreatePaymentDialog> createState() =>
+      _CreatePaymentDialogState();
 }
 
 class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
@@ -431,7 +439,8 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
             customerId: _customerIdCtrl.text.trim(),
             amount: double.parse(_amountCtrl.text.trim()),
             method: _method,
-            notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+            notes:
+                _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
           );
       if (mounted) Navigator.pop(context);
     } finally {
@@ -571,7 +580,8 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
       ),
       validator: validator ??
           (v) {
-            if (required && (v == null || v.isEmpty)) return 'Campo obrigatório';
+            if (required && (v == null || v.isEmpty))
+              return 'Campo obrigatório';
             return null;
           },
     );

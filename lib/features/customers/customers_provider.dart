@@ -30,7 +30,7 @@ class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
     String? phone,
     String? address,
   }) async {
-    final uuid = const Uuid();
+    const uuid = Uuid();
     final customer = CustomerEntity(
       id: uuid.v4(),
       name: name,

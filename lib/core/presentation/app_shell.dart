@@ -95,8 +95,7 @@ class AppShell extends ConsumerWidget {
           ),
           NavigationDestination(
             icon: Icon(Icons.build_circle_outlined, color: Colors.white54),
-            selectedIcon:
-                Icon(Icons.build_circle, color: Color(0xFF38BDF8)),
+            selectedIcon: Icon(Icons.build_circle, color: Color(0xFF38BDF8)),
             label: 'OS',
           ),
           NavigationDestination(
@@ -112,8 +111,8 @@ class AppShell extends ConsumerWidget {
           NavigationDestination(
             icon: Icon(Icons.account_balance_wallet_outlined,
                 color: Colors.white54),
-            selectedIcon: Icon(Icons.account_balance_wallet,
-                color: Color(0xFF38BDF8)),
+            selectedIcon:
+                Icon(Icons.account_balance_wallet, color: Color(0xFF38BDF8)),
             label: 'Finance',
           ),
         ],
@@ -128,18 +127,14 @@ class AppShell extends ConsumerWidget {
       selectedIndex: selectedIndex,
       onDestinationSelected: (i) =>
           ref.read(_navIndexProvider.notifier).state = i,
-      selectedIconTheme:
-          const IconThemeData(color: Color(0xFF38BDF8)),
-      unselectedIconTheme:
-          const IconThemeData(color: Colors.white38),
+      selectedIconTheme: const IconThemeData(color: Color(0xFF38BDF8)),
+      unselectedIconTheme: const IconThemeData(color: Colors.white38),
       selectedLabelTextStyle: const TextStyle(
           color: Color(0xFF38BDF8), fontWeight: FontWeight.bold),
-      unselectedLabelTextStyle:
-          const TextStyle(color: Colors.white38),
+      unselectedLabelTextStyle: const TextStyle(color: Colors.white38),
       extended: true,
       leading: Padding(
-        padding:
-            const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
         child: Row(
           children: [
             Container(
@@ -148,8 +143,8 @@ class AppShell extends ConsumerWidget {
                 color: const Color(0xFF0284C7),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Icon(Icons.construction,
-                  color: Colors.white, size: 22),
+              child:
+                  const Icon(Icons.construction, color: Colors.white, size: 22),
             ),
             const SizedBox(width: 10),
             const Text(

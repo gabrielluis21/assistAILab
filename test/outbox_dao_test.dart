@@ -3,7 +3,9 @@ import 'package:assistailab/core/database/outbox_dao.dart';
 
 void main() {
   group('OutboxItem Model Tests', () {
-    test('Should correctly convert OutboxItem with retry metadata to Map and back', () {
+    test(
+        'Should correctly convert OutboxItem with retry metadata to Map and back',
+        () {
       final item = OutboxItem(
         operationId: '123e4567-e89b-12d3-a456-426614174000',
         deviceId: 'device-01',
@@ -21,7 +23,8 @@ void main() {
       );
 
       final map = item.toMap();
-      expect(map['operation_id'], equals('123e4567-e89b-12d3-a456-426614174000'));
+      expect(
+          map['operation_id'], equals('123e4567-e89b-12d3-a456-426614174000'));
       expect(map['entity_type'], equals('CUSTOMER'));
       expect(map['attempt_count'], equals(2));
       expect(map['last_error'], equals('HTTP 500: Server Error'));

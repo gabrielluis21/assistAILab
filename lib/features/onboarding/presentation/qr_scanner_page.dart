@@ -40,7 +40,8 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
       backgroundColor: const Color(0xFF0F172A),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E293B),
-        title: const Text('Ler QR Code de Convite', style: TextStyle(color: Colors.white)),
+        title: const Text('Ler QR Code de Convite',
+            style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: Center(
@@ -49,11 +50,15 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.qr_code_scanner, size: 80, color: Color(0xFF38BDF8)),
+              const Icon(Icons.qr_code_scanner,
+                  size: 80, color: Color(0xFF38BDF8)),
               const SizedBox(height: 24),
               const Text(
                 'Posicione a câmera no QR Code',
-                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
               const Text(
@@ -81,20 +86,28 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
                   onPressed: _claim,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF10B981),
-                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 32, vertical: 16),
                   ),
-                  child: const Text('Validar Acesso', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  child: const Text('Validar Acesso',
+                      style: TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.bold)),
                 ),
-                loading: () => const CircularProgressIndicator(color: Color(0xFF10B981)),
+                loading: () =>
+                    const CircularProgressIndicator(color: Color(0xFF10B981)),
                 error: (e, _) => Column(
                   children: [
                     ElevatedButton(
                       onPressed: _claim,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF10B981),
-                        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 32, vertical: 16),
                       ),
-                      child: const Text('Tentar Novamente', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      child: const Text('Tentar Novamente',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
                     ),
                     const SizedBox(height: 12),
                     Text('Erro: $e', style: const TextStyle(color: Colors.red)),

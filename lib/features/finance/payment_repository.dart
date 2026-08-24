@@ -67,7 +67,8 @@ class PaymentLocalDataSource implements PaymentRepository {
   }
 
   @override
-  Future<void> updateStatus(String id, PaymentStatus status, {String? paidAt}) async {
+  Future<void> updateStatus(String id, PaymentStatus status,
+      {String? paidAt}) async {
     final db = await _db;
     final now = DateTime.now().toIso8601String();
     await db.update(

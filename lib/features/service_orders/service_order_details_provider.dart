@@ -103,7 +103,8 @@ class ServiceOrderItemsNotifier
 
     // Recalculate OS total
     final remaining = await itemRepo.listByOrder(serviceOrderId);
-    final newTotal = remaining.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
+    final newTotal =
+        remaining.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
 
     final existingOrder = await orderRepo.findById(serviceOrderId);
     if (existingOrder != null) {

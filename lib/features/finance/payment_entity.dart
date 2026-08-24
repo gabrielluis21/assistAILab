@@ -1,4 +1,11 @@
-enum PaymentMethod { dinheiro, cartaoCredito, cartaoDebito, pix, transferencia, boleto }
+enum PaymentMethod {
+  dinheiro,
+  cartaoCredito,
+  cartaoDebito,
+  pix,
+  transferencia,
+  boleto
+}
 
 extension PaymentMethodExtension on PaymentMethod {
   String toDbString() {

@@ -11,7 +11,8 @@ final serviceOrderRepositoryProvider = Provider<ServiceOrderRepository>(
 );
 
 // Valid state machine transitions - mirrors backend rule set
-final Map<ServiceOrderStatusEnum, List<ServiceOrderStatusEnum>> _allowedTransitions = {
+final Map<ServiceOrderStatusEnum, List<ServiceOrderStatusEnum>>
+    _allowedTransitions = {
   ServiceOrderStatusEnum.draft: [
     ServiceOrderStatusEnum.diagnostico,
     ServiceOrderStatusEnum.cancelado,
@@ -28,12 +29,16 @@ final Map<ServiceOrderStatusEnum, List<ServiceOrderStatusEnum>> _allowedTransiti
     ServiceOrderStatusEnum.pronto,
     ServiceOrderStatusEnum.cancelado,
   ],
-  ServiceOrderStatusEnum.pronto: [ServiceOrderStatusEnum.entregue, ServiceOrderStatusEnum.cancelado],
+  ServiceOrderStatusEnum.pronto: [
+    ServiceOrderStatusEnum.entregue,
+    ServiceOrderStatusEnum.cancelado
+  ],
   ServiceOrderStatusEnum.entregue: <ServiceOrderStatusEnum>[],
   ServiceOrderStatusEnum.cancelado: <ServiceOrderStatusEnum>[],
 };
 
-List<ServiceOrderStatusEnum> allowedTransitionsFor(ServiceOrderStatusEnum current) {
+List<ServiceOrderStatusEnum> allowedTransitionsFor(
+    ServiceOrderStatusEnum current) {
   return _allowedTransitions[current] ?? <ServiceOrderStatusEnum>[];
 }
 

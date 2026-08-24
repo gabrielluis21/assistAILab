@@ -89,7 +89,11 @@ class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
       entityType: 'PAYMENT',
       entityId: id,
       operationType: 'UPDATE',
-      payload: {'id': id, 'status': PaymentStatus.confirmed.toDbString(), 'paid_at': now},
+      payload: {
+        'id': id,
+        'status': PaymentStatus.confirmed.toDbString(),
+        'paid_at': now
+      },
       createdAt: now,
     ));
 
@@ -135,14 +139,18 @@ final financeSummaryProvider = FutureProvider<FinanceSummary>((ref) async {
   final payments = await ref.watch(paymentsProvider.future);
   final repo = ref.read(paymentRepositoryProvider);
 
-  final totalRevenue = await repo.totalRevenue(statusFilter: PaymentStatus.confirmed);
+  final totalRevenue =
+      await repo.totalRevenue(statusFilter: PaymentStatus.confirmed);
   final monthRevenue = await repo.revenueThisMonth();
-  final pendingAmount = await repo.totalRevenue(statusFilter: PaymentStatus.pending);
+  final pendingAmount =
+      await repo.totalRevenue(statusFilter: PaymentStatus.pending);
 
-  final pendingPayments = payments.where((p) => p.status == PaymentStatus.pending).length;
+  final pendingPayments =
+      payments.where((p) => p.status == PaymentStatus.pending).length;
 
   // Revenue by method (confirmed only)
-  final confirmedPayments = payments.where((p) => p.status == PaymentStatus.confirmed);
+  final confirmedPayments =
+      payments.where((p) => p.status == PaymentStatus.confirmed);
   final Map<PaymentMethod, double> revenueByMethod = {};
   for (final p in confirmedPayments) {
     revenueByMethod[p.method] = (revenueByMethod[p.method] ?? 0.0) + p.amount;

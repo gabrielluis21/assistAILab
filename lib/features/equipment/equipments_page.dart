@@ -23,7 +23,8 @@ class EquipmentsPage extends ConsumerWidget {
             SizedBox(width: 10),
             Text(
               'Equipamentos',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+              style:
+                  TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ],
         ),
@@ -39,7 +40,8 @@ class EquipmentsPage extends ConsumerWidget {
           child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
         ),
         error: (err, _) => Center(
-          child: Text('Erro: $err', style: const TextStyle(color: Colors.redAccent)),
+          child: Text('Erro: $err',
+              style: const TextStyle(color: Colors.redAccent)),
         ),
         data: (equipments) {
           if (equipments.isEmpty) {
@@ -47,7 +49,8 @@ class EquipmentsPage extends ConsumerWidget {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.devices_other, size: 64, color: Colors.grey.shade700),
+                  Icon(Icons.devices_other,
+                      size: 64, color: Colors.grey.shade700),
                   const SizedBox(height: 16),
                   const Text(
                     'Nenhum equipamento cadastrado',
@@ -70,7 +73,8 @@ class EquipmentsPage extends ConsumerWidget {
       ),
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: const Color(0xFF0284C7),
-        onPressed: () => _showCreateEquipmentDialog(context, ref, customersAsync.value ?? []),
+        onPressed: () => _showCreateEquipmentDialog(
+            context, ref, customersAsync.value ?? []),
         icon: const Icon(Icons.add, color: Colors.white),
         label: const Text(
           'Novo Equipamento',
@@ -90,7 +94,8 @@ class EquipmentsPage extends ConsumerWidget {
     final typeController = TextEditingController(text: 'Notebook');
     final serialController = TextEditingController();
     final notesController = TextEditingController();
-    String? selectedCustomerId = customers.isNotEmpty ? customers.first.id : null;
+    String? selectedCustomerId =
+        customers.isNotEmpty ? customers.first.id : null;
 
     showDialog(
       context: context,
@@ -98,10 +103,12 @@ class EquipmentsPage extends ConsumerWidget {
         builder: (context, setState) {
           return AlertDialog(
             backgroundColor: const Color(0xFF1E293B),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text(
               'Novo Equipamento',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
             ),
             content: SingleChildScrollView(
               child: Column(
@@ -115,14 +122,17 @@ class EquipmentsPage extends ConsumerWidget {
                       decoration: InputDecoration(
                         labelText: 'Cliente *',
                         labelStyle: const TextStyle(color: Colors.white54),
-                        prefixIcon: const Icon(Icons.person, color: Color(0xFF38BDF8), size: 20),
+                        prefixIcon: const Icon(Icons.person,
+                            color: Color(0xFF38BDF8), size: 20),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF334155)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF334155)),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF38BDF8)),
                         ),
                         filled: true,
                         fillColor: const Color(0xFF0F172A),
@@ -130,31 +140,39 @@ class EquipmentsPage extends ConsumerWidget {
                       items: customers.map<DropdownMenuItem<String>>((c) {
                         return DropdownMenuItem<String>(
                           value: c.id as String,
-                          child: Text(c.name as String, style: const TextStyle(color: Colors.white)),
+                          child: Text(c.name as String,
+                              style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
-                      onChanged: (val) => setState(() => selectedCustomerId = val),
+                      onChanged: (val) =>
+                          setState(() => selectedCustomerId = val),
                     ),
                   const SizedBox(height: 12),
-                  _buildTextField(typeController, 'Tipo (ex: Smartphone, Notebook) *', Icons.category),
+                  _buildTextField(typeController,
+                      'Tipo (ex: Smartphone, Notebook) *', Icons.category),
                   const SizedBox(height: 12),
-                  _buildTextField(brandController, 'Marca (ex: Apple, Dell) *', Icons.branding_watermark),
+                  _buildTextField(brandController, 'Marca (ex: Apple, Dell) *',
+                      Icons.branding_watermark),
                   const SizedBox(height: 12),
                   _buildTextField(modelController, 'Modelo *', Icons.devices),
                   const SizedBox(height: 12),
-                  _buildTextField(serialController, 'Nº de Série / IMEI', Icons.qr_code),
+                  _buildTextField(
+                      serialController, 'Nº de Série / IMEI', Icons.qr_code),
                   const SizedBox(height: 12),
-                  _buildTextField(notesController, 'Observações', Icons.note, maxLines: 2),
+                  _buildTextField(notesController, 'Observações', Icons.note,
+                      maxLines: 2),
                 ],
               ),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+                child: const Text('Cancelar',
+                    style: TextStyle(color: Colors.white54)),
               ),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7)),
                 onPressed: () async {
                   if (brandController.text.trim().isEmpty ||
                       modelController.text.trim().isEmpty ||
@@ -167,12 +185,17 @@ class EquipmentsPage extends ConsumerWidget {
                         type: typeController.text.trim(),
                         brand: brandController.text.trim(),
                         model: modelController.text.trim(),
-                        serialNumber: serialController.text.trim().isEmpty ? null : serialController.text.trim(),
-                        notes: notesController.text.trim().isEmpty ? null : notesController.text.trim(),
+                        serialNumber: serialController.text.trim().isEmpty
+                            ? null
+                            : serialController.text.trim(),
+                        notes: notesController.text.trim().isEmpty
+                            ? null
+                            : notesController.text.trim(),
                       );
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
-                child: const Text('Salvar', style: TextStyle(color: Colors.white)),
+                child:
+                    const Text('Salvar', style: TextStyle(color: Colors.white)),
               ),
             ],
           );
@@ -235,21 +258,27 @@ class _EquipmentCard extends ConsumerWidget {
         ),
         title: Text(
           '${equipment.brand} ${equipment.model}',
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          style:
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Tipo: ${equipment.type}', style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            Text('Tipo: ${equipment.type}',
+                style: const TextStyle(color: Colors.white70, fontSize: 13)),
             if (equipment.serialNumber != null)
-              Text('S/N: ${equipment.serialNumber}', style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+              Text('S/N: ${equipment.serialNumber}',
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
             if (equipment.notes != null)
-              Text('Obs: ${equipment.notes}', style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+              Text('Obs: ${equipment.notes}',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
           ],
         ),
         trailing: IconButton(
           icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          onPressed: () => ref.read(equipmentsProvider.notifier).deleteEquipment(equipment.id),
+          onPressed: () => ref
+              .read(equipmentsProvider.notifier)
+              .deleteEquipment(equipment.id),
         ),
       ),
     );
