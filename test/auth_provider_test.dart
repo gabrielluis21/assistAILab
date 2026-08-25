@@ -13,19 +13,25 @@ class _FakeApiClient extends ApiClient {
   final int getMeStatus;
   final String getMeBody;
 
-  _FakeApiClient({this.getMeStatus = 200, this.getMeBody = _meResponse});
+  _FakeApiClient({
+    this.getMeStatus = 200,
+    this.getMeBody = _meResponse,
+  }) : super(baseUrl: 'http://fake.api');
 
   @override
   Future<http.Response> get(String endpoint) async {
     if (endpoint == '/auth/me') {
       return http.Response(getMeBody, getMeStatus);
     }
+
     throw UnimplementedError('GET $endpoint');
   }
 
   @override
-  Future<http.Response> post(String endpoint,
-      {Map<String, dynamic>? body}) async {
+  Future<http.Response> post(
+    String endpoint, {
+    Map<String, dynamic>? body,
+  }) async {
     throw UnimplementedError('POST $endpoint');
   }
 }

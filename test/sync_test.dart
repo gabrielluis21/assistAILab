@@ -7,23 +7,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:assistailab/core/sync/sync_trigger.dart';
-import 'package:assistailab/core/sync/sync_state.dart';
-import 'package:assistailab/core/sync/sync_engine.dart';
-import 'package:assistailab/core/sync/background_sync_coordinator.dart';
-import 'package:assistailab/core/sync/sync_scheduler.dart';
 import 'package:assistailab/core/database/outbox_dao.dart';
 import 'package:assistailab/core/database/sqlite_database.dart';
-import 'package:assistailab/core/network/api_client.dart';
-import 'package:assistailab/core/sync/sync_payload_mapper.dart';
-import 'package:assistailab/features/customers/customer_entity.dart';
-import 'package:assistailab/features/customers/customer_repository.dart';
-import 'package:assistailab/features/equipment/equipment_entity.dart';
-import 'package:assistailab/features/parts/part_entity.dart';
 import 'package:assistailab/core/database/service_order_repository.dart';
 import 'package:assistailab/core/database/service_order_item_repository.dart';
+
+import 'package:assistailab/core/network/api_client.dart';
+
+import 'package:assistailab/core/sync/background_sync_coordinator.dart';
+import 'package:assistailab/core/sync/sync_engine.dart';
+import 'package:assistailab/core/sync/sync_payload_mapper.dart';
+import 'package:assistailab/core/sync/sync_scheduler.dart';
+import 'package:assistailab/core/sync/sync_state.dart';
+import 'package:assistailab/core/sync/sync_trigger.dart';
+
+import 'package:assistailab/features/customers/customer_entity.dart';
+import 'package:assistailab/features/customers/customer_repository.dart';
+
+import 'package:assistailab/features/equipment/equipment_entity.dart';
+import 'package:assistailab/features/equipment/equipment_repository.dart';
+
+import 'package:assistailab/features/parts/part_entity.dart';
+import 'package:assistailab/features/parts/part_repository.dart';
+
+import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
-import 'package:assistailab/features/service_orders/service_order_item_repository.dart';
 
 class FakeApiClient extends ApiClient {
   int pushCalls = 0;

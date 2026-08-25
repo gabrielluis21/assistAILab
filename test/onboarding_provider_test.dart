@@ -6,14 +6,25 @@ import 'package:assistailab/core/network/api_client.dart';
 import 'package:http/http.dart' as http;
 
 class FakeApiClient extends ApiClient {
+  FakeApiClient() : super(baseUrl: 'http://fake.api');
+
   @override
-  Future<http.Response> post(String endpoint,
-      {Map<String, dynamic>? body}) async {
+  Future<http.Response> post(
+    String endpoint, {
+    Map<String, dynamic>? body,
+  }) async {
     if (endpoint.contains('grant')) {
-      return http.Response('{"token": "fake_qr_token_123"}', 201);
+      return http.Response(
+        '{"token": "fake_qr_token_123"}',
+        201,
+      );
     } else if (endpoint.contains('claim')) {
-      return http.Response('{"status": "success"}', 200);
+      return http.Response(
+        '{"status": "success"}',
+        200,
+      );
     }
+
     throw UnimplementedError();
   }
 }
