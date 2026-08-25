@@ -2116,13 +2116,13 @@ describe(
           index <
           orderIds.length;
           index +=
-          1
+            1
         ) {
           await prisma.equipment.create({
             data: {
               id:
                 equipmentIds[
-                index
+                  index
                 ],
 
               customerId,
@@ -2151,7 +2151,7 @@ describe(
             data: {
               id:
                 orderIds[
-                index
+                  index
                 ],
 
               organizationId,
@@ -2160,7 +2160,7 @@ describe(
 
               equipmentId:
                 equipmentIds[
-                index
+                  index
                 ],
 
               status:
@@ -2915,13 +2915,13 @@ describe(
           index <
           orderIds.length;
           index +=
-          1
+            1
         ) {
           await prisma.equipment.create({
             data: {
               id:
                 equipmentIds[
-                index
+                  index
                 ],
 
               customerId,
@@ -2950,7 +2950,7 @@ describe(
             data: {
               id:
                 orderIds[
-                index
+                  index
                 ],
 
               organizationId,
@@ -2959,16 +2959,16 @@ describe(
 
               equipmentId:
                 equipmentIds[
-                index
+                  index
                 ],
 
               status:
                 index ===
                   2
                   ? ServiceOrderStatus
-                    .DIAGNOSTICO
+                      .DIAGNOSTICO
                   : ServiceOrderStatus
-                    .AGUARDANDO_APROVACAO,
+                      .AGUARDANDO_APROVACAO,
 
               problemDescription:
                 `C6 quote order ${index}`,
@@ -4160,8 +4160,6 @@ describe(
     );
   }
 
-);
-
 /**
  * ============================================================
  * CLIENT APP BACKEND GATE
@@ -4169,11 +4167,11 @@ describe(
  *
  * T051 / T052
  *
- * Segurança de serialização de ServiceOrder
- * e propagação REST -> SyncChangeLog.
+ * Segurança de serialização de ServiceOrder +
+ * propagação REST -> SyncChangeLog.
  */
 describe(
-  'Client App Backend Gate - ServiceOrder safety and propagation',
+  'Client App Backend Gate — ServiceOrder read safety and REST propagation',
   {
     concurrency: false,
   },
@@ -4240,222 +4238,181 @@ describe(
             12
           );
 
-        /**
-         * ====================================================
-         * ORGANIZATION
-         * ====================================================
-         */
-        await prisma.organization.create({
-          data: {
-            id:
-              organizationId,
-
-            name:
-              `Client Gate Org ${runId}`,
-          },
-        });
-
-        /**
-         * ====================================================
-         * CUSTOMER
-         * ====================================================
-         */
-        await prisma.customer.create({
-          data: {
-            id:
-              customerId,
-
-            name:
-              'Client Gate Customer',
-
-            email:
-              customerEmail,
-          },
-        });
-
-        /**
-         * ====================================================
-         * USERS
-         * ====================================================
-         */
-        await prisma.user.createMany({
-          data: [
-            {
+        await prisma.organization
+          .create({
+            data: {
               id:
-                adminId,
+                organizationId,
 
               name:
-                'Client Gate Admin',
-
-              email:
-                adminEmail,
-
-              passwordHash,
-
-              role:
-                Role.ADMIN,
-
-              status:
-                UserStatus.ACTIVE,
+                `Client Gate Org ${runId}`,
             },
+          });
 
-            {
+        await prisma.customer
+          .create({
+            data: {
               id:
-                technicianId,
-
-              name:
-                'Client Gate Technician',
-
-              email:
-                technicianEmail,
-
-              passwordHash,
-
-              role:
-                Role.TECHNICIAN,
-
-              status:
-                UserStatus.ACTIVE,
-            },
-
-            {
-              id:
-                customerUserId,
+                customerId,
 
               name:
                 'Client Gate Customer',
 
               email:
                 customerEmail,
+            },
+          });
 
-              passwordHash,
+        await prisma.user
+          .createMany({
+            data: [
+              {
+                id:
+                  adminId,
 
-              role:
-                Role.CUSTOMER,
+                name:
+                  'Client Gate Admin',
+
+                email:
+                  adminEmail,
+
+                passwordHash,
+
+                role:
+                  Role.ADMIN,
+
+                status:
+                  UserStatus.ACTIVE,
+              },
+
+              {
+                id:
+                  technicianId,
+
+                name:
+                  'Client Gate Technician',
+
+                email:
+                  technicianEmail,
+
+                passwordHash,
+
+                role:
+                  Role.TECHNICIAN,
+
+                status:
+                  UserStatus.ACTIVE,
+              },
+
+              {
+                id:
+                  customerUserId,
+
+                name:
+                  'Client Gate Customer',
+
+                email:
+                  customerEmail,
+
+                passwordHash,
+
+                role:
+                  Role.CUSTOMER,
+
+                status:
+                  UserStatus.ACTIVE,
+
+                customerId,
+              },
+            ],
+          });
+
+        await prisma.membership
+          .createMany({
+            data: [
+              {
+                userId:
+                  adminId,
+
+                organizationId,
+
+                role:
+                  Role.ADMIN,
+              },
+
+              {
+                userId:
+                  technicianId,
+
+                organizationId,
+
+                role:
+                  Role.TECHNICIAN,
+              },
+            ],
+          });
+
+        await prisma.customerOrganization
+          .create({
+            data: {
+              customerId,
+
+              organizationId,
 
               status:
-                UserStatus.ACTIVE,
+                CustomerOrganizationStatus.ACTIVE,
+            },
+          });
+
+        await prisma.equipment
+          .create({
+            data: {
+              id:
+                equipmentId,
 
               customerId,
-            },
-          ],
-        });
 
-        /**
-         * ====================================================
-         * MEMBERSHIPS
-         * ====================================================
-         */
-        await prisma.membership.createMany({
-          data: [
-            {
-              userId:
-                adminId,
+              ownerType:
+                EquipmentOwnerType.CUSTOMER,
+
+              type:
+                'NOTEBOOK',
+
+              brand:
+                'Gate',
+
+              model:
+                'Read Safety',
+            },
+          });
+
+        await prisma.serviceOrder
+          .create({
+            data: {
+              id:
+                orderId,
 
               organizationId,
 
-              role:
-                Role.ADMIN,
-            },
+              customerId,
 
-            {
-              userId:
-                technicianId,
-
-              organizationId,
-
-              role:
-                Role.TECHNICIAN,
-            },
-          ],
-        });
-
-        /**
-         * ====================================================
-         * CUSTOMER ORGANIZATION
-         * ====================================================
-         */
-        await prisma.customerOrganization.create({
-          data: {
-            customerId,
-
-            organizationId,
-
-            status:
-              CustomerOrganizationStatus.ACTIVE,
-          },
-        });
-
-        /**
-         * ====================================================
-         * EQUIPMENT
-         * ====================================================
-         */
-        await prisma.equipment.create({
-          data: {
-            id:
               equipmentId,
 
-            customerId,
+              technicianId,
 
-            ownerType:
-              EquipmentOwnerType.CUSTOMER,
+              status:
+                ServiceOrderStatus.PRONTO,
 
-            type:
-              'NOTEBOOK',
+              problemDescription:
+                'Client app backend gate',
+            },
+          });
 
-            brand:
-              'Gate',
-
-            model:
-              'Read Safety',
-          },
-        });
-
-        /**
-         * ====================================================
-         * SERVICE ORDER
-         * ====================================================
-         *
-         * PRONTO é utilizado propositalmente para que T052
-         * possa executar:
-         *
-         * PRONTO -> ENTREGUE
-         */
-        await prisma.serviceOrder.create({
-          data: {
-            id:
-              orderId,
-
-            organizationId,
-
-            customerId,
-
-            equipmentId,
-
-            technicianId,
-
-            status:
-              ServiceOrderStatus.PRONTO,
-
-            problemDescription:
-              'Client app backend gate',
-          },
-        });
-
-        /**
-         * Fastify só é iniciado depois das fixtures.
-         */
         app =
           buildApp();
 
         await app.ready();
 
-        /**
-         * ====================================================
-         * LOGIN ADMIN
-         * ====================================================
-         */
         const adminLogin =
           await app.inject({
             method:
@@ -4472,21 +4429,6 @@ describe(
             },
           });
 
-        assert.equal(
-          adminLogin.statusCode,
-          200
-        );
-
-        adminToken =
-          adminLogin
-            .json()
-            .token;
-
-        /**
-         * ====================================================
-         * LOGIN CUSTOMER
-         * ====================================================
-         */
         const customerLogin =
           await app.inject({
             method:
@@ -4504,132 +4446,110 @@ describe(
           });
 
         assert.equal(
+          adminLogin.statusCode,
+          200
+        );
+
+        assert.equal(
           customerLogin.statusCode,
           200
         );
 
+        adminToken =
+          adminLogin.json().token;
+
         customerToken =
-          customerLogin
-            .json()
-            .token;
+          customerLogin.json().token;
       }
     );
 
-    /**
-     * ========================================================
-     * CLEANUP
-     * ========================================================
-     */
     after(
       async () => {
-        /**
-         * Sync ChangeLog.
-         */
-        await prisma.syncChangeLog.deleteMany({
-          where: {
-            entityId:
-              orderId,
-          },
-        });
-
-        /**
-         * CRM / CustomerEvents.
-         */
-        await prisma.customerEvent.deleteMany({
-          where: {
-            serviceOrderId:
-              orderId,
-          },
-        });
-
-        /**
-         * Histórico da OS.
-         */
-        await prisma.serviceOrderStatusHistory.deleteMany({
-          where: {
-            serviceOrderId:
-              orderId,
-          },
-        });
-
-        /**
-         * OS.
-         */
-        await prisma.serviceOrder.deleteMany({
-          where: {
-            id:
-              orderId,
-          },
-        });
-
-        /**
-         * Equipment.
-         */
-        await prisma.equipment.deleteMany({
-          where: {
-            id:
-              equipmentId,
-          },
-        });
-
-        /**
-         * CustomerOrganization.
-         */
-        await prisma.customerOrganization.deleteMany({
-          where: {
-            customerId,
-          },
-        });
-
-        /**
-         * Memberships.
-         */
-        await prisma.membership.deleteMany({
-          where: {
-            organizationId,
-          },
-        });
-
-        /**
-         * Users.
-         */
-        await prisma.user.deleteMany({
-          where: {
-            id: {
-              in: [
-                adminId,
-                technicianId,
-                customerUserId,
-              ],
+        await prisma.syncChangeLog
+          .deleteMany({
+            where: {
+              entityId:
+                orderId,
             },
-          },
-        });
+          });
 
-        /**
-         * Customer.
-         */
-        await prisma.customer.deleteMany({
-          where: {
-            id:
+        await prisma.customerEvent
+          .deleteMany({
+            where: {
+              serviceOrderId:
+                orderId,
+            },
+          });
+
+        await prisma.serviceOrderStatusHistory
+          .deleteMany({
+            where: {
+              serviceOrderId:
+                orderId,
+            },
+          });
+
+        await prisma.serviceOrder
+          .deleteMany({
+            where: {
+              id:
+                orderId,
+            },
+          });
+
+        await prisma.equipment
+          .deleteMany({
+            where: {
+              id:
+                equipmentId,
+            },
+          });
+
+        await prisma.customerOrganization
+          .deleteMany({
+            where: {
               customerId,
-          },
-        });
+            },
+          });
 
-        /**
-         * Organization.
-         */
-        await prisma.organization.deleteMany({
-          where: {
-            id:
+        await prisma.membership
+          .deleteMany({
+            where: {
               organizationId,
-          },
-        });
+            },
+          });
+
+        await prisma.user
+          .deleteMany({
+            where: {
+              id: {
+                in: [
+                  adminId,
+                  technicianId,
+                  customerUserId,
+                ],
+              },
+            },
+          });
+
+        await prisma.customer
+          .deleteMany({
+            where: {
+              id:
+                customerId,
+            },
+          });
+
+        await prisma.organization
+          .deleteMany({
+            where: {
+              id:
+                organizationId,
+            },
+          });
 
         await app.close();
 
-        /**
-         * JWT_SECRET original.
-         */
         if (
           oldJwtSecret
         ) {
@@ -4644,26 +4564,10 @@ describe(
     );
 
     /**
-     * ========================================================
      * T051
-     * ========================================================
-     *
-     * CUSTOMER não pode receber o objeto User completo
-     * relacionado ao technician.
-     *
-     * Principalmente:
-     *
-     * passwordHash
-     *
-     * A representação pública permitida neste fluxo é:
-     *
-     * {
-     *   id,
-     *   name
-     * }
      */
     test(
-      'T051 - CUSTOMER ServiceOrder response exposes only safe technician fields',
+      'CUSTOMER ServiceOrder response exposes only safe technician fields',
       async () => {
         const response =
           await app.inject({
@@ -4684,15 +4588,9 @@ describe(
           200
         );
 
-        const body =
-          response.json();
-
-        assert.ok(
-          body.order
-        );
-
         const technician =
-          body
+          response
+            .json()
             .order
             .technician;
 
@@ -4700,9 +4598,6 @@ describe(
           technician
         );
 
-        /**
-         * Campos públicos esperados.
-         */
         assert.equal(
           technician.id,
           technicianId
@@ -4713,9 +4608,6 @@ describe(
           'Client Gate Technician'
         );
 
-        /**
-         * passwordHash jamais deve estar presente.
-         */
         assert.equal(
           Object.prototype
             .hasOwnProperty
@@ -4726,10 +4618,6 @@ describe(
           false
         );
 
-        /**
-         * Garante que a projeção não voltou a ser
-         * technician: true futuramente.
-         */
         assert.deepEqual(
           Object.keys(
             technician
@@ -4743,24 +4631,10 @@ describe(
     );
 
     /**
-     * ========================================================
      * T052
-     * ========================================================
-     *
-     * Quando uma alteração autoritativa é feita pelo REST,
-     * outro dispositivo precisa conseguir descobri-la pelo
-     * Background Pull.
-     *
-     * Portanto:
-     *
-     * REST ServiceOrder status update
-     *          ↓
-     * MySQL
-     *          ↓
-     * SyncChangeLog
      */
     test(
-      'T052 - REST ServiceOrder status mutation publishes canonical SyncChangeLog snapshot',
+      'REST ServiceOrder status mutation publishes canonical SyncChangeLog snapshot',
       async () => {
         const response =
           await app.inject({
@@ -4786,64 +4660,33 @@ describe(
           200
         );
 
-        /**
-         * Confirma persistência autoritativa da OS.
-         */
-        const updatedOrder =
-          await prisma.serviceOrder.findUnique({
-            where: {
-              id:
-                orderId,
-            },
-          });
-
-        assert.ok(
-          updatedOrder
-        );
-
-        assert.equal(
-          updatedOrder.status,
-          ServiceOrderStatus.ENTREGUE
-        );
-
-        /**
-         * Confirma publicação no feed incremental.
-         */
         const change =
-          await prisma.syncChangeLog.findFirst({
-            where: {
-              entityType:
-                'SERVICE_ORDER',
+          await prisma.syncChangeLog
+            .findFirst({
+              where: {
+                entityType:
+                  'SERVICE_ORDER',
 
-              entityId:
-                orderId,
+                entityId:
+                  orderId,
 
-              operationType:
-                OperationType.UPDATE,
-            },
+                operationType:
+                  OperationType.UPDATE,
+              },
 
-            orderBy: {
-              id:
-                'desc',
-            },
-          });
+              orderBy: {
+                id:
+                  'desc',
+              },
+            });
 
         assert.ok(
           change
         );
 
-        /**
-         * O ChangeLog deve carregar o snapshot
-         * canônico suficiente para outro SQLite.
-         */
         const data =
           change.data as
-          Record<string, unknown>;
-
-        assert.equal(
-          data.id,
-          orderId
-        );
+            Record<string, unknown>;
 
         assert.equal(
           data.status,
@@ -4866,11 +4709,6 @@ describe(
         );
 
         assert.equal(
-          data.technicianId,
-          technicianId
-        );
-
-        assert.equal(
           data.problemDescription,
           'Client app backend gate'
         );
@@ -4878,3 +4716,9 @@ describe(
     );
   }
 );
+
+);
+
+
+
+

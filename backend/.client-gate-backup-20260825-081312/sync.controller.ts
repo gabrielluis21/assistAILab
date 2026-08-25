@@ -26,12 +26,6 @@ import {
 } from '../service_orders/service_order_state_machine.js';
 
 import {
-  serviceOrderCustomerRelationshipService,
-} from '../customer_relationship/service_order_customer_relationship.service.js';
-import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
-import {
   getAuthUser,
 } from '../../core/middleware/auth.middleware.js';
 
@@ -55,15 +49,12 @@ async function reserveIdempotencySlot(
     isNew: false;
     conflict: boolean;
     responseBody?: unknown;
-    responseStatus?: number;
-    createdAt?: Date;
   }
 > {
   try {
     await prisma.operationIdempotency.create({
       data: {
         operationId,
-
         endpoint:
           '/api/v1/sync/push',
 
@@ -71,12 +62,9 @@ async function reserveIdempotencySlot(
           currentHash,
 
         responseStatus:
-          102,
+          200,
 
-        responseBody: {
-          status:
-            'PROCESSING',
-        },
+        responseBody: {},
 
         userId,
 
@@ -89,6 +77,10 @@ async function reserveIdempotencySlot(
       isNew: true,
     };
   } catch (err: any) {
+    /**
+     * P2002:
+     * unique constraint violation.
+     */
     if (
       err?.code ===
       'P2002'
@@ -116,69 +108,18 @@ async function reserveIdempotencySlot(
         };
       }
 
-      const responseBody =
-        existing.responseBody as
-          {
-            status?: string;
-          } | null;
-
-      const ageMs =
-        Date.now() -
-        existing.createdAt.getTime();
-
-      const recoverableProcessing =
-        existing.responseStatus ===
-          102 &&
-        ageMs >
-          5 * 60 * 1000;
-
-      const legacyIncomplete =
-        existing.responseStatus ===
-          200 &&
-        responseBody?.status !==
-          'SYNCED' &&
-        ageMs >
-          5 * 60 * 1000;
-
-      if (
-        recoverableProcessing ||
-        legacyIncomplete
-      ) {
-        await prisma.operationIdempotency.deleteMany({
-          where: {
-            operationId,
-
-            requestHash:
-              currentHash,
-          },
-        });
-
-        return reserveIdempotencySlot(
-          operationId,
-          currentHash,
-          userId,
-          deviceId
-        );
-      }
-
       return {
         isNew: false,
         conflict: false,
-
         responseBody:
           existing.responseBody,
-
-        responseStatus:
-          existing.responseStatus,
-
-        createdAt:
-          existing.createdAt,
       };
     }
 
     throw err;
   }
 }
+
 /**
  * Obtém a organização associada
  * ao usuário autenticado.
@@ -879,10 +820,11 @@ export async function pushSyncHandler(
   const authenticatedUserId =
     authUser.sub;
 
-  let defaultOrganizationId:
+  let organizationId:
     string;
+
   try {
-    defaultOrganizationId =
+    organizationId =
       await getAuthenticatedOrganizationId(
         authenticatedUserId,
         authUser.role,
@@ -926,46 +868,6 @@ export async function pushSyncHandler(
       const entityUpper =
         entry.entityType
           .toUpperCase();
-      let organizationId =
-        defaultOrganizationId;
-
-      /**
-       * CLIENT_GATE_CUSTOMER_RESOURCE_TENANT
-       *
-       * CUSTOMER é global. Para ServiceOrder já
-       * existente, o tenant vem do próprio recurso
-       * pertencente ao Customer autenticado.
-       */
-      if (
-        authUser.role ===
-          'CUSTOMER' &&
-        entityUpper ===
-          'SERVICE_ORDER' &&
-        authUser.customerId
-      ) {
-        const targetServiceOrder =
-          await prisma.serviceOrder.findFirst({
-            where: {
-              id:
-                entry.entityId,
-
-              customerId:
-                authUser.customerId,
-            },
-
-            select: {
-              organizationId:
-                true,
-            },
-          });
-
-        if (
-          targetServiceOrder
-        ) {
-          organizationId =
-            targetServiceOrder.organizationId;
-        }
-      }
 
       /**
        * Organization boundary.
@@ -1057,45 +959,17 @@ export async function pushSyncHandler(
           continue;
         }
 
-        const existingResponse =
-          idempotencyResult
-            .responseBody as
-            {
-              status?: string;
-            } | undefined;
-
-        if (
-          idempotencyResult
-            .responseStatus ===
-            200 &&
-          existingResponse
-            ?.status ===
-            'SYNCED'
-        ) {
-          results.push({
-            operationId:
-              entry.operationId,
-
-            status:
-              'SYNCED',
-          });
-
-          continue;
-        }
-
         results.push({
           operationId:
             entry.operationId,
 
           status:
-            'FAILED',
-
-          error:
-            'IDEMPOTENCY_OPERATION_IN_PROGRESS',
+            'SYNCED',
         });
 
         continue;
       }
+
       /**
        * Processamento atômico.
        */
@@ -1644,8 +1518,7 @@ export async function pushSyncHandler(
                 }
               }
 
-              const persistedOrder =
-                await tx.serviceOrder.upsert({
+              await tx.serviceOrder.upsert({
                 where: {
                   id:
                     entry.entityId,
@@ -1708,78 +1581,6 @@ export async function pushSyncHandler(
                     0,
                 },
               });
-              /**
-               * CLIENT_GATE_SERVICE_ORDER_DOMAIN_EFFECTS
-               *
-               * Reutiliza os efeitos já consolidados
-               * no domínio REST.
-               */
-              if (
-                !existingOS &&
-                entry.operationType ===
-                  'CREATE'
-              ) {
-                await serviceOrderCustomerRelationshipService
-                  .registerCreated(
-                    {
-                      serviceOrderId:
-                        persistedOrder.id,
-
-                      customerId:
-                        persistedOrder.customerId,
-
-                      organizationId:
-                        persistedOrder.organizationId,
-
-                      status:
-                        persistedOrder.status,
-                    },
-
-                    tx
-                  );
-              } else if (
-                existingOS &&
-                existingOS.status !==
-                  persistedOrder.status
-              ) {
-                await tx.serviceOrderStatusHistory.create({
-                  data: {
-                    serviceOrderId:
-                      persistedOrder.id,
-
-                    previousStatus:
-                      existingOS.status,
-
-                    newStatus:
-                      persistedOrder.status,
-
-                    changedById:
-                      authenticatedUserId,
-                  },
-                });
-
-                await serviceOrderCustomerRelationshipService
-                  .registerStatusTransition(
-                    {
-                      serviceOrderId:
-                        persistedOrder.id,
-
-                      customerId:
-                        persistedOrder.customerId,
-
-                      organizationId:
-                        persistedOrder.organizationId,
-
-                      previousStatus:
-                        existingOS.status,
-
-                      newStatus:
-                        persistedOrder.status,
-                    },
-
-                    tx
-                  );
-              }
             } else if (
               entry.operationType ===
               'DELETE'
@@ -2058,63 +1859,39 @@ export async function pushSyncHandler(
           }
 
           /**
-           * CLIENT_GATE_CANONICAL_SERVICE_ORDER_CHANGELOG
-           *
-           * ServiceOrder publica o estado canônico
-           * realmente persistido.
+           * Sync Change Log
            */
-          if (
-            entityUpper ===
-              'SERVICE_ORDER' &&
-            entry.operationType !==
-              'DELETE'
-          ) {
-            const canonicalOrder =
-              await tx.serviceOrder.findUniqueOrThrow({
-                where: {
-                  id:
-                    entry.entityId,
-                },
-              });
-
-            await recordServiceOrderSyncChange(
-              canonicalOrder,
-              entry.operationType,
-              tx
-            );
-          } else {
-            const changeLog =
-              await tx.syncChangeLog.create({
-                data: {
-                  cursor:
-                    entry.operationId,
-
-                  entityType:
-                    entry.entityType,
-
-                  entityId:
-                    entry.entityId,
-
-                  operationType:
-                    entry.operationType,
-
-                  data:
-                    entry.payload,
-                },
-              });
-
-            await tx.syncChangeLog.update({
-              where: {
-                id:
-                  changeLog.id,
-              },
-
+          const changeLog =
+            await tx.syncChangeLog.create({
               data: {
                 cursor:
-                  changeLog.id.toString(),
+                  entry.operationId,
+
+                entityType:
+                  entry.entityType,
+
+                entityId:
+                  entry.entityId,
+
+                operationType:
+                  entry.operationType,
+
+                data:
+                  entry.payload,
               },
             });
-          }
+
+          await tx.syncChangeLog.update({
+            where: {
+              id:
+                changeLog.id,
+            },
+
+            data: {
+              cursor:
+                changeLog.id.toString(),
+            },
+          });
         }
       );
 
@@ -2153,24 +1930,6 @@ export async function pushSyncHandler(
     } catch (
     err: any
     ) {
-      /**
-       * CLIENT_GATE_RELEASE_FAILED_IDEMPOTENCY
-       *
-       * Falha de domínio libera apenas a reserva
-       * PROCESSING daquela operationId.
-       */
-      await prisma.operationIdempotency.deleteMany({
-        where: {
-          operationId:
-            entry.operationId,
-
-          responseStatus:
-            102,
-        },
-      })
-        .catch(
-          () => { }
-        );
       results.push({
         operationId:
           entry.operationId,
