@@ -1,19 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
 import 'package:assistailab/core/database/outbox_dao.dart';
 import 'package:assistailab/core/database/sqlite_database.dart';
-import 'package:assistailab/core/database/service_order_repository.dart';
-import 'package:assistailab/core/database/service_order_item_repository.dart';
-
 import 'package:assistailab/core/network/api_client.dart';
-
 import 'package:assistailab/core/sync/background_sync_coordinator.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
 import 'package:assistailab/core/sync/sync_payload_mapper.dart';
@@ -23,13 +21,8 @@ import 'package:assistailab/core/sync/sync_trigger.dart';
 
 import 'package:assistailab/features/customers/customer_entity.dart';
 import 'package:assistailab/features/customers/customer_repository.dart';
-
 import 'package:assistailab/features/equipment/equipment_entity.dart';
-import 'package:assistailab/features/equipment/equipment_repository.dart';
-
 import 'package:assistailab/features/parts/part_entity.dart';
-import 'package:assistailab/features/parts/part_repository.dart';
-
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
 
@@ -351,25 +344,115 @@ void main() {
   });
 
   group('SyncEngine Retry, Backoff & Atomic Cursor Tests', () {
-    test('calculateNextRetryAt grows exponentially and respects max boundary',
-        () {
-      final engine =
-          SyncEngine(apiClient: FakeApiClient(), outboxDao: FakeOutboxDao());
-      final now = DateTime.now();
+    test(
+      'calculateNextRetryAt grows exponentially and respects max boundary',
+      () {
+        final engine = SyncEngine(
+          apiClient: FakeApiClient(),
+          outboxDao: FakeOutboxDao(),
+        );
 
-      final retry0 = engine.calculateNextRetryAt(0);
-      final retry1 = engine.calculateNextRetryAt(1);
-      final retry2 = engine.calculateNextRetryAt(2);
-      final retry8 = engine.calculateNextRetryAt(8);
+        final beforeRetry0 = DateTime.now();
+        final retry0 = engine.calculateNextRetryAt(0);
+        final afterRetry0 = DateTime.now();
 
-      expect(retry0.isAfter(now), isTrue);
-      expect(retry1.isAfter(retry0), isTrue);
-      expect(retry2.isAfter(retry1), isTrue);
+        final beforeRetry1 = DateTime.now();
+        final retry1 = engine.calculateNextRetryAt(1);
+        final afterRetry1 = DateTime.now();
 
-      // Max backoff capped at 300 seconds (+ 2s max jitter)
-      final maxDiff = retry8.difference(now).inSeconds;
-      expect(maxDiff, lessThanOrEqualTo(305));
-    });
+        final beforeRetry2 = DateTime.now();
+        final retry2 = engine.calculateNextRetryAt(2);
+        final afterRetry2 = DateTime.now();
+
+        final beforeRetry8 = DateTime.now();
+        final retry8 = engine.calculateNextRetryAt(8);
+        final afterRetry8 = DateTime.now();
+
+        // attempt 0:
+        // base = 2s
+        // jitter = 0..2s
+        expect(
+          retry0.isAfter(
+            beforeRetry0.add(
+              const Duration(seconds: 1),
+            ),
+          ),
+          isTrue,
+        );
+
+        expect(
+          retry0.isBefore(
+            afterRetry0.add(
+              const Duration(seconds: 5),
+            ),
+          ),
+          isTrue,
+        );
+
+        // attempt 1:
+        // base = 4s
+        // jitter = 0..2s
+        expect(
+          retry1.isAfter(
+            beforeRetry1.add(
+              const Duration(seconds: 3),
+            ),
+          ),
+          isTrue,
+        );
+
+        expect(
+          retry1.isBefore(
+            afterRetry1.add(
+              const Duration(seconds: 7),
+            ),
+          ),
+          isTrue,
+        );
+
+        // attempt 2:
+        // base = 8s
+        // jitter = 0..2s
+        expect(
+          retry2.isAfter(
+            beforeRetry2.add(
+              const Duration(seconds: 7),
+            ),
+          ),
+          isTrue,
+        );
+
+        expect(
+          retry2.isBefore(
+            afterRetry2.add(
+              const Duration(seconds: 11),
+            ),
+          ),
+          isTrue,
+        );
+
+        // attempt 8:
+        // exponential value exceeds the maximum,
+        // so it must be capped at 300s + 0..2s jitter.
+        expect(
+          retry8.isAfter(
+            beforeRetry8.add(
+              const Duration(seconds: 299),
+            ),
+          ),
+          isTrue,
+        );
+
+        expect(
+          retry8.isBefore(
+            afterRetry8.add(
+              const Duration(seconds: 303),
+            ),
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test(
         'pullIncrementalChanges persists cursor and changes atomically in same transaction',
@@ -785,177 +868,324 @@ void main() {
   // Item 2: Processing Recovery — stale timeout filter
   // ─────────────────────────────────────────────────────────────────────────
   group('OutboxDao Processing Recovery Timeout Tests', () {
-    test('recoverProcessingEntries does NOT recover recent PROCESSING entries',
-        () async {
+    setUp(() async {
       final db = await SqliteDatabase.instance;
 
-      // Insert a PROCESSING entry with last_attempt_at = now (fresh)
-      final freshOpId = 'op-fresh-${DateTime.now().millisecondsSinceEpoch}';
-      await db.insert('outbox', {
-        'operation_id': freshOpId,
-        'entity_type': 'CUSTOMER',
-        'entity_id': 'cust-1',
-        'operation_type': 'CREATE',
-        'payload': '{}',
-        'status': 'PROCESSING',
-        'attempt_count': 1,
-        'created_at': DateTime.now().toIso8601String(),
-        'last_attempt_at': DateTime.now().toIso8601String(),
-      });
-
-      final dao = OutboxDao();
-      // Using a 5-minute timeout: fresh entry should NOT be recovered.
-      final count = await dao.recoverProcessingEntries(
-          timeout: const Duration(minutes: 5));
-
-      // Fresh entry is not stale — 0 should be recovered.
-      expect(count, equals(0));
-
-      // Clean up
-      await db
-          .delete('outbox', where: 'operation_id = ?', whereArgs: [freshOpId]);
+      // Isola este grupo dos PROCESSING deixados por testes anteriores.
+      //
+      // Não apagamos toda a Outbox para não interferir
+      // em fixtures pertencentes a outros cenários.
+      await db.delete(
+        'outbox',
+        where: 'status = ?',
+        whereArgs: ['PROCESSING'],
+      );
     });
 
     test(
-        'recoverProcessingEntries DOES recover stale PROCESSING entries (>5min)',
-        () async {
-      final db = await SqliteDatabase.instance;
+      'recoverProcessingEntries does NOT recover recent PROCESSING entries',
+      () async {
+        final db = await SqliteDatabase.instance;
 
-      // Insert a PROCESSING entry with last_attempt_at = 10 minutes ago (stale)
-      final staleOpId = 'op-stale-${DateTime.now().millisecondsSinceEpoch}';
-      final staleTime = DateTime.now()
-          .subtract(const Duration(minutes: 10))
-          .toIso8601String();
-      await db.insert('outbox', {
-        'operation_id': staleOpId,
-        'entity_type': 'CUSTOMER',
-        'entity_id': 'cust-2',
-        'operation_type': 'CREATE',
-        'payload': '{}',
-        'status': 'PROCESSING',
-        'attempt_count': 1,
-        'created_at': DateTime.now().toIso8601String(),
-        'last_attempt_at': staleTime,
-      });
+        final freshOpId = 'op-fresh-${DateTime.now().millisecondsSinceEpoch}';
 
-      final dao = OutboxDao();
-      final count = await dao.recoverProcessingEntries(
-          timeout: const Duration(minutes: 5));
-
-      // Stale entry must be recovered → FAILED.
-      expect(count, greaterThanOrEqualTo(1));
-
-      final rows = await db
-          .query('outbox', where: 'operation_id = ?', whereArgs: [staleOpId]);
-      expect(rows.isNotEmpty, isTrue);
-      expect(rows.first['status'], equals('FAILED'));
-
-      // Clean up
-      await db
-          .delete('outbox', where: 'operation_id = ?', whereArgs: [staleOpId]);
-    });
-
-    test(
-        'pushPendingOutbox sets last_attempt_at when transitioning to PROCESSING, and recovery respects 5min threshold',
-        () async {
-      final db = await SqliteDatabase.instance;
-      final opId = 'op-push-proc-${DateTime.now().millisecondsSinceEpoch}';
-
-      // 1. Insert a PENDING item
-      await db.insert('outbox', {
-        'operation_id': opId,
-        'entity_type': 'CUSTOMER',
-        'entity_id': 'cust-push-1',
-        'operation_type': 'CREATE',
-        'payload': jsonEncode({'name': 'Test Cust'}),
-        'status': 'PENDING',
-        'attempt_count': 0,
-        'created_at': DateTime.now().toIso8601String(),
-      });
-
-      final outboxDao = OutboxDao();
-      String? inFlightStatus;
-      String? inFlightAttemptAt;
-
-      // Mock API client that inspects DB in-flight to verify PROCESSING state & timestamp
-      final client = MockHttpClientWithCustomResponses((request) async {
-        final inFlight = await db
-            .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
-        if (inFlight.isNotEmpty) {
-          inFlightStatus = inFlight.first['status'] as String?;
-          inFlightAttemptAt = inFlight.first['last_attempt_at'] as String?;
-        }
-        return http.Response(
-          jsonEncode({
-            'results': [
-              {'operationId': opId, 'status': 'SYNCED'}
-            ]
-          }),
-          200,
-          headers: {'content-type': 'application/json'},
+        await db.insert(
+          'outbox',
+          {
+            'operation_id': freshOpId,
+            'entity_type': 'CUSTOMER',
+            'entity_id': 'cust-1',
+            'operation_type': 'CREATE',
+            'payload': '{}',
+            'status': 'PROCESSING',
+            'attempt_count': 1,
+            'created_at': DateTime.now().toIso8601String(),
+            'last_attempt_at': DateTime.now().toIso8601String(),
+          },
         );
-      });
-      final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
-      final engine = SyncEngine(apiClient: apiClient, outboxDao: outboxDao);
 
-      // Verify before push: status is PENDING, last_attempt_at is null
-      final beforeRows = await db
-          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
-      expect(beforeRows.first['status'], equals('PENDING'));
-      expect(beforeRows.first['last_attempt_at'], isNull);
+        final dao = OutboxDao();
 
-      // 2. Perform push
-      await engine.pushPendingOutbox();
+        final count = await dao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5),
+        );
 
-      // 3. Confirm that while in-flight, item had PROCESSING status and last_attempt_at timestamp
-      expect(inFlightStatus, equals('PROCESSING'));
-      expect(inFlightAttemptAt, isNotNull);
+        // A entrada acabou de entrar em PROCESSING,
+        // então ainda não pode ser considerada órfã.
+        expect(
+          count,
+          equals(0),
+        );
 
-      // 4. Reset item to PROCESSING (simulate crash during network transit)
-      final nowTime = DateTime.now();
-      await db.update(
-        'outbox',
-        {
-          'status': 'PROCESSING',
-          'last_attempt_at': nowTime.toIso8601String(),
-        },
-        where: 'operation_id = ?',
-        whereArgs: [opId],
-      );
+        final rows = await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [freshOpId],
+        );
 
-      // 5. Immediate recovery (<5min) must NOT recover this fresh item
-      final recoveredFresh = await outboxDao.recoverProcessingEntries(
-        timeout: const Duration(minutes: 5),
-      );
-      expect(recoveredFresh, equals(0));
+        expect(
+          rows,
+          isNotEmpty,
+        );
 
-      final checkFresh = await db
-          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
-      expect(checkFresh.first['status'], equals('PROCESSING'));
+        expect(
+          rows.first['status'],
+          equals('PROCESSING'),
+        );
 
-      // 6. Artificially age last_attempt_at to 6 minutes ago (>5min timeout)
-      final agedTime =
-          nowTime.subtract(const Duration(minutes: 6)).toIso8601String();
-      await db.update(
-        'outbox',
-        {'last_attempt_at': agedTime},
-        where: 'operation_id = ?',
-        whereArgs: [opId],
-      );
+        await db.delete(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [freshOpId],
+        );
+      },
+    );
 
-      // 7. Recovery must now recover this aged PROCESSING item to FAILED
-      final recoveredAged = await outboxDao.recoverProcessingEntries(
-        timeout: const Duration(minutes: 5),
-      );
-      expect(recoveredAged, greaterThanOrEqualTo(1));
+    test(
+      'recoverProcessingEntries DOES recover stale PROCESSING entries (>5min)',
+      () async {
+        final db = await SqliteDatabase.instance;
 
-      final checkAged = await db
-          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
-      expect(checkAged.first['status'], equals('FAILED'));
+        final staleOpId = 'op-stale-${DateTime.now().millisecondsSinceEpoch}';
 
-      // Clean up
-      await db.delete('outbox', where: 'operation_id = ?', whereArgs: [opId]);
-    });
+        final staleTime = DateTime.now()
+            .subtract(
+              const Duration(minutes: 10),
+            )
+            .toIso8601String();
+
+        await db.insert(
+          'outbox',
+          {
+            'operation_id': staleOpId,
+            'entity_type': 'CUSTOMER',
+            'entity_id': 'cust-2',
+            'operation_type': 'CREATE',
+            'payload': '{}',
+            'status': 'PROCESSING',
+            'attempt_count': 1,
+            'created_at': DateTime.now().toIso8601String(),
+            'last_attempt_at': staleTime,
+          },
+        );
+
+        final dao = OutboxDao();
+
+        final count = await dao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5),
+        );
+
+        // Como o setUp limpa PROCESSING antigos,
+        // exatamente esta entrada deve ser recuperada.
+        expect(
+          count,
+          equals(1),
+        );
+
+        final rows = await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [staleOpId],
+        );
+
+        expect(
+          rows,
+          isNotEmpty,
+        );
+
+        expect(
+          rows.first['status'],
+          equals('FAILED'),
+        );
+
+        await db.delete(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [staleOpId],
+        );
+      },
+    );
+
+    test(
+      'pushPendingOutbox sets last_attempt_at when transitioning to PROCESSING, and recovery respects 5min threshold',
+      () async {
+        final db = await SqliteDatabase.instance;
+
+        final opId = 'op-push-proc-${DateTime.now().millisecondsSinceEpoch}';
+
+        await db.insert(
+          'outbox',
+          {
+            'operation_id': opId,
+            'entity_type': 'CUSTOMER',
+            'entity_id': 'cust-push-1',
+            'operation_type': 'CREATE',
+            'payload': jsonEncode(
+              {
+                'name': 'Test Cust',
+              },
+            ),
+            'status': 'PENDING',
+            'attempt_count': 0,
+            'created_at': DateTime.now().toIso8601String(),
+          },
+        );
+
+        final outboxDao = OutboxDao();
+
+        String? inFlightStatus;
+        String? inFlightAttemptAt;
+
+        final client = MockHttpClientWithCustomResponses(
+          (request) async {
+            final inFlight = await db.query(
+              'outbox',
+              where: 'operation_id = ?',
+              whereArgs: [opId],
+            );
+
+            if (inFlight.isNotEmpty) {
+              inFlightStatus = inFlight.first['status'] as String?;
+
+              inFlightAttemptAt = inFlight.first['last_attempt_at'] as String?;
+            }
+
+            return http.Response(
+              jsonEncode(
+                {
+                  'results': [
+                    {
+                      'operationId': opId,
+                      'status': 'SYNCED',
+                    },
+                  ],
+                },
+              ),
+              200,
+              headers: {
+                'content-type': 'application/json',
+              },
+            );
+          },
+        );
+
+        final apiClient = ApiClient(
+          baseUrl: 'http://test.api',
+          client: client,
+        );
+
+        final engine = SyncEngine(
+          apiClient: apiClient,
+          outboxDao: outboxDao,
+        );
+
+        final beforeRows = await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+
+        expect(
+          beforeRows.first['status'],
+          equals('PENDING'),
+        );
+
+        expect(
+          beforeRows.first['last_attempt_at'],
+          isNull,
+        );
+
+        // Push muda temporariamente a entrada para PROCESSING.
+        await engine.pushPendingOutbox();
+
+        expect(
+          inFlightStatus,
+          equals('PROCESSING'),
+        );
+
+        expect(
+          inFlightAttemptAt,
+          isNotNull,
+        );
+
+        // Simula crash enquanto a requisição estava em trânsito.
+        final nowTime = DateTime.now();
+
+        await db.update(
+          'outbox',
+          {
+            'status': 'PROCESSING',
+            'last_attempt_at': nowTime.toIso8601String(),
+          },
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+
+        // Ainda está dentro do timeout.
+        final recoveredFresh = await outboxDao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5),
+        );
+
+        expect(
+          recoveredFresh,
+          equals(0),
+        );
+
+        final checkFresh = await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+
+        expect(
+          checkFresh.first['status'],
+          equals('PROCESSING'),
+        );
+
+        // Agora envelhecemos artificialmente a tentativa.
+        final agedTime = nowTime
+            .subtract(
+              const Duration(minutes: 6),
+            )
+            .toIso8601String();
+
+        await db.update(
+          'outbox',
+          {
+            'last_attempt_at': agedTime,
+          },
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+
+        final recoveredAged = await outboxDao.recoverProcessingEntries(
+          timeout: const Duration(minutes: 5),
+        );
+
+        // Exatamente a operação deste teste deve ser recuperada.
+        expect(
+          recoveredAged,
+          equals(1),
+        );
+
+        final checkAged = await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+
+        expect(
+          checkAged.first['status'],
+          equals('FAILED'),
+        );
+
+        await db.delete(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+      },
+    );
   });
 
   // ─────────────────────────────────────────────────────────────────────────
