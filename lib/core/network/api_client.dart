@@ -1,9 +1,8 @@
 import 'dart:convert';
 
+import 'package:assistailab/core/config/app_env.dart';
 import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
-
-import 'api_environment.dart';
 
 class ApiClient {
   final String baseUrl;
@@ -12,7 +11,7 @@ class ApiClient {
   ApiClient({
     String? baseUrl,
     http.Client? client,
-  })  : baseUrl = baseUrl ?? ApiEnvironment.centralApiBaseUrl,
+  })  : baseUrl = baseUrl ?? AppEnv.apiBaseUrl,
         _client = client ?? http.Client();
 
   Future<String?> _getToken() async {

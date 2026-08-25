@@ -17,30 +17,17 @@ class AuthGuardPage extends ConsumerWidget {
       body: authState.when(
         data: (user) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (user == null) {
-              Modular.to.navigate('/login');
-              return;
-            }
-
-            switch (user.role.toUpperCase()) {
-              case 'CUSTOMER':
-                Modular.to.navigate('/customer');
-                break;
-
-              case 'ADMIN':
-              case 'TECHNICIAN':
-                Modular.to.navigate('/home');
-                break;
-
-              default:
-                Modular.to.navigate('/login');
-            }
+            Modular.to.navigate(
+              AuthRouteResolver.routeFor(user),
+            );
           });
+
           return const Center(
-              child: CircularProgressIndicator(color: Color(0xFF38BDF8)));
+            child: CircularProgressIndicator(
+              color: Color(0xFF38BDF8),
+            ),
+          );
         },
-        loading: () => const Center(
-            child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
         error: (e, _) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             Modular.to.navigate('/login');
@@ -49,6 +36,8 @@ class AuthGuardPage extends ConsumerWidget {
             child: Text('Erro: $e', style: const TextStyle(color: Colors.red)),
           );
         },
+        loading: () => const Center(
+            child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
       ),
     );
   }

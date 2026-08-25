@@ -19,11 +19,9 @@ import 'package:assistailab/core/sync/sync_payload_mapper.dart';
 import 'package:assistailab/features/customers/customer_entity.dart';
 import 'package:assistailab/features/customers/customer_repository.dart';
 import 'package:assistailab/features/equipment/equipment_entity.dart';
-import 'package:assistailab/features/equipment/equipment_repository.dart';
 import 'package:assistailab/features/parts/part_entity.dart';
-import 'package:assistailab/features/parts/part_repository.dart';
-import 'package:assistailab/features/service_orders/service_order_entity.dart';
-import 'package:assistailab/features/service_orders/service_order_repository.dart';
+import 'package:assistailab/core/database/service_order_repository.dart';
+import 'package:assistailab/core/database/service_order_item_repository.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_repository.dart';
 
