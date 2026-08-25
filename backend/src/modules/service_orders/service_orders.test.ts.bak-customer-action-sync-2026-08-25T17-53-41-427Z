@@ -36,10 +36,6 @@ import {
 } from '../../core/database/prisma.js';
 
 import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
-
-import {
   isValidStatusTransition,
 } from './service_order_state_machine.js';
 
@@ -2233,18 +2229,6 @@ describe(
           },
         });
 
-        /**
-         * CUSTOMER_ACTION_SYNC_TEST_C5_CLEANUP
-         */
-        await prisma.syncChangeLog.deleteMany({
-          where: {
-            entityId: {
-              in:
-                orderIds,
-            },
-          },
-        });
-
         await prisma.serviceOrderStatusHistory.deleteMany({
           where: {
             serviceOrderId: {
@@ -2445,46 +2429,6 @@ describe(
         assert.equal(
           history[0].changedById,
           customerUserId
-        );
-
-        /**
-         * CUSTOMER_ACTION_SYNC_TEST_T038
-         */
-        const syncChange =
-          await prisma.syncChangeLog.findFirst({
-            where: {
-              entityType:
-                'SERVICE_ORDER',
-
-              entityId:
-                orderIds[0],
-
-              operationType:
-                OperationType.UPDATE,
-            },
-
-            orderBy: {
-              id:
-                'desc',
-            },
-          });
-
-        assert.ok(
-          syncChange
-        );
-
-        const syncData =
-          syncChange.data as
-            Record<string, unknown>;
-
-        assert.equal(
-          syncData.status,
-          ServiceOrderStatus.CANCELADO
-        );
-
-        assert.equal(
-          syncData.id,
-          orderIds[0]
         );
       }
     );
@@ -3076,18 +3020,6 @@ describe(
           },
         });
 
-        /**
-         * CUSTOMER_ACTION_SYNC_TEST_C6_CLEANUP
-         */
-        await prisma.syncChangeLog.deleteMany({
-          where: {
-            entityId: {
-              in:
-                orderIds,
-            },
-          },
-        });
-
         await prisma.serviceOrderStatusHistory.deleteMany({
           where: {
             serviceOrderId: {
@@ -3262,49 +3194,6 @@ describe(
         assert.equal(
           history.changedById,
           customerUserId
-        );
-
-        /**
-         * CUSTOMER_ACTION_SYNC_TEST_T041
-         *
-         * REJECT precisa publicar o snapshot final
-         * CANCELADO para o Pull incremental.
-         */
-        const syncChange =
-          await prisma.syncChangeLog.findFirst({
-            where: {
-              entityType:
-                'SERVICE_ORDER',
-
-              entityId:
-                orderIds[0],
-
-              operationType:
-                OperationType.UPDATE,
-            },
-
-            orderBy: {
-              id:
-                'desc',
-            },
-          });
-
-        assert.ok(
-          syncChange
-        );
-
-        const syncData =
-          syncChange.data as
-            Record<string, unknown>;
-
-        assert.equal(
-          syncData.status,
-          ServiceOrderStatus.CANCELADO
-        );
-
-        assert.equal(
-          syncData.id,
-          orderIds[0]
         );
       }
     );
@@ -3725,27 +3614,6 @@ describe(
         200
       );
 
-      const beforeApproveChange =
-        await prisma.syncChangeLog.findFirst({
-          where: {
-            entityType:
-              'SERVICE_ORDER',
-
-            entityId:
-              created.id,
-          },
-
-          orderBy: {
-            id:
-              'desc',
-          },
-
-          select: {
-            id:
-              true,
-          },
-        });
-
       const approved =
         await app.inject({
           method:
@@ -3773,58 +3641,6 @@ describe(
       assert.equal(
         approved.json().order.status,
         ServiceOrderStatus.EM_EXECUCAO
-      );
-
-      /**
-       * CUSTOMER_ACTION_SYNC_TEST_APPROVE
-       *
-       * Tem de existir um NOVO ChangeLog posterior
-       * ao AGUARDANDO_APROVACAO.
-       */
-      const approveChange =
-        await prisma.syncChangeLog.findFirst({
-          where: {
-            entityType:
-              'SERVICE_ORDER',
-
-            entityId:
-              created.id,
-
-            operationType:
-              OperationType.UPDATE,
-
-            ...(beforeApproveChange
-              ? {
-                  id: {
-                    gt:
-                      beforeApproveChange.id,
-                  },
-                }
-              : {}),
-          },
-
-          orderBy: {
-            id:
-              'asc',
-          },
-        });
-
-      assert.ok(
-        approveChange
-      );
-
-      const approveData =
-        approveChange.data as
-          Record<string, unknown>;
-
-      assert.equal(
-        approveData.status,
-        ServiceOrderStatus.EM_EXECUCAO
-      );
-
-      assert.equal(
-        approveData.id,
-        created.id
       );
 
       const ready =
@@ -4029,18 +3845,6 @@ describe(
         await prisma.customerEvent.deleteMany({
           where: {
             serviceOrderId: {
-              in:
-                createdOrderIds,
-            },
-          },
-        });
-
-        /**
-         * CUSTOMER_ACTION_SYNC_TEST_C7_CLEANUP
-         */
-        await prisma.syncChangeLog.deleteMany({
-          where: {
-            entityId: {
               in:
                 createdOrderIds,
             },
@@ -5069,106 +4873,6 @@ describe(
         assert.equal(
           data.problemDescription,
           'Client app backend gate'
-        );
-      }
-    );
-
-
-    /**
-     * ========================================================
-     * T056
-     * ========================================================
-     *
-     * O writer de SyncChangeLog recebe o TransactionClient.
-     * Se o commit falhar, nem a OS nem o ChangeLog podem
-     * sobreviver isoladamente.
-     */
-    test(
-      'T056 - ServiceOrder mutation and SyncChangeLog rollback atomically',
-      async () => {
-        const before =
-          await prisma.serviceOrder.findUniqueOrThrow({
-            where: {
-              id:
-                orderId,
-            },
-          });
-
-        assert.equal(
-          before.status,
-          ServiceOrderStatus.ENTREGUE
-        );
-
-        const beforeChangeCount =
-          await prisma.syncChangeLog.count({
-            where: {
-              entityType:
-                'SERVICE_ORDER',
-
-              entityId:
-                orderId,
-            },
-          });
-
-        await assert.rejects(
-          prisma.$transaction(
-            async (
-              tx
-            ) => {
-              const transientOrder =
-                await tx.serviceOrder.update({
-                  where: {
-                    id:
-                      orderId,
-                  },
-
-                  data: {
-                    status:
-                      ServiceOrderStatus.PRONTO,
-                  },
-                });
-
-              await recordServiceOrderSyncChange(
-                transientOrder,
-                OperationType.UPDATE,
-                tx
-              );
-
-              throw new Error(
-                'FORCED_SYNC_ATOMICITY_ROLLBACK'
-              );
-            }
-          ),
-          /FORCED_SYNC_ATOMICITY_ROLLBACK/
-        );
-
-        const persisted =
-          await prisma.serviceOrder.findUniqueOrThrow({
-            where: {
-              id:
-                orderId,
-            },
-          });
-
-        assert.equal(
-          persisted.status,
-          ServiceOrderStatus.ENTREGUE
-        );
-
-        const afterChangeCount =
-          await prisma.syncChangeLog.count({
-            where: {
-              entityType:
-                'SERVICE_ORDER',
-
-              entityId:
-                orderId,
-            },
-          });
-
-        assert.equal(
-          afterChangeCount,
-          beforeChangeCount
         );
       }
     );
