@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../service_orders/service_order_entity.dart';
 import '../application/customer_service_orders_provider.dart';
+import '../application/customer_quote_decision_provider.dart';
 
 class CustomerServiceOrderDetailPage extends ConsumerWidget {
   const CustomerServiceOrderDetailPage({
@@ -165,8 +166,346 @@ class _OrderDetailContent extends StatelessWidget {
             ),
           ),
         ),
+        if (order.status == ServiceOrderStatusEnum.aguardandoAprovacao) ...[
+          const SizedBox(height: 24),
+          _QuoteDecisionSection(
+            order: order,
+          ),
+        ],
       ],
     );
+  }
+}
+
+class _QuoteDecisionSection extends ConsumerWidget {
+  const _QuoteDecisionSection({
+    required this.order,
+  });
+
+  final ServiceOrderEntity order;
+
+  @override
+  Widget build(
+    BuildContext context,
+    WidgetRef ref,
+  ) {
+    final decisionState = ref.watch(
+      customerQuoteDecisionProvider,
+    );
+
+    final isLoading = decisionState.isLoading;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFFF59E0B).withValues(
+            alpha: 0.45,
+          ),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.pending_actions,
+                color: Color(0xFFF59E0B),
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Sua aprovação é necessária',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Confira as informações e o valor da ordem de serviço antes de responder.',
+            style: TextStyle(
+              color: Colors.white60,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: isLoading
+                  ? null
+                  : () {
+                      _confirmApproval(
+                        context,
+                        ref,
+                        order,
+                      );
+                    },
+              icon: isLoading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Icon(
+                      Icons.check_circle_outline,
+                    ),
+              label: const Text(
+                'Aprovar orçamento',
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.green,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 15,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: isLoading
+                  ? null
+                  : () {
+                      _showRejectDialog(
+                        context,
+                        ref,
+                        order,
+                      );
+                    },
+              icon: const Icon(
+                Icons.close,
+              ),
+              label: const Text(
+                'Não aprovar',
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.redAccent,
+                side: const BorderSide(
+                  color: Colors.redAccent,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 15,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmApproval(
+    BuildContext context,
+    WidgetRef ref,
+    ServiceOrderEntity order,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text(
+            'Aprovar orçamento?',
+          ),
+          content: Text(
+            'Você confirma a aprovação da OS '
+            '#${order.friendlyId ?? '-'} '
+            'no valor de '
+            '${_formatCurrency(order.totalAmount)}?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(
+                  dialogContext,
+                ).pop(false);
+              },
+              child: const Text(
+                'Voltar',
+              ),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.of(
+                  dialogContext,
+                ).pop(true);
+              },
+              child: const Text(
+                'Confirmar aprovação',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !context.mounted) {
+      return;
+    }
+
+    try {
+      await ref
+          .read(
+            customerQuoteDecisionProvider.notifier,
+          )
+          .submit(
+            serviceOrderId: order.id,
+            decision: CustomerQuoteDecision.approve,
+          );
+
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Orçamento aprovado com sucesso.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _decisionErrorText(error),
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _showRejectDialog(
+    BuildContext context,
+    WidgetRef ref,
+    ServiceOrderEntity order,
+  ) async {
+    final controller = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text(
+            'Não aprovar orçamento',
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Você pode informar o motivo da recusa.',
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: controller,
+                maxLength: 1000,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: 'Motivo (opcional)',
+                  hintText: 'Ex.: valor acima do esperado',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(
+                  dialogContext,
+                ).pop(false);
+              },
+              child: const Text(
+                'Voltar',
+              ),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.of(
+                  dialogContext,
+                ).pop(true);
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.red,
+              ),
+              child: const Text(
+                'Confirmar recusa',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    final reason = controller.text.trim();
+
+    controller.dispose();
+
+    if (confirmed != true || !context.mounted) {
+      return;
+    }
+
+    try {
+      await ref
+          .read(
+            customerQuoteDecisionProvider.notifier,
+          )
+          .submit(
+            serviceOrderId: order.id,
+            decision: CustomerQuoteDecision.reject,
+            reason: reason.isEmpty ? null : reason,
+          );
+
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Resposta enviada com sucesso.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _decisionErrorText(error),
+          ),
+        ),
+      );
+    }
+  }
+
+  String _decisionErrorText(
+    Object error,
+  ) {
+    if (error is CustomerQuoteDecisionException) {
+      return error.message;
+    }
+
+    return 'Não foi possível enviar sua resposta. Tente novamente.';
   }
 }
 
