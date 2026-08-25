@@ -395,7 +395,7 @@ class _QuoteDecisionSection extends ConsumerWidget {
     WidgetRef ref,
     ServiceOrderEntity order,
   ) async {
-    final controller = TextEditingController();
+    var reason = '';
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -404,25 +404,29 @@ class _QuoteDecisionSection extends ConsumerWidget {
           title: const Text(
             'Não aprovar orçamento',
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Você pode informar o motivo da recusa.',
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: controller,
-                maxLength: 1000,
-                maxLines: 4,
-                decoration: const InputDecoration(
-                  labelText: 'Motivo (opcional)',
-                  hintText: 'Ex.: valor acima do esperado',
-                  border: OutlineInputBorder(),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Você pode informar o motivo da recusa.',
                 ),
-              ),
-            ],
+                const SizedBox(height: 14),
+                TextFormField(
+                  maxLength: 1000,
+                  maxLines: 4,
+                  onChanged: (value) {
+                    reason = value;
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Motivo (opcional)',
+                    hintText: 'Ex.: valor acima do esperado',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -453,13 +457,11 @@ class _QuoteDecisionSection extends ConsumerWidget {
       },
     );
 
-    final reason = controller.text.trim();
-
-    controller.dispose();
-
     if (confirmed != true || !context.mounted) {
       return;
     }
+
+    final normalizedReason = reason.trim();
 
     try {
       await ref
@@ -469,7 +471,7 @@ class _QuoteDecisionSection extends ConsumerWidget {
           .submit(
             serviceOrderId: order.id,
             decision: CustomerQuoteDecision.reject,
-            reason: reason.isEmpty ? null : reason,
+            reason: normalizedReason.isEmpty ? null : normalizedReason,
           );
 
       if (!context.mounted) {

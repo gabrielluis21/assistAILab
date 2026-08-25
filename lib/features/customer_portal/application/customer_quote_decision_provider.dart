@@ -58,7 +58,7 @@ class CustomerQuoteDecisionNotifier extends AsyncNotifier<void> {
       final normalizedReason = reason?.trim();
 
       final response = await apiClient.post(
-        '/api/v1/service-orders/'
+        '/service-orders/'
         '$serviceOrderId/quote-decision',
         body: {
           'decision':
@@ -67,7 +67,6 @@ class CustomerQuoteDecisionNotifier extends AsyncNotifier<void> {
             'reason': normalizedReason,
         },
       );
-
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw CustomerQuoteDecisionException(
           _extractErrorMessage(
