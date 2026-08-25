@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:hive/hive.dart';
-import 'api_environment.dart';
+import 'package:assistailab/core/config/app_env.dart';
 
 class ApiClient {
-  final String baseUrl;
+  final baseUrl = AppEnv.apiBaseUrl;
   final http.Client _client;
 
   ApiClient({String? baseUrl, http.Client? client})

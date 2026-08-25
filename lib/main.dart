@@ -11,6 +11,10 @@ import 'local_service/local_service_runner.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await dotenv.load(
+    fileName: '.env',
+  );
+
   // Initialize Hive Storage (Preferences ONLY)
   await HiveStorage.init();
 
