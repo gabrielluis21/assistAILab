@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../features/auth/application/auth_provider.dart';
+import '../../features/auth/application/auth_route_resolver.dart';
 
 class AuthGuardPage extends ConsumerWidget {
   const AuthGuardPage({super.key});
@@ -17,8 +19,21 @@ class AuthGuardPage extends ConsumerWidget {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (user == null) {
               Modular.to.navigate('/login');
-            } else {
-              Modular.to.navigate('/home');
+              return;
+            }
+
+            switch (user.role.toUpperCase()) {
+              case 'CUSTOMER':
+                Modular.to.navigate('/customer');
+                break;
+
+              case 'ADMIN':
+              case 'TECHNICIAN':
+                Modular.to.navigate('/home');
+                break;
+
+              default:
+                Modular.to.navigate('/login');
             }
           });
           return const Center(

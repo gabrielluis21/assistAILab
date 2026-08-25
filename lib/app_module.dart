@@ -12,5 +12,6 @@ class AppModule extends Module {
     r.child('/', child: (context) => const AuthGuardPage());
     r.child('/login', child: (context) => const LoginPage());
     r.child('/home', child: (context) => const AppShell());
+    r.child('/customer', child: (context) => const CustomerShell());
   }
 }

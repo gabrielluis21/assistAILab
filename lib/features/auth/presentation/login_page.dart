@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../application/auth_route_resolver.dart';
 import '../application/auth_provider.dart';
 
 class LoginPage extends ConsumerStatefulWidget {
@@ -23,7 +25,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   }
 
   Future<void> _doLogin() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
 
     await ref.read(authStateProvider.notifier).login(
           _emailCtrl.text.trim(),
@@ -33,16 +37,26 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(authStateProvider, (prev, next) {
+    ref.listen(authStateProvider, (previous, next) {
       next.whenOrNull(
         data: (user) {
-          if (user != null) {
-            Modular.to.navigate('/home');
+          if (user == null) {
+            return;
+          }
+
+          final route = AuthRouteResolver.routeFor(user);
+
+          if (Modular.to.path != route) {
+            Modular.to.navigate(route);
           }
         },
-        error: (e, st) {
+        error: (error, stackTrace) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Falha no login: $e')),
+            SnackBar(
+              content: Text(
+                'Falha no login: $error',
+              ),
+            ),
           );
         },
       );
@@ -57,15 +71,19 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Container(
-            constraints: const BoxConstraints(maxWidth: 400),
+            constraints: const BoxConstraints(
+              maxWidth: 400,
+            ),
             padding: const EdgeInsets.all(32),
             decoration: BoxDecoration(
               color: const Color(0xFF1E293B),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF334155)),
+              border: Border.all(
+                color: const Color(0xFF334155),
+              ),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
+                  color: Colors.black.withValues(alpha: 0.3),
                   blurRadius: 20,
                   offset: const Offset(0, 10),
                 ),
@@ -77,8 +95,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(Icons.construction,
-                      color: Color(0xFF38BDF8), size: 48),
+                  const Icon(
+                    Icons.construction,
+                    color: Color(0xFF38BDF8),
+                    size: 48,
+                  ),
                   const SizedBox(height: 16),
                   const Text(
                     'AssistAILab',
@@ -93,17 +114,32 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                   const Text(
                     'Faça login para continuar',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white54, fontSize: 14),
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 14,
+                    ),
                   ),
                   const SizedBox(height: 32),
                   TextFormField(
                     controller: _emailCtrl,
-                    style: const TextStyle(color: Colors.white),
+                    keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.next,
+                    autofillHints: const [
+                      AutofillHints.username,
+                      AutofillHints.email,
+                    ],
+                    style: const TextStyle(
+                      color: Colors.white,
+                    ),
                     decoration: InputDecoration(
                       labelText: 'E-mail',
-                      labelStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon: const Icon(Icons.email_outlined,
-                          color: Colors.white54),
+                      labelStyle: const TextStyle(
+                        color: Colors.white54,
+                      ),
+                      prefixIcon: const Icon(
+                        Icons.email_outlined,
+                        color: Colors.white54,
+                      ),
                       filled: true,
                       fillColor: const Color(0xFF0F172A),
                       border: OutlineInputBorder(
@@ -111,18 +147,41 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                         borderSide: BorderSide.none,
                       ),
                     ),
-                    validator: (v) => v!.isEmpty ? 'Campo obrigatório' : null,
+                    validator: (value) {
+                      final email = value?.trim() ?? '';
+
+                      if (email.isEmpty) {
+                        return 'Campo obrigatório';
+                      }
+
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 16),
                   TextFormField(
                     controller: _passwordCtrl,
-                    style: const TextStyle(color: Colors.white),
                     obscureText: true,
+                    textInputAction: TextInputAction.done,
+                    autofillHints: const [
+                      AutofillHints.password,
+                    ],
+                    onFieldSubmitted: (_) {
+                      if (!isLoading) {
+                        _doLogin();
+                      }
+                    },
+                    style: const TextStyle(
+                      color: Colors.white,
+                    ),
                     decoration: InputDecoration(
                       labelText: 'Senha',
-                      labelStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon:
-                          const Icon(Icons.lock_outline, color: Colors.white54),
+                      labelStyle: const TextStyle(
+                        color: Colors.white54,
+                      ),
+                      prefixIcon: const Icon(
+                        Icons.lock_outline,
+                        color: Colors.white54,
+                      ),
                       filled: true,
                       fillColor: const Color(0xFF0F172A),
                       border: OutlineInputBorder(
@@ -130,7 +189,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                         borderSide: BorderSide.none,
                       ),
                     ),
-                    validator: (v) => v!.isEmpty ? 'Campo obrigatório' : null,
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Campo obrigatório';
+                      }
+
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 24),
                   ElevatedButton(
@@ -138,7 +203,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF0284C7),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 16,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(8),
                       ),
@@ -148,11 +215,17 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             width: 20,
                             height: 20,
                             child: CircularProgressIndicator(
-                                color: Colors.white, strokeWidth: 2),
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
                           )
-                        : const Text('Entrar',
+                        : const Text(
+                            'Entrar',
                             style: TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.bold)),
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                   ),
                 ],
               ),
