@@ -280,39 +280,77 @@ class DashboardPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildRevenueSection(DashboardMetrics metrics) {
-    return Row(
-      children: [
-        Expanded(
-          child: _RevenueCard(
+  Widget _buildRevenueSection(
+    DashboardMetrics metrics,
+  ) {
+    return LayoutBuilder(
+      builder: (
+        context,
+        constraints,
+      ) {
+        final isCompact = constraints.maxWidth < 700;
+
+        final cards = [
+          _RevenueCard(
             label: 'Receita Total',
             value: 'R\$ ${metrics.totalRevenue.toStringAsFixed(2)}',
             sub: 'confirmados',
             icon: Icons.attach_money,
-            color: const Color(0xFF10B981),
+            color: const Color(
+              0xFF10B981,
+            ),
           ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _RevenueCard(
+          _RevenueCard(
             label: 'Este Mês',
             value: 'R\$ ${metrics.monthRevenue.toStringAsFixed(2)}',
             sub: 'mês atual',
             icon: Icons.calendar_today,
-            color: const Color(0xFF38BDF8),
+            color: const Color(
+              0xFF38BDF8,
+            ),
           ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _RevenueCard(
+          _RevenueCard(
             label: 'A Receber',
             value: 'R\$ ${metrics.pendingRevenue.toStringAsFixed(2)}',
             sub: '${metrics.paymentsToConfirm} pagamentos',
             icon: Icons.hourglass_top,
-            color: const Color(0xFFF59E0B),
+            color: const Color(
+              0xFFF59E0B,
+            ),
           ),
-        ),
-      ],
+        ];
+
+        if (isCompact) {
+          return Column(
+            children: [
+              for (var index = 0; index < cards.length; index++) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: cards[index],
+                ),
+                if (index != cards.length - 1)
+                  const SizedBox(
+                    height: 12,
+                  ),
+              ],
+            ],
+          );
+        }
+
+        return Row(
+          children: [
+            for (var index = 0; index < cards.length; index++) ...[
+              Expanded(
+                child: cards[index],
+              ),
+              if (index != cards.length - 1)
+                const SizedBox(
+                  width: 12,
+                ),
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -409,10 +447,23 @@ class _RevenueCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(icon, size: 16, color: color),
+              Icon(
+                icon,
+                size: 16,
+                color: color,
+              ),
               const SizedBox(width: 6),
-              Text(label,
-                  style: const TextStyle(color: Colors.white60, fontSize: 11)),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 10),
