@@ -23,7 +23,7 @@ class _CustomerShellState extends ConsumerState<CustomerShell> {
   void _selectTab(int index) {
     setState(() {
       _selectedIndex = index;
-      _selectedOrder = null;
+      _selectedOrderId = null;
     });
   }
 
@@ -98,7 +98,7 @@ class _CustomerShellState extends ConsumerState<CustomerShell> {
             ],
           ),
           body: content,
-          bottomNavigationBar: _selectedOrder == null
+          bottomNavigationBar: _selectedOrderId == null
               ? NavigationBar(
                   selectedIndex: _selectedIndex,
                   onDestinationSelected: _selectTab,
