@@ -5,6 +5,9 @@ import 'service_order_item_entity.dart';
 import 'service_order_details_provider.dart';
 import '../parts/parts_provider.dart';
 
+import '../auth/application/auth_provider.dart';
+import 'printing/service_order_pdf_preview_page.dart';
+
 class ServiceOrderDetailPage extends ConsumerStatefulWidget {
   final ServiceOrderEntity order;
   const ServiceOrderDetailPage({super.key, required this.order});
@@ -37,6 +40,16 @@ class _ServiceOrderDetailPageState
 
   @override
   Widget build(BuildContext context) {
+    final authState = ref.watch(
+      authStateProvider,
+    );
+
+    final currentUser = authState.valueOrNull;
+
+    final role = currentUser?.role.trim().toUpperCase();
+
+    final canPrint = role == 'ADMIN' || role == 'TECHNICIAN';
+
     final itemsAsync = ref.watch(serviceOrderItemsProvider(widget.order.id));
     final partsAsync = ref.watch(partsProvider);
 
@@ -46,9 +59,30 @@ class _ServiceOrderDetailPageState
         backgroundColor: const Color(0xFF1E293B),
         title: Text(
           'Detalhes da OS #${widget.order.friendlyId ?? '—'}',
-          style:
-              const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+          ),
         ),
+        actions: [
+          if (canPrint)
+            IconButton(
+              tooltip: 'Visualizar / Imprimir OS',
+              icon: const Icon(
+                Icons.print_outlined,
+                color: Colors.white,
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (context) => ServiceOrderPdfPreviewPage(
+                      order: widget.order,
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
