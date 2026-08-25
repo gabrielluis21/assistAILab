@@ -1,6 +1,7 @@
 import 'package:sqflite/sqflite.dart';
-import '../database/sqlite_database.dart';
+
 import '../../features/service_orders/service_order_entity.dart';
+import 'sqlite_database.dart';
 
 abstract class ServiceOrderRepository {
   Future<List<ServiceOrderEntity>> listAll({
@@ -36,26 +37,66 @@ abstract class ServiceOrderRepository {
 
 class ServiceOrderLocalDataSource implements ServiceOrderRepository {
   @override
-  Future<List<ServiceOrderEntity>> listAll({DatabaseExecutor? executor}) async {
+  Future<List<ServiceOrderEntity>> listAll({
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
-    final maps = await db.query('service_orders', orderBy: 'updated_at DESC');
+
+    final maps = await db.query(
+      'service_orders',
+      orderBy: 'updated_at DESC',
+    );
+
     return maps.map(ServiceOrderEntity.fromMap).toList();
   }
 
   @override
-  Future<ServiceOrderEntity?> findById(String id,
-      {DatabaseExecutor? executor}) async {
+  Future<List<ServiceOrderEntity>> listByCustomerId(
+    String customerId, {
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
-    final maps =
-        await db.query('service_orders', where: 'id = ?', whereArgs: [id]);
-    if (maps.isEmpty) return null;
-    return ServiceOrderEntity.fromMap(maps.first);
+
+    final maps = await db.query(
+      'service_orders',
+      where: 'customer_id = ?',
+      whereArgs: [customerId],
+      orderBy: 'updated_at DESC',
+    );
+
+    return maps.map(ServiceOrderEntity.fromMap).toList();
   }
 
   @override
-  Future<void> upsert(ServiceOrderEntity order,
-      {DatabaseExecutor? executor}) async {
+  Future<ServiceOrderEntity?> findById(
+    String id, {
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
+
+    final maps = await db.query(
+      'service_orders',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+
+    if (maps.isEmpty) {
+      return null;
+    }
+
+    return ServiceOrderEntity.fromMap(
+      maps.first,
+    );
+  }
+
+  @override
+  Future<void> upsert(
+    ServiceOrderEntity order, {
+    DatabaseExecutor? executor,
+  }) async {
+    final db = executor ?? await SqliteDatabase.instance;
+
     await db.insert(
       'service_orders',
       order.toMap(),
@@ -64,9 +105,13 @@ class ServiceOrderLocalDataSource implements ServiceOrderRepository {
   }
 
   @override
-  Future<void> updateStatus(String id, ServiceOrderStatusEnum newStatus,
-      {DatabaseExecutor? executor}) async {
+  Future<void> updateStatus(
+    String id,
+    ServiceOrderStatusEnum newStatus, {
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
+
     await db.update(
       'service_orders',
       {
@@ -79,27 +124,16 @@ class ServiceOrderLocalDataSource implements ServiceOrderRepository {
   }
 
   @override
-  Future<void> delete(String id, {DatabaseExecutor? executor}) async {
+  Future<void> delete(
+    String id, {
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
-    await db.delete('service_orders', where: 'id = ?', whereArgs: [id]);
+
+    await db.delete(
+      'service_orders',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
-
-  @override
-Future<List<ServiceOrderEntity>> listByCustomerId(
-  String customerId, {
-  DatabaseExecutor? executor,
-}) async {
-  final db = executor ?? await SqliteDatabase.instance;
-
-  final maps = await db.query(
-    'service_orders',
-    where: 'customer_id = ?',
-    whereArgs: [customerId],
-    orderBy: 'updated_at DESC',
-  );
-
-  return maps
-      .map(ServiceOrderEntity.fromMap)
-      .toList();
-}
 }
