@@ -1,37 +1,81 @@
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-/// Centraliza as URLs base do AssistAILab por plataforma.
-///
-/// Não usar 127.0.0.1 para Central API em dispositivos Android físicos.
 class ApiEnvironment {
   ApiEnvironment._();
 
-  /// URL base da Central API (Fastify/Node.js, porta 3000).
+  static String get appEnvironment {
+    return _required('APP_ENV');
+  }
+
   static String get centralApiBaseUrl {
-    if (kIsWeb) {
-      // Web usa API direto (sem LocalService)
-      return 'http://127.0.0.1:3000/api/v1';
-    }
-    if (_isAndroid) {
-      // Emulador Android: 10.0.2.2 aponta para o host
-      return 'http://10.0.2.2:3000/api/v1';
-    }
-    // Windows / Linux / macOS / iOS Simulator
-    return 'http://127.0.0.1:3000/api/v1';
+    final scheme = _required('CENTRAL_API_SCHEME');
+    final host = _required('CENTRAL_API_HOST');
+    final port = _requiredInt('CENTRAL_API_PORT');
+    final prefix = _normalizePrefix(
+      _required('CENTRAL_API_PREFIX'),
+    );
+
+    return '$scheme://$host:$port$prefix';
   }
 
-  /// URL base do LocalService (HTTP loopback do Desktop, porta 8080).
-  /// Usado apenas em Desktop.
   static String get localServiceBaseUrl {
-    return 'http://127.0.0.1:8080';
+    final scheme = _required('LOCAL_SERVICE_SCHEME');
+    final host = _required('LOCAL_SERVICE_HOST');
+    final port = _requiredInt('LOCAL_SERVICE_PORT');
+
+    return '$scheme://$host:$port';
   }
 
-  static bool get _isAndroid {
-    try {
-      return Platform.isAndroid;
-    } catch (_) {
-      return false;
+  static Duration get apiTimeout {
+    return Duration(
+      seconds: _requiredInt('API_TIMEOUT_SECONDS'),
+    );
+  }
+
+  static String _required(String key) {
+    final value = dotenv.env[key]?.trim();
+
+    if (value == null || value.isEmpty) {
+      throw StateError(
+        'Environment variable "$key" is required.',
+      );
     }
+
+    return value;
+  }
+
+  static int _requiredInt(String key) {
+    final rawValue = _required(key);
+    final value = int.tryParse(rawValue);
+
+    if (value == null) {
+      throw StateError(
+        'Environment variable "$key" must be an integer. '
+        'Received: "$rawValue".',
+      );
+    }
+
+    return value;
+  }
+
+  static String _normalizePrefix(String prefix) {
+    if (prefix == '/') {
+      return '';
+    }
+
+    var normalized = prefix.trim();
+
+    if (!normalized.startsWith('/')) {
+      normalized = '/$normalized';
+    }
+
+    while (normalized.endsWith('/')) {
+      normalized = normalized.substring(
+        0,
+        normalized.length - 1,
+      );
+    }
+
+    return normalized;
   }
 }
