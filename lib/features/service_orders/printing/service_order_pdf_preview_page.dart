@@ -30,6 +30,57 @@ class ServiceOrderPdfPreviewPage extends ConsumerWidget {
         title: Text(
           'OS #${order.friendlyId ?? '-'}',
         ),
+        actions: [
+          if (canPrint)
+            PopupMenuButton<String>(
+              tooltip: 'Documento da OS',
+              icon: const Icon(
+                Icons.print_outlined,
+                color: Colors.white,
+              ),
+              onSelected: (value) async {
+                if (value == 'preview') {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (context) => ServiceOrderPdfPreviewPage(
+                        order: widget.order,
+                      ),
+                    ),
+                  );
+
+                  return;
+                }
+
+                if (value == 'print') {
+                  await _printServiceOrder();
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: 'preview',
+                  child: ListTile(
+                    leading: Icon(
+                      Icons.picture_as_pdf_outlined,
+                    ),
+                    title: Text(
+                      'Visualizar PDF',
+                    ),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'print',
+                  child: ListTile(
+                    leading: Icon(
+                      Icons.print_outlined,
+                    ),
+                    title: Text(
+                      'Imprimir OS',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+        ],
       ),
       body: printDataAsync.when(
         loading: () => const Center(

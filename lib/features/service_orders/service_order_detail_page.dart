@@ -8,6 +8,9 @@ import '../parts/parts_provider.dart';
 import '../auth/application/auth_provider.dart';
 import 'printing/service_order_pdf_preview_page.dart';
 
+import 'printing/service_order_print_data_provider.dart';
+import 'printing/service_order_print_service.dart';
+
 class ServiceOrderDetailPage extends ConsumerStatefulWidget {
   final ServiceOrderEntity order;
   const ServiceOrderDetailPage({super.key, required this.order});
@@ -246,6 +249,46 @@ class _ServiceOrderDetailPageState
         ),
       ),
     );
+  }
+
+  Future<void> _printServiceOrder() async {
+    try {
+      final printData = await ref.read(
+        serviceOrderPrintDataProvider(
+          widget.order,
+        ).future,
+      );
+
+      final result = await ServiceOrderPrintService.print(
+        printData,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (!result) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'A impressão foi cancelada.',
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Não foi possível imprimir a OS: $error',
+          ),
+        ),
+      );
+    }
   }
 
   InputDecoration _inputDecoration(String label) {

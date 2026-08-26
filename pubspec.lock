@@ -432,6 +432,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.13.0"
+  pdf_widget_wrapper:
+    dependency: transitive
+    description:
+      name: pdf_widget_wrapper
+      sha256: c930860d987213a3d58c7ec3b7ecf8085c3897f773e8dc23da9cae60a5d6d0f5
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.4"
   petitparser:
     dependency: transitive
     description:
@@ -464,6 +472,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.5.2"
+  printing:
+    dependency: "direct main"
+    description:
+      name: printing
+      sha256: f6cd14c768c1352dd37a958a3ee351aa9ce305b398218d3acd86389d5f7ecad1
+      url: "https://pub.dev"
+    source: hosted
+    version: "5.15.0"
   pub_semver:
     dependency: transitive
     description:
@@ -553,10 +569,10 @@ packages:
     dependency: "direct main"
     description:
       name: sqflite_common_ffi
-      sha256: "5ccd38136edb9beb3213f6927775d52db70dfdadcdb28dad1f625ca9f2b9824f"
+      sha256: d5564f1308cafbf064be498f2beb1e993e742985a7cca9e2e228d6cbccd84a05
       url: "https://pub.dev"
     source: hosted
-    version: "2.4.2"
+    version: "2.4.2+1"
   sqflite_darwin:
     dependency: transitive
     description:
@@ -577,10 +593,10 @@ packages:
     dependency: transitive
     description:
       name: sqlite3
-      sha256: "64b2c63c8232dd20d14b34105a81ebfd74320442e8451f836179ec89986aa478"
+      sha256: "4c7fe79840389aaeaf05fd093f795b631b5a98e2bd28d54e555c100f4a9c7a1c"
       url: "https://pub.dev"
     source: hosted
-    version: "3.5.1"
+    version: "3.5.2"
   stack_trace:
     dependency: transitive
     description:
@@ -617,10 +633,10 @@ packages:
     dependency: transitive
     description:
       name: synchronized
-      sha256: "61894a1956de6b4fc1aefd0892e109514a1a706cbece3ac59decd90ff5a7a423"
+      sha256: "3a7b5d17422dd0f8d5c6c14feaa5a1c65638b9455f871a96f08437562c046931"
       url: "https://pub.dev"
     source: hosted
-    version: "3.4.1+1"
+    version: "3.4.1+2"
   term_glyph:
     dependency: transitive
     description:
@@ -665,10 +681,10 @@ packages:
     dependency: transitive
     description:
       name: vm_service
-      sha256: "0016aef94fc66495ac78af5859181e3f3bf2026bd8eecc72b9565601e19ab360"
+      sha256: "5f37239c4851efcef929cea7824e76df7f2f0970aef85d66bbc430afa40e72f0"
       url: "https://pub.dev"
     source: hosted
-    version: "15.2.0"
+    version: "15.3.0"
   web:
     dependency: transitive
     description:
