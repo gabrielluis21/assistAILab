@@ -78,6 +78,15 @@ async function reserveIdempotencySlot(
             'PROCESSING',
         },
 
+        status:
+          'PROCESSING',
+
+        processingExpiresAt:
+          new Date(
+            Date.now() +
+            5 * 60 * 1000
+          ),
+
         userId,
 
         deviceId:
@@ -2137,6 +2146,15 @@ export async function pushSyncHandler(
 
             responseStatus:
               200,
+
+            status:
+              'COMPLETED',
+
+            completedAt:
+              new Date(),
+
+            processingExpiresAt:
+              null,
           },
         })
         .catch(
@@ -2163,6 +2181,9 @@ export async function pushSyncHandler(
         where: {
           operationId:
             entry.operationId,
+
+          status:
+            'PROCESSING',
 
           responseStatus:
             102,

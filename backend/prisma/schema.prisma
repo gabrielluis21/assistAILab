@@ -56,6 +56,11 @@ enum OperationType {
   DELETE
 }
 
+enum IdempotencyStatus {
+  PROCESSING
+  COMPLETED
+}
+
 enum PaymentMethod {
   DINHEIRO
   CARTAO_CREDITO
@@ -630,18 +635,27 @@ model SyncChangeLog {
 }
 
 model OperationIdempotency {
-  operationId    String   @id
-  userId         String?
-  deviceId       String?
-  endpoint       String
-  requestHash    String
-  responseStatus Int
-  responseBody   Json
-  createdAt      DateTime @default(now())
+  operationId         String            @id
+  userId              String?
+  organizationId      String?
+  deviceId            String?
+  command             String?
+  endpoint            String
+  requestHash         String
+  status              IdempotencyStatus @default(COMPLETED)
+  responseStatus      Int?
+  responseBody        Json?
+  processingExpiresAt DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
   @@index([userId])
+  @@index([organizationId])
   @@index([deviceId])
+  @@index([command])
   @@index([endpoint])
+  @@index([status, processingExpiresAt])
   @@index([createdAt])
   @@map("operation_idempotency")
 }
