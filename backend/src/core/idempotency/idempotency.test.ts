@@ -187,10 +187,14 @@ describe(
 
         const reserved = await service.reserveOrReplay(input);
         assert.equal(reserved.kind, 'ACQUIRED');
+        if (reserved.kind !== 'ACQUIRED') {
+          assert.fail('Expected ACQUIRED');
+        }
 
         await prisma.$transaction(async (tx) => {
           await IdempotencyService.completeWithinTransaction(tx, {
             ...input,
+            leaseToken: reserved.leaseToken,
             responseStatus: 201,
             responseBody: {
               ok: true,
@@ -219,11 +223,16 @@ describe(
         const original = identity();
         const service = new IdempotencyService(prisma, 60_000);
 
-        await service.reserveOrReplay(original);
+        const reserved = await service.reserveOrReplay(original);
+        assert.equal(reserved.kind, 'ACQUIRED');
+        if (reserved.kind !== 'ACQUIRED') {
+          assert.fail('Expected ACQUIRED');
+        }
 
         await prisma.$transaction(async (tx) => {
           await IdempotencyService.completeWithinTransaction(tx, {
             ...original,
+            leaseToken: reserved.leaseToken,
             responseStatus: 200,
             responseBody: {
               secretEntityId: randomUUID(),
@@ -339,12 +348,17 @@ describe(
         const input = identity();
         const service = new IdempotencyService(prisma, 60_000);
 
-        await service.reserveOrReplay(input);
+        const reserved = await service.reserveOrReplay(input);
+        assert.equal(reserved.kind, 'ACQUIRED');
+        if (reserved.kind !== 'ACQUIRED') {
+          assert.fail('Expected ACQUIRED');
+        }
 
         await assert.rejects(
           prisma.$transaction(async (tx) => {
             await IdempotencyService.completeWithinTransaction(tx, {
               ...input,
+              leaseToken: reserved.leaseToken,
               responseStatus: 200,
               responseBody: {
                 ok: true,
@@ -378,7 +392,11 @@ describe(
         const input = identity();
         const service = new IdempotencyService(prisma, 60_000);
 
-        await service.reserveOrReplay(input);
+        const reserved = await service.reserveOrReplay(input);
+        assert.equal(reserved.kind, 'ACQUIRED');
+        if (reserved.kind !== 'ACQUIRED') {
+          assert.fail('Expected ACQUIRED');
+        }
 
         await prisma.operationIdempotency.update({
           where: {
@@ -395,6 +413,7 @@ describe(
           prisma.$transaction(async (tx) => {
             await IdempotencyService.completeWithinTransaction(tx, {
               ...input,
+              leaseToken: reserved.leaseToken,
               responseStatus: 200,
               responseBody: {
                 ok: true,
