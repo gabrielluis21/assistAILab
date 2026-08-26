@@ -646,7 +646,6 @@ model OperationIdempotency {
   responseStatus      Int?
   responseBody        Json?
   processingExpiresAt DateTime?
-  leaseToken          String?
   completedAt         DateTime?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt

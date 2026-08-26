@@ -3,7 +3,6 @@ import {
   Prisma,
   type PrismaClient,
 } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 
 import type {
   CompleteIdempotencyInput,
@@ -13,6 +12,7 @@ import type {
 } from './idempotency.types.js';
 
 const DEFAULT_LEASE_MS = 5 * 60 * 1000;
+
 type PrismaRootClient = Pick<PrismaClient, 'operationIdempotency'>;
 
 function sameNullableString(
@@ -58,14 +58,12 @@ export class IdempotencyService {
 
   private leaseExpiry(now: Date, leaseMs?: number): Date {
     const effectiveLease = leaseMs ?? this.defaultLeaseMs;
+
     if (!Number.isSafeInteger(effectiveLease) || effectiveLease <= 0) {
       throw new Error('leaseMs must be a positive safe integer');
     }
-    return new Date(now.getTime() + effectiveLease);
-  }
 
-  private newLeaseToken(): string {
-    return randomUUID();
+    return new Date(now.getTime() + effectiveLease);
   }
 
   async reserveOrReplay(
@@ -73,7 +71,6 @@ export class IdempotencyService {
   ): Promise<ReserveIdempotencyResult> {
     const now = input.now ?? new Date();
     const processingExpiresAt = this.leaseExpiry(now, input.leaseMs);
-    const leaseToken = this.newLeaseToken();
 
     try {
       await this.db.operationIdempotency.create({
@@ -87,17 +84,23 @@ export class IdempotencyService {
           requestHash: input.requestHash,
           status: IdempotencyStatus.PROCESSING,
           processingExpiresAt,
-          leaseToken,
         },
       });
 
-      return { kind: 'ACQUIRED', processingExpiresAt, leaseToken };
+      return {
+        kind: 'ACQUIRED',
+        processingExpiresAt,
+      };
     } catch (error: any) {
-      if (error?.code !== 'P2002') throw error;
+      if (error?.code !== 'P2002') {
+        throw error;
+      }
     }
 
     const existing = await this.db.operationIdempotency.findUnique({
-      where: { operationId: input.operationId },
+      where: {
+        operationId: input.operationId,
+      },
     });
 
     if (!existing) {
@@ -106,7 +109,11 @@ export class IdempotencyService {
       );
     }
 
-    if (!sameIdentity(existing, input)) return { kind: 'KEY_REUSE' };
+    if (!sameIdentity(existing, input)) {
+      return {
+        kind: 'KEY_REUSE',
+      };
+    }
 
     if (existing.status === IdempotencyStatus.COMPLETED) {
       if (
@@ -118,6 +125,7 @@ export class IdempotencyService {
           'COMPLETED idempotency record is missing canonical response data'
         );
       }
+
       return {
         kind: 'REPLAY',
         responseStatus: existing.responseStatus,
@@ -135,17 +143,22 @@ export class IdempotencyService {
       };
     }
 
-    const takeover = await this.takeoverExpired({ ...input, now });
+    const takeover = await this.takeoverExpired({
+      ...input,
+      now,
+    });
+
     if (takeover) {
       return {
         kind: 'ACQUIRED',
-        processingExpiresAt: takeover.processingExpiresAt,
-        leaseToken: takeover.leaseToken,
+        processingExpiresAt: takeover,
       };
     }
 
     const reloaded = await this.db.operationIdempotency.findUnique({
-      where: { operationId: input.operationId },
+      where: {
+        operationId: input.operationId,
+      },
     });
 
     if (!reloaded) {
@@ -154,7 +167,11 @@ export class IdempotencyService {
       );
     }
 
-    if (!sameIdentity(reloaded, input)) return { kind: 'KEY_REUSE' };
+    if (!sameIdentity(reloaded, input)) {
+      return {
+        kind: 'KEY_REUSE',
+      };
+    }
 
     if (reloaded.status === IdempotencyStatus.COMPLETED) {
       if (
@@ -182,16 +199,17 @@ export class IdempotencyService {
 
   async takeoverExpired(
     input: ReserveIdempotencyInput
-  ): Promise<{ processingExpiresAt: Date; leaseToken: string } | null> {
+  ): Promise<Date | null> {
     const now = input.now ?? new Date();
     const newLease = this.leaseExpiry(now, input.leaseMs);
-    const newLeaseToken = this.newLeaseToken();
 
     const takeover = await this.db.operationIdempotency.updateMany({
       where: {
         operationId: input.operationId,
         status: IdempotencyStatus.PROCESSING,
-        processingExpiresAt: { lt: now },
+        processingExpiresAt: {
+          lt: now,
+        },
         userId: input.actorUserId,
         organizationId: input.organizationId,
         command: input.command,
@@ -200,13 +218,10 @@ export class IdempotencyService {
       },
       data: {
         processingExpiresAt: newLease,
-        leaseToken: newLeaseToken,
       },
     });
 
-    return takeover.count === 1
-      ? { processingExpiresAt: newLease, leaseToken: newLeaseToken }
-      : null;
+    return takeover.count === 1 ? newLease : null;
   }
 
   static async completeWithinTransaction(
@@ -224,7 +239,6 @@ export class IdempotencyService {
         command: input.command,
         endpoint: input.endpoint,
         requestHash: input.requestHash,
-        leaseToken: input.leaseToken,
       },
       data: {
         status: IdempotencyStatus.COMPLETED,
@@ -232,7 +246,6 @@ export class IdempotencyService {
         responseBody: input.responseBody,
         completedAt,
         processingExpiresAt: null,
-        leaseToken: null,
       },
     });
 

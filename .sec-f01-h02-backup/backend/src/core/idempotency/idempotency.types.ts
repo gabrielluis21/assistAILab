@@ -16,7 +16,6 @@ export type ReserveIdempotencyInput = IdempotencyIdentity & {
 };
 
 export type CompleteIdempotencyInput = IdempotencyIdentity & {
-  leaseToken: string;
   responseStatus: number;
   responseBody: Prisma.InputJsonValue;
   completedAt?: Date;
@@ -26,7 +25,6 @@ export type ReserveIdempotencyResult =
   | {
       kind: 'ACQUIRED';
       processingExpiresAt: Date;
-      leaseToken: string;
     }
   | {
       kind: 'REPLAY';
