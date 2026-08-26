@@ -67,25 +67,64 @@ class _ServiceOrderDetailPageState
             color: Colors.white,
           ),
         ),
-        actions: [
-          if (canPrint)
-            IconButton(
-              tooltip: 'Visualizar / Imprimir OS',
-              icon: const Icon(
-                Icons.print_outlined,
-                color: Colors.white,
+       actions: [
+  if (canPrint)
+    PopupMenuButton<String>(
+      tooltip: 'Documento da OS',
+      icon: const Icon(
+        Icons.print_outlined,
+        color: Colors.white,
+      ),
+      onSelected: (value) async {
+        switch (value) {
+          case 'preview':
+            await Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (context) =>
+                    ServiceOrderPdfPreviewPage(
+                  order: widget.order,
+                ),
               ),
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (context) => ServiceOrderPdfPreviewPage(
-                      order: widget.order,
-                    ),
-                  ),
-                );
-              },
-            ),
-        ],
+            );
+            break;
+
+          case 'print':
+            await _printServiceOrder();
+            break;
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem<String>(
+          value: 'preview',
+          child: Row(
+            children: [
+              Icon(
+                Icons.picture_as_pdf_outlined,
+              ),
+              SizedBox(width: 12),
+              Text(
+                'Visualizar PDF',
+              ),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'print',
+          child: Row(
+            children: [
+              Icon(
+                Icons.print_outlined,
+              ),
+              SizedBox(width: 12),
+              Text(
+                'Imprimir OS',
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
