@@ -288,6 +288,121 @@ describe(
     );
 
     test(
+      'legacy PROCESSING without lease token cannot complete before takeover',
+      async () => {
+        const input = identity();
+        const now = new Date();
+
+        await prisma.operationIdempotency.create({
+          data: {
+            operationId: input.operationId,
+            userId: input.actorUserId,
+            organizationId: input.organizationId,
+            command: input.command,
+            endpoint: input.endpoint,
+            requestHash: input.requestHash,
+            status: IdempotencyStatus.PROCESSING,
+            processingExpiresAt: new Date(now.getTime() - 5_000),
+            leaseToken: null,
+          },
+        });
+
+        const staleCursor = randomUUID();
+        markerIds.push(staleCursor);
+
+        await assert.rejects(
+          prisma.$transaction(async (tx) => {
+            await tx.syncChangeLog.create({
+              data: {
+                cursor: staleCursor,
+                entityType: 'SEC_F01_H02_LEGACY_NULL_LEASE',
+                entityId: randomUUID(),
+                operationType: 'UPDATE',
+                data: {
+                  worker: 'legacy-direct-completion',
+                },
+              },
+            });
+
+            await IdempotencyService.completeWithinTransaction(tx, {
+              ...input,
+              leaseToken: randomUUID(),
+              responseStatus: 200,
+              responseBody: {
+                worker: 'legacy-direct-completion',
+              },
+            });
+          }),
+          IdempotencyStateConflictError
+        );
+
+        assert.equal(
+          await prisma.syncChangeLog.findUnique({
+            where: {
+              cursor: staleCursor,
+            },
+          }),
+          null
+        );
+
+        const beforeTakeover =
+          await prisma.operationIdempotency.findUniqueOrThrow({
+            where: {
+              operationId: input.operationId,
+            },
+          });
+
+        assert.equal(beforeTakeover.status, IdempotencyStatus.PROCESSING);
+        assert.equal(beforeTakeover.leaseToken, null);
+
+        const service = new IdempotencyService(prisma, 60_000);
+        const acquired = await service.takeoverExpired({
+          ...input,
+          now,
+        });
+
+        assert.ok(acquired);
+        assert.match(
+          acquired.leaseToken,
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        );
+
+        const afterTakeover =
+          await prisma.operationIdempotency.findUniqueOrThrow({
+            where: {
+              operationId: input.operationId,
+            },
+          });
+
+        assert.equal(afterTakeover.leaseToken, acquired.leaseToken);
+
+        await prisma.$transaction(async (tx) => {
+          await IdempotencyService.completeWithinTransaction(tx, {
+            ...input,
+            leaseToken: acquired.leaseToken,
+            responseStatus: 200,
+            responseBody: {
+              worker: 'new-owner',
+            },
+          });
+        });
+
+        const completed =
+          await prisma.operationIdempotency.findUniqueOrThrow({
+            where: {
+              operationId: input.operationId,
+            },
+          });
+
+        assert.equal(completed.status, IdempotencyStatus.COMPLETED);
+        assert.equal(completed.leaseToken, null);
+        assert.deepEqual(completed.responseBody, {
+          worker: 'new-owner',
+        });
+      }
+    );
+
+    test(
       'lease token is not part of canonical hash',
       () => {
         const envelope = {

@@ -45,3 +45,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Local security patch backups
+.sec-f01-h02-backup/
+.sec-f01-backup/
