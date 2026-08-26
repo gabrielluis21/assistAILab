@@ -127,9 +127,9 @@ async function reserveIdempotencySlot(
 
       const responseBody =
         existing.responseBody as
-          {
-            status?: string;
-          } | null;
+        {
+          status?: string;
+        } | null;
 
       const ageMs =
         Date.now() -
@@ -137,17 +137,17 @@ async function reserveIdempotencySlot(
 
       const recoverableProcessing =
         existing.responseStatus ===
-          102 &&
+        102 &&
         ageMs >
-          5 * 60 * 1000;
+        5 * 60 * 1000;
 
       const legacyIncomplete =
         existing.responseStatus ===
-          200 &&
+        200 &&
         responseBody?.status !==
-          'SYNCED' &&
+        'SYNCED' &&
         ageMs >
-          5 * 60 * 1000;
+        5 * 60 * 1000;
 
       if (
         recoverableProcessing ||
@@ -178,7 +178,8 @@ async function reserveIdempotencySlot(
           existing.responseBody,
 
         responseStatus:
-          existing.responseStatus,
+          existing.responseStatus ??
+          undefined,
 
         createdAt:
           existing.createdAt,
@@ -947,9 +948,9 @@ export async function pushSyncHandler(
        */
       if (
         authUser.role ===
-          'CUSTOMER' &&
+        'CUSTOMER' &&
         entityUpper ===
-          'SERVICE_ORDER' &&
+        'SERVICE_ORDER' &&
         authUser.customerId
       ) {
         const targetServiceOrder =
@@ -1069,17 +1070,17 @@ export async function pushSyncHandler(
         const existingResponse =
           idempotencyResult
             .responseBody as
-            {
-              status?: string;
-            } | undefined;
+          {
+            status?: string;
+          } | undefined;
 
         if (
           idempotencyResult
             .responseStatus ===
-            200 &&
+          200 &&
           existingResponse
             ?.status ===
-            'SYNCED'
+          'SYNCED'
         ) {
           results.push({
             operationId:
@@ -1655,68 +1656,68 @@ export async function pushSyncHandler(
 
               const persistedOrder =
                 await tx.serviceOrder.upsert({
-                where: {
-                  id:
-                    entry.entityId,
-                },
+                  where: {
+                    id:
+                      entry.entityId,
+                  },
 
-                create: {
-                  id:
-                    entry.entityId,
+                  create: {
+                    id:
+                      entry.entityId,
 
-                  organizationId,
+                    organizationId,
 
-                  customerId,
+                    customerId,
 
-                  equipmentId,
+                    equipmentId,
 
-                  technicianId,
+                    technicianId,
 
-                  status:
-                    newStatus,
+                    status:
+                      newStatus,
 
-                  problemDescription,
+                    problemDescription,
 
-                  diagnosis:
-                    entry.payload
-                      .diagnosis ??
-                    null,
+                    diagnosis:
+                      entry.payload
+                        .diagnosis ??
+                      null,
 
-                  solution:
-                    entry.payload
-                      .solution ??
-                    null,
+                    solution:
+                      entry.payload
+                        .solution ??
+                      null,
 
-                  totalAmount:
-                    entry.payload
-                      .total_amount ??
-                    entry.payload
-                      .totalAmount ??
-                    0,
-                },
+                    totalAmount:
+                      entry.payload
+                        .total_amount ??
+                      entry.payload
+                        .totalAmount ??
+                      0,
+                  },
 
-                update: {
-                  status:
-                    newStatus,
+                  update: {
+                    status:
+                      newStatus,
 
-                  diagnosis:
-                    entry.payload
-                      .diagnosis ??
-                    null,
+                    diagnosis:
+                      entry.payload
+                        .diagnosis ??
+                      null,
 
-                  solution:
-                    entry.payload
-                      .solution ??
-                    null,
+                    solution:
+                      entry.payload
+                        .solution ??
+                      null,
 
-                  totalAmount:
-                    entry.payload
-                      .total_amount ??
-                    entry.payload
-                      .totalAmount ??
-                    0,
-                },
-              });
+                    totalAmount:
+                      entry.payload
+                        .total_amount ??
+                      entry.payload
+                        .totalAmount ??
+                      0,
+                  },
+                });
               /**
                * CLIENT_GATE_SERVICE_ORDER_DOMAIN_EFFECTS
                *
@@ -1726,7 +1727,7 @@ export async function pushSyncHandler(
               if (
                 !existingOS &&
                 entry.operationType ===
-                  'CREATE'
+                'CREATE'
               ) {
                 await serviceOrderCustomerRelationshipService
                   .registerCreated(
@@ -1749,7 +1750,7 @@ export async function pushSyncHandler(
               } else if (
                 existingOS &&
                 existingOS.status !==
-                  persistedOrder.status
+                persistedOrder.status
               ) {
                 await tx.serviceOrderStatusHistory.create({
                   data: {
@@ -2074,9 +2075,9 @@ export async function pushSyncHandler(
            */
           if (
             entityUpper ===
-              'SERVICE_ORDER' &&
+            'SERVICE_ORDER' &&
             entry.operationType !==
-              'DELETE'
+            'DELETE'
           ) {
             const canonicalOrder =
               await tx.serviceOrder.findUniqueOrThrow({
