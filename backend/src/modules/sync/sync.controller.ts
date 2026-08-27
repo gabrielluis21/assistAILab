@@ -2310,7 +2310,6 @@ export async function pullSyncHandler(
     const [
       equipments,
       serviceOrders,
-      payments,
     ] =
       await Promise.all([
         /**
@@ -2343,22 +2342,6 @@ export async function pullSyncHandler(
          * independentemente da Organization.
          */
         prisma.serviceOrder.findMany({
-          where: {
-            customerId,
-          },
-
-          select: {
-            id: true,
-          },
-        }),
-
-        /**
-         * CUSTOMER global:
-         *
-         * todos os próprios pagamentos,
-         * independentemente da Organization da OS.
-         */
-        prisma.payment.findMany({
           where: {
             customerId,
           },
@@ -2406,11 +2389,6 @@ export async function pullSyncHandler(
         ...serviceOrderItems.map(
           (item) =>
             item.id
-        ),
-
-        ...payments.map(
-          (payment) =>
-            payment.id
         ),
       ]);
   }
@@ -2631,10 +2609,29 @@ export async function pullSyncHandler(
    */
   const changes =
     allChanges.filter(
-      (change) =>
-        authorizedEntityIds.has(
+      (change) => {
+        /**
+         * FIN_F01_CUSTOMER_PAYMENT_PULL_DENY
+         *
+         * CUSTOMER is outside Finance V1.
+         * Deny PAYMENT by entity type in addition to ID authorization
+         * so an authorized entity-ID collision cannot expose Payment
+         * SyncChangeLog payloads.
+         */
+        if (
+          authUser.role ===
+            'CUSTOMER' &&
+          change.entityType
+            .toUpperCase() ===
+            'PAYMENT'
+        ) {
+          return false;
+        }
+
+        return authorizedEntityIds.has(
           change.entityId
-        )
+        );
+      }
     );
 
   /**
