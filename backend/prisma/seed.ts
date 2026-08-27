@@ -3069,6 +3069,18 @@ async function main() {
             },
 
             update: {
+                organizationId:
+                    organizationA.id,
+
+                clientOperationId:
+                    'seed:payment-delivered',
+
+                createdByUserId:
+                    adminA.id,
+
+                confirmedByUserId:
+                    adminA.id,
+
                 serviceOrderId:
                     soDelivered.id,
 
@@ -3096,6 +3108,18 @@ async function main() {
             create: {
                 id:
                     'a0000000-0000-4000-8000-000000000001',
+
+                organizationId:
+                    organizationA.id,
+
+                clientOperationId:
+                    'seed:payment-delivered',
+
+                createdByUserId:
+                    adminA.id,
+
+                confirmedByUserId:
+                    adminA.id,
 
                 serviceOrderId:
                     soDelivered.id,
@@ -3135,6 +3159,18 @@ async function main() {
             },
 
             update: {
+                organizationId:
+                    organizationA.id,
+
+                clientOperationId:
+                    'seed:payment-pending',
+
+                createdByUserId:
+                    adminA.id,
+
+                confirmedByUserId:
+                    null,
+
                 serviceOrderId:
                     soAwaitingApproval.id,
 
@@ -3160,6 +3196,18 @@ async function main() {
             create: {
                 id:
                     'a0000000-0000-4000-8000-000000000002',
+
+                organizationId:
+                    organizationA.id,
+
+                clientOperationId:
+                    'seed:payment-pending',
+
+                createdByUserId:
+                    adminA.id,
+
+                confirmedByUserId:
+                    null,
 
                 serviceOrderId:
                     soAwaitingApproval.id,
@@ -3194,6 +3242,18 @@ async function main() {
             },
 
             update: {
+                organizationId:
+                    organizationB.id,
+
+                clientOperationId:
+                    'seed:payment-org-b',
+
+                createdByUserId:
+                    adminB.id,
+
+                confirmedByUserId:
+                    adminB.id,
+
                 serviceOrderId:
                     soOrgBDelivered.id,
 
@@ -3221,6 +3281,18 @@ async function main() {
             create: {
                 id:
                     'a0000000-0000-4000-8000-000000000003',
+
+                organizationId:
+                    organizationB.id,
+
+                clientOperationId:
+                    'seed:payment-org-b',
+
+                createdByUserId:
+                    adminB.id,
+
+                confirmedByUserId:
+                    adminB.id,
 
                 serviceOrderId:
                     soOrgBDelivered.id,

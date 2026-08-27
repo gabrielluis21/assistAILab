@@ -1,24 +1,91 @@
-import { FastifyInstance } from 'fastify';
+import type {
+  FastifyInstance,
+} from 'fastify';
+
 import {
-  listPaymentsHandler,
-  getPaymentHandler,
   createPaymentHandler,
-  updatePaymentStatusHandler,
+  getPaymentHandler,
   getRevenueSummaryHandler,
+  listPaymentsHandler,
+  updatePaymentStatusHandler,
 } from './payments.controller.js';
 
-export async function paymentsRoutes(fastify: FastifyInstance) {
-  const auth = (fastify as any).authenticate;
-  const adminOrTech = (fastify as any).authorize(['ADMIN', 'TECHNICIAN']);
+export async function paymentsRoutes(
+  fastify:
+    FastifyInstance
+) {
+  const auth =
+    (fastify as any)
+      .authenticate;
 
-  // P0.2: Read access open to all authenticated; CUSTOMER scope enforced in controller.
-  fastify.get('/', { preValidation: [auth] }, listPaymentsHandler);
-  fastify.get('/:id', { preValidation: [auth] }, getPaymentHandler);
+  const staff =
+    (fastify as any)
+      .authorize([
+        'ADMIN',
+        'TECHNICIAN',
+      ]);
 
-  // P0.2: Revenue summary is administrative data — CUSTOMER must not access it.
-  fastify.get('/summary', { preValidation: [auth, adminOrTech] }, getRevenueSummaryHandler);
+  const admin =
+    (fastify as any)
+      .authorize([
+        'ADMIN',
+      ]);
 
-  // Mutations restricted to ADMIN/TECHNICIAN only.
-  fastify.post('/', { preValidation: [auth, adminOrTech] }, createPaymentHandler);
-  fastify.patch('/:id/status', { preValidation: [auth, adminOrTech] }, updatePaymentStatusHandler);
+  /**
+   * Static route before /:id.
+   */
+  fastify.get(
+    '/summary',
+    {
+      preValidation: [
+        auth,
+        admin,
+      ],
+    },
+    getRevenueSummaryHandler
+  );
+
+  fastify.get(
+    '/',
+    {
+      preValidation: [
+        auth,
+        staff,
+      ],
+    },
+    listPaymentsHandler
+  );
+
+  fastify.get(
+    '/:id',
+    {
+      preValidation: [
+        auth,
+        staff,
+      ],
+    },
+    getPaymentHandler
+  );
+
+  fastify.post(
+    '/',
+    {
+      preValidation: [
+        auth,
+        staff,
+      ],
+    },
+    createPaymentHandler
+  );
+
+  fastify.patch(
+    '/:id/status',
+    {
+      preValidation: [
+        auth,
+        admin,
+      ],
+    },
+    updatePaymentStatusHandler
+  );
 }

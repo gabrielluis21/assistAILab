@@ -1,60 +1,316 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
-import { createPaymentSchema, updatePaymentStatusSchema } from './payments.schema.js';
-import { PaymentsService } from './payments.service.js';
-import { getAuthUser } from '../../core/middleware/auth.middleware.js';
-import { ForbiddenError } from '../../core/utils/errors.js';
+import type {
+  FastifyReply,
+  FastifyRequest,
+} from 'fastify';
 
-const svc = new PaymentsService();
+import type {
+  ZodType,
+} from 'zod';
 
-// P0.2: CUSTOMER receives only their own payments; ADMIN/TECH receive all.
-export async function listPaymentsHandler(req: FastifyRequest, reply: FastifyReply) {
-  const authUser = getAuthUser(req);
+import {
+  getAuthUser,
+  requireOrganizationId,
+} from '../../core/middleware/auth.middleware.js';
 
-  if (authUser.role === 'CUSTOMER') {
-    if (!authUser.customerId) {
-      throw new ForbiddenError('Access denied: no customer identity associated with this account');
-    }
-    return reply.send(await svc.listAll(undefined, authUser.customerId));
+import {
+  AppError,
+  ForbiddenError,
+} from '../../core/utils/errors.js';
+
+import {
+  createPaymentSchema,
+  operationIdHeaderSchema,
+  paymentIdParamsSchema,
+  paymentListQuerySchema,
+  updatePaymentStatusSchema,
+} from './payments.schema.js';
+
+import {
+  PaymentsService,
+} from './payments.service.js';
+
+const service =
+  new PaymentsService();
+
+function parseStrict<T>(
+  schema:
+    ZodType<T>,
+  value:
+    unknown
+): T {
+  const result =
+    schema.safeParse(
+      value
+    );
+
+  if (
+    !result.success
+  ) {
+    throw new AppError(
+      'Validation Error',
+      400
+    );
   }
 
-  const { serviceOrderId, customerId } = req.query as {
-    serviceOrderId?: string;
-    customerId?: string;
+  return result.data;
+}
+
+function requireStaff(
+  request:
+    FastifyRequest
+) {
+  const user =
+    getAuthUser(
+      request
+    );
+
+  if (
+    ![
+      'ADMIN',
+      'TECHNICIAN',
+    ].includes(
+      user.role
+    )
+  ) {
+    throw new ForbiddenError(
+      'Payments are available only to organization staff'
+    );
+  }
+
+  return {
+    user,
+    organizationId:
+      requireOrganizationId(
+        user
+      ),
   };
-  return reply.send(await svc.listAll(serviceOrderId, customerId));
 }
 
-// P0.2: CUSTOMER can only access their own payment record.
-export async function getPaymentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const { id } = req.params as { id: string };
-  const authUser = getAuthUser(req);
+function requireAdmin(
+  request:
+    FastifyRequest
+) {
+  const context =
+    requireStaff(
+      request
+    );
 
-  const payment = await svc.findById(id);
-
-  if (authUser.role === 'CUSTOMER') {
-    if (!authUser.customerId || payment.customerId !== authUser.customerId) {
-      throw new ForbiddenError('Access denied: you can only access your own payment records');
-    }
+  if (
+    context.user.role !==
+    'ADMIN'
+  ) {
+    throw new ForbiddenError(
+      'ADMIN role is required'
+    );
   }
 
-  return reply.send(payment);
+  return context;
 }
 
-// ADMIN / TECHNICIAN only
-export async function createPaymentHandler(req: FastifyRequest, reply: FastifyReply) {
-  const operationId = (req.headers['x-operation-id'] as string) ?? '';
-  const body = createPaymentSchema.parse(req.body);
-  return reply.status(201).send(await svc.create(body, operationId));
+function requireOperationId(
+  request:
+    FastifyRequest
+): string {
+  const raw =
+    request.headers[
+      'x-operation-id'
+    ];
+
+  const value =
+    Array.isArray(raw)
+      ? raw[0]
+      : raw;
+
+  const result =
+    operationIdHeaderSchema
+      .safeParse(
+        value
+      );
+
+  if (
+    !result.success
+  ) {
+    throw new AppError(
+      'X-Operation-Id must be a UUID',
+      400
+    );
+  }
+
+  return result.data;
 }
 
-// ADMIN / TECHNICIAN only
-export async function updatePaymentStatusHandler(req: FastifyRequest, reply: FastifyReply) {
-  const { id } = req.params as { id: string };
-  const body = updatePaymentStatusSchema.parse(req.body);
-  return reply.send(await svc.updateStatus(id, body));
+export async function listPaymentsHandler(
+  request:
+    FastifyRequest,
+  reply:
+    FastifyReply
+) {
+  const {
+    organizationId,
+  } =
+    requireStaff(
+      request
+    );
+
+  const query =
+    parseStrict(
+      paymentListQuerySchema,
+      request.query
+    );
+
+  const payments =
+    await service.listAll(
+      organizationId,
+      query
+    );
+
+  return reply.send({
+    payments,
+  });
 }
 
-// ADMIN / TECHNICIAN only — revenue summary is administrative data
-export async function getRevenueSummaryHandler(req: FastifyRequest, reply: FastifyReply) {
-  return reply.send(await svc.getRevenueSummary());
+export async function getPaymentHandler(
+  request:
+    FastifyRequest,
+  reply:
+    FastifyReply
+) {
+  const {
+    organizationId,
+  } =
+    requireStaff(
+      request
+    );
+
+  const params =
+    parseStrict(
+      paymentIdParamsSchema,
+      request.params
+    );
+
+  const payment =
+    await service.findById(
+      organizationId,
+      params.id
+    );
+
+  return reply.send({
+    payment,
+  });
+}
+
+export async function createPaymentHandler(
+  request:
+    FastifyRequest,
+  reply:
+    FastifyReply
+) {
+  const {
+    user,
+    organizationId,
+  } =
+    requireStaff(
+      request
+    );
+
+  const operationId =
+    requireOperationId(
+      request
+    );
+
+  const body =
+    parseStrict(
+      createPaymentSchema,
+      request.body
+    );
+
+  const result =
+    await service.create(
+      organizationId,
+      user.sub,
+      operationId,
+      body
+    );
+
+  return reply
+    .status(
+      result.statusCode
+    )
+    .send(
+      result.body
+    );
+}
+
+export async function updatePaymentStatusHandler(
+  request:
+    FastifyRequest,
+  reply:
+    FastifyReply
+) {
+  const {
+    user,
+    organizationId,
+  } =
+    requireAdmin(
+      request
+    );
+
+  const operationId =
+    requireOperationId(
+      request
+    );
+
+  const params =
+    parseStrict(
+      paymentIdParamsSchema,
+      request.params
+    );
+
+  const body =
+    parseStrict(
+      updatePaymentStatusSchema,
+      request.body
+    );
+
+  const result =
+    await service
+      .updateStatus(
+        organizationId,
+        user.sub,
+        operationId,
+        params.id,
+        body
+      );
+
+  return reply
+    .status(
+      result.statusCode
+    )
+    .send(
+      result.body
+    );
+}
+
+export async function getRevenueSummaryHandler(
+  request:
+    FastifyRequest,
+  reply:
+    FastifyReply
+) {
+  const {
+    organizationId,
+  } =
+    requireAdmin(
+      request
+    );
+
+  const summary =
+    await service
+      .getRevenueSummary(
+        organizationId
+      );
+
+  return reply.send(
+    summary
+  );
 }

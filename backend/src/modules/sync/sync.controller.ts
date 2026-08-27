@@ -542,19 +542,14 @@ async function validateOrganizationOwnership(
         },
 
         select: {
-          serviceOrder: {
-            select: {
-              organizationId:
-                true,
-            },
-          },
+          organizationId:
+            true,
         },
       });
 
     if (
       payment &&
-      payment.serviceOrder
-        .organizationId !==
+      payment.organizationId !==
       organizationId
     ) {
       throw new ForbiddenError(
@@ -936,6 +931,30 @@ export async function pushSyncHandler(
       const entityUpper =
         entry.entityType
           .toUpperCase();
+
+      /**
+       * FIN_F01_GENERIC_PAYMENT_PUSH_BLOCK
+       *
+       * Payment mutations are Finance authority writes and
+       * must use the hardened REST command surface.
+       * Sync remains Pull-compatible only for Payment.
+       */
+      if (
+        entityUpper ===
+        'PAYMENT'
+      ) {
+        results.push({
+          operationId:
+            entry.operationId,
+          status:
+            'FAILED',
+          error:
+            'PAYMENT_GENERIC_SYNC_WRITE_BLOCKED',
+        });
+
+        continue;
+      }
+
       let organizationId =
         defaultOrganizationId;
 
@@ -2498,9 +2517,7 @@ export async function pullSyncHandler(
          */
         prisma.payment.findMany({
           where: {
-            serviceOrder: {
-              organizationId,
-            },
+            organizationId,
           },
 
           select: {
