@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+import {
+  positiveMoneyMinorSchema,
+} from '../../core/money/money.js';
+
 export const paymentMethodSchema = z.enum([
   'DINHEIRO',
   'CARTAO_CREDITO',
@@ -25,12 +29,8 @@ export const paymentIdParamsSchema = z
 export const createPaymentSchema = z
   .object({
     serviceOrderId: z.string().uuid(),
-    amountMinor: z
-      .number()
-      .int()
-      .positive()
-      .safe()
-      .max(999_999_999_999_999),
+    amountMinor:
+      positiveMoneyMinorSchema,
     method: paymentMethodSchema,
     notes: z.string().max(1000).optional(),
   })

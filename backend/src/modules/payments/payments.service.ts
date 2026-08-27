@@ -17,6 +17,11 @@ import {
 } from '../../core/idempotency/idempotency.service.js';
 
 import {
+  decimalToMinorUnits,
+  minorUnitsToDecimal,
+} from '../../core/money/money.js';
+
+import {
   ConflictError,
   NotFoundError,
 } from '../../core/utils/errors.js';
@@ -46,29 +51,6 @@ export type PaymentCommandResult = {
   body: Prisma.InputJsonValue;
 };
 
-function decimalToMinor(
-  value: Prisma.Decimal
-): number {
-  const minor =
-    value.mul(100).toNumber();
-
-  if (!Number.isSafeInteger(minor)) {
-    throw new Error(
-      'Persisted Payment amount cannot be represented as a safe minor-unit integer'
-    );
-  }
-
-  return minor;
-}
-
-function minorToDecimal(
-  amountMinor: number
-): Prisma.Decimal {
-  return new Prisma.Decimal(
-    amountMinor
-  ).div(100);
-}
-
 export function serializePayment(
   payment: PaymentWithCustomer
 ) {
@@ -81,7 +63,7 @@ export function serializePayment(
     customerId:
       payment.customerId,
     amountMinor:
-      decimalToMinor(
+      decimalToMinorUnits(
         payment.amount
       ),
     method:
@@ -384,7 +366,7 @@ export class PaymentsService {
                 clientOperationId:
                   operationId,
                 amount:
-                  minorToDecimal(
+                  minorUnitsToDecimal(
                     data.amountMinor
                   ),
                 method:
@@ -829,19 +811,19 @@ export class PaymentsService {
 
     return {
       totalRevenueMinor:
-        decimalToMinor(
+        decimalToMinorUnits(
           totalRevenue
             ._sum.amount ??
           zero
         ),
       monthRevenueMinor:
-        decimalToMinor(
+        decimalToMinorUnits(
           monthRevenue
             ._sum.amount ??
           zero
         ),
       pendingAmountMinor:
-        decimalToMinor(
+        decimalToMinorUnits(
           pending
             ._sum.amount ??
           zero
