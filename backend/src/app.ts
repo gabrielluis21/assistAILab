@@ -1,4 +1,8 @@
 import fastify from 'fastify';
+import type {
+  FastifyError,
+} from 'fastify';
+
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 
@@ -48,6 +52,12 @@ export function buildApp() {
 
   app.register(jwt, {
     secret: jwtSecret,
+    sign: {
+      algorithm: 'HS256',
+    },
+    verify: {
+      algorithms: ['HS256'],
+    },
   });
 
   // Decorate authenticate and authorize helpers for protected routes
@@ -56,18 +66,23 @@ export function buildApp() {
 
   // Routes
   app.register(healthRoutes);
+
   app.register(authRoutes, {
     prefix: '/api/v1/auth',
   });
+
   app.register(syncRoutes, {
     prefix: '/api/v1/sync',
   });
+
   app.register(customerRoutes, {
     prefix: '/api/v1/customers',
   });
+
   app.register(serviceOrderRoutes, {
     prefix: '/api/v1/service-orders',
   });
+
   app.register(
     serviceOrderCustomerActionRoutes,
     {
@@ -75,9 +90,11 @@ export function buildApp() {
         '/api/v1/service-orders',
     }
   );
+
   app.register(equipmentRoutes, {
     prefix: '/api/v1/equipment',
   });
+
   app.register(
     equipmentAcquisitionRoutes,
     {
@@ -85,6 +102,7 @@ export function buildApp() {
         '/api/v1/equipment-acquisitions',
     }
   );
+
   app.register(paymentsRoutes, {
     prefix: '/api/v1/payments',
   });
@@ -110,16 +128,20 @@ export function buildApp() {
           });
       }
 
+      const fastifyError =
+        error as FastifyError;
+
       if (
-        error.validation
+        fastifyError.validation
       ) {
         return reply
           .status(400)
           .send({
             error:
               'Validation Error',
+
             details:
-              error.validation,
+              fastifyError.validation,
           });
       }
 

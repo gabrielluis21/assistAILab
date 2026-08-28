@@ -1308,7 +1308,7 @@ describe(
           randomUUID();
 
         const adminEmail =
-          `sync-cursor-${runId}@assistailab.test`;
+          `sync-cursor-${runId}@example.com`;
 
         const password =
           'Sync-Cursor@123456';
@@ -1328,25 +1328,6 @@ describe(
 
           process.env.JWT_SECRET =
             'sync-cursor-test-secret-2026';
-
-          const latestChange =
-            await prisma.syncChangeLog.findFirst({
-              orderBy: {
-                id:
-                  'desc',
-              },
-
-              select: {
-                id:
-                  true,
-              },
-            });
-
-          const baselineCursor =
-            latestChange
-              ?.id
-              .toString() ??
-            '0';
 
           const passwordHash =
             await bcrypt.hash(
@@ -1458,6 +1439,20 @@ describe(
 
           unauthorizedChangeId =
             unauthorizedChange.id;
+          /**
+           * T050_CONCURRENCY_STABLE_CURSOR
+           *
+           * O cursor-base aponta para o registro imediatamente
+           * anterior ao change criado pelo proprio teste.
+           *
+           * Isso elimina a race entre a leitura do cursor e
+           * inserts concorrentes de outros testes.
+           */
+          const baselineCursor =
+            (
+              unauthorizedChange.id -
+              1n
+            ).toString();
 
           app =
             buildApp();
@@ -1625,7 +1620,7 @@ test(
       randomUUID();
 
     const email =
-      `sync-failed-retry-${runId}@assistailab.test`;
+      `sync-failed-retry-${runId}@example.com`;
 
     const password =
       'Sync-Failed@123456';
@@ -2009,7 +2004,7 @@ test(
       randomUUID();
 
     const email =
-      `sync-customer-multiorg-${runId}@assistailab.test`;
+      `sync-customer-multiorg-${runId}@example.com`;
 
     const password =
       'Sync-MultiOrg@123456';
@@ -2390,7 +2385,7 @@ test(
       randomUUID();
 
     const email =
-      `sync-domain-effects-${runId}@assistailab.test`;
+      `sync-domain-effects-${runId}@example.com`;
 
     const password =
       'Sync-Domain@123456';
