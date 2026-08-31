@@ -2,6 +2,9 @@ import fastify from 'fastify';
 import type {
   FastifyError,
 } from 'fastify';
+import {
+  ZodError,
+} from 'zod';
 
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -127,6 +130,17 @@ export function buildApp() {
               error.message,
           });
       }
+      if (
+        error instanceof
+        ZodError
+      ) {
+        return reply
+          .status(400)
+          .send({
+            error:
+              'Validation Error',
+          });
+      }
 
       const fastifyError =
         error as FastifyError;
@@ -139,9 +153,6 @@ export function buildApp() {
           .send({
             error:
               'Validation Error',
-
-            details:
-              fastifyError.validation,
           });
       }
 
