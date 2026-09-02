@@ -757,7 +757,8 @@ export async function updateServiceOrderStatusHandler(
   if (
     isFinanceCommandOnlyStatusTransition(
       order.status,
-      body.newStatus
+      body.newStatus,
+      order.financeCoreVersion
     )
   ) {
     return reply

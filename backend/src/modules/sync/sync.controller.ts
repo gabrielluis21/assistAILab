@@ -1539,7 +1539,8 @@ export async function pushSyncHandler(
                 existingOS &&
                 isFinanceCommandOnlyStatusTransition(
                   existingOS.status,
-                  newStatus
+                  newStatus,
+                  existingOS.financeCoreVersion
                 )
               ) {
                 throw new Error(

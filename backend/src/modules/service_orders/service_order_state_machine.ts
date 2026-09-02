@@ -56,8 +56,30 @@ export const ALLOWED_TRANSITIONS: Record<
  */
 export function isFinanceCommandOnlyStatusTransition(
   currentStatus: ServiceOrderStatus,
-  newStatus: ServiceOrderStatus
+  newStatus: ServiceOrderStatus,
+  financeCoreVersion?: number | null
 ): boolean {
+  /**
+   * FIN-F02-R02
+   *
+   * Once a v2 ServiceOrder reaches PRONTO, the Receivable already
+   * exists. Generic cancellation would split operational and financial
+   * truth, so cancellation from this point must fail closed until a
+   * dedicated finance-aware command is formally introduced.
+   *
+   * Legacy ServiceOrders (financeCoreVersion NULL) keep their previous
+   * FIN-F01 transition behavior.
+   */
+  if (
+    financeCoreVersion === 2 &&
+    currentStatus ===
+      ServiceOrderStatus.PRONTO &&
+    newStatus ===
+      ServiceOrderStatus.CANCELADO
+  ) {
+    return true;
+  }
+
   return (
     (
       currentStatus ===

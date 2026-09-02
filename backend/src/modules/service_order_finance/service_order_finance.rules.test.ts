@@ -65,14 +65,38 @@ test(
 );
 
 test(
-  'FIN-F02 does not classify ordinary cancellation as a finance command edge',
+  'FIN-F02 does not classify pre-Receivable ordinary cancellation as a finance command edge',
   () => {
     assert.equal(
       isFinanceCommandOnlyStatusTransition(
         ServiceOrderStatus
           .DIAGNOSTICO,
         ServiceOrderStatus
-          .CANCELADO
+          .CANCELADO,
+        2
+      ),
+      false
+    );
+  }
+);
+
+test(
+  'FIN-F02-R02 blocks generic PRONTO -> CANCELADO only for financeCoreVersion 2',
+  () => {
+    assert.equal(
+      isFinanceCommandOnlyStatusTransition(
+        ServiceOrderStatus.PRONTO,
+        ServiceOrderStatus.CANCELADO,
+        2
+      ),
+      true
+    );
+
+    assert.equal(
+      isFinanceCommandOnlyStatusTransition(
+        ServiceOrderStatus.PRONTO,
+        ServiceOrderStatus.CANCELADO,
+        null
       ),
       false
     );
