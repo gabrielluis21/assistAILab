@@ -38,6 +38,7 @@ import {
 
 import {
   ALLOWED_TRANSITIONS,
+  isFinanceCommandOnlyStatusTransition,
   isValidStatusTransition,
 } from './service_order_state_machine.js';
 
@@ -639,6 +640,13 @@ export async function createServiceOrderHandler(
                   status:
                     ServiceOrderStatus
                       .DIAGNOSTICO,
+
+                  /**
+                   * FIN-F02 cutover is server-owned.
+                   * Client input never selects this value.
+                   */
+                  financeCoreVersion:
+                    2,
                 },
               });
 
@@ -738,6 +746,26 @@ export async function updateServiceOrderStatusHandler(
     return reply.send({
       order,
     });
+  }
+
+  /**
+   * FIN-F02 generic status firewall.
+   *
+   * Command-only edges are rejected even if they are valid
+   * domain transitions.
+   */
+  if (
+    isFinanceCommandOnlyStatusTransition(
+      order.status,
+      body.newStatus
+    )
+  ) {
+    return reply
+      .status(409)
+      .send({
+        error:
+          'FINANCE_COMMAND_REQUIRED',
+      });
   }
 
   if (
@@ -909,6 +937,22 @@ export async function markServiceOrderNotApprovedHandler(
       .send({
         error:
           'Service Order not found',
+      });
+  }
+
+  /**
+   * FIN-F02 decisions must target the exact immutable
+   * QuoteRevision and are not delegated to staff.
+   */
+  if (
+    order.financeCoreVersion ===
+    2
+  ) {
+    return reply
+      .status(409)
+      .send({
+        error:
+          'FIN_F02_EXACT_QUOTE_DECISION_REQUIRED',
       });
   }
 

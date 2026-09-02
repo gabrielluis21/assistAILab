@@ -648,6 +648,22 @@ export class ServiceOrderCustomerActionsService {
           }
 
           /**
+           * FIN-F02 fail-closed bridge.
+           *
+           * Finance Core v2 requires an exact immutable
+           * QuoteRevision decision. The legacy decision path
+           * is intentionally unavailable until Phase 2C.
+           */
+          if (
+            order.financeCoreVersion ===
+            2
+          ) {
+            throw new ConflictError(
+              'FIN_F02_EXACT_QUOTE_DECISION_REQUIRED'
+            );
+          }
+
+          /**
            * ==================================================
            * APPROVE
            * ==================================================

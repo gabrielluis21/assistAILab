@@ -1,0 +1,39 @@
+-- FIN-F02 Phase 2F
+-- Immutable financial scheduling/allocation evidence.
+-- Additive only. No historical DML.
+
+CREATE TRIGGER fin_f02_receivable_schedules_no_update
+BEFORE UPDATE ON receivable_schedules
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_RECEIVABLE_SCHEDULE_IMMUTABLE';
+
+CREATE TRIGGER fin_f02_receivable_schedules_no_delete
+BEFORE DELETE ON receivable_schedules
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_RECEIVABLE_SCHEDULE_IMMUTABLE';
+
+CREATE TRIGGER fin_f02_receivable_installments_no_update
+BEFORE UPDATE ON receivable_installments
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_RECEIVABLE_INSTALLMENT_IMMUTABLE';
+
+CREATE TRIGGER fin_f02_receivable_installments_no_delete
+BEFORE DELETE ON receivable_installments
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_RECEIVABLE_INSTALLMENT_IMMUTABLE';
+
+CREATE TRIGGER fin_f02_payment_allocations_no_update
+BEFORE UPDATE ON payment_allocations
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_PAYMENT_ALLOCATION_IMMUTABLE';
+
+CREATE TRIGGER fin_f02_payment_allocations_no_delete
+BEFORE DELETE ON payment_allocations
+FOR EACH ROW
+SIGNAL SQLSTATE '45000'
+SET MESSAGE_TEXT = 'FIN_F02_PAYMENT_ALLOCATION_IMMUTABLE';

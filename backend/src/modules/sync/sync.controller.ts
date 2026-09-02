@@ -5,6 +5,7 @@
 
 import {
   EquipmentOwnerType,
+  Prisma,
   ServiceOrderStatus,
 } from '@prisma/client';
 
@@ -22,6 +23,7 @@ import {
 } from '../../core/middleware/idempotency.middleware.js';
 
 import {
+  isFinanceCommandOnlyStatusTransition,
   isValidStatusTransition,
 } from '../service_orders/service_order_state_machine.js';
 
@@ -38,6 +40,12 @@ import {
 import {
   ForbiddenError,
 } from '../../core/utils/errors.js';
+
+import {
+  isGenericFinanceSyncPushBlocked,
+  isGenericServiceOrderDeleteBlocked,
+  isGenericSyncPullTypeAllowed,
+} from './sync.fin-f02.rules.js';
 
 /**
  * Reserva atomicamente uma chave de idempotência.
@@ -933,15 +941,18 @@ export async function pushSyncHandler(
           .toUpperCase();
 
       /**
-       * FIN_F01_GENERIC_PAYMENT_PUSH_BLOCK
+       * FIN-F02 GENERIC FINANCE SYNC PUSH FIREWALL
        *
-       * Payment mutations are Finance authority writes and
-       * must use the hardened REST command surface.
-       * Sync remains Pull-compatible only for Payment.
+       * Generic Sync is never a Finance Core command surface.
+       *
+       * PAYMENT preserves the FIN-F01 error contract.
+       * Every other FIN-F02 finance entity receives the dedicated
+       * fail-closed Finance Core error.
        */
       if (
-        entityUpper ===
-        'PAYMENT'
+        isGenericFinanceSyncPushBlocked(
+          entityUpper
+        )
       ) {
         results.push({
           operationId:
@@ -949,7 +960,10 @@ export async function pushSyncHandler(
           status:
             'FAILED',
           error:
-            'PAYMENT_GENERIC_SYNC_WRITE_BLOCKED',
+            entityUpper ===
+              'PAYMENT'
+              ? 'PAYMENT_GENERIC_SYNC_WRITE_BLOCKED'
+              : 'FIN_F02_FINANCE_GENERIC_SYNC_WRITE_BLOCKED',
         });
 
         continue;
@@ -1523,6 +1537,103 @@ export async function pushSyncHandler(
 
               if (
                 existingOS &&
+                isFinanceCommandOnlyStatusTransition(
+                  existingOS.status,
+                  newStatus
+                )
+              ) {
+                throw new Error(
+                  'CONFLICT: FINANCE_COMMAND_REQUIRED'
+                );
+              }
+
+              /**
+               * After the first immutable quote is published,
+               * diagnosis and quoted total are no longer mutable
+               * through generic Sync.
+               *
+               * Equal echoed values are accepted as no-ops so
+               * old full-payload clients do not fail merely for
+               * repeating canonical data.
+               */
+              if (
+                existingOS &&
+                existingOS.currentQuoteRevisionId
+              ) {
+                const hasDiagnosis =
+                  Object.prototype
+                    .hasOwnProperty
+                    .call(
+                      entry.payload,
+                      'diagnosis'
+                    );
+
+                const hasTotalAmount =
+                  Object.prototype
+                    .hasOwnProperty
+                    .call(
+                      entry.payload,
+                      'totalAmount'
+                    ) ||
+                  Object.prototype
+                    .hasOwnProperty
+                    .call(
+                      entry.payload,
+                      'total_amount'
+                    );
+
+                if (
+                  hasDiagnosis &&
+                  (
+                    entry.payload
+                      .diagnosis ??
+                    null
+                  ) !==
+                    existingOS.diagnosis
+                ) {
+                  throw new Error(
+                    'CONFLICT: FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION'
+                  );
+                }
+
+                if (
+                  hasTotalAmount
+                ) {
+                  const requestedTotal =
+                    entry.payload
+                      .total_amount ??
+                    entry.payload
+                      .totalAmount;
+
+                  let sameTotal =
+                    false;
+
+                  try {
+                    sameTotal =
+                      new Prisma.Decimal(
+                        requestedTotal
+                      )
+                        .equals(
+                          existingOS
+                            .totalAmount
+                        );
+                  } catch {
+                    sameTotal =
+                      false;
+                  }
+
+                  if (
+                    !sameTotal
+                  ) {
+                    throw new Error(
+                      'CONFLICT: FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION'
+                    );
+                  }
+                }
+              }
+
+              if (
+                existingOS &&
                 !isValidStatusTransition(
                   existingOS.status,
                   newStatus
@@ -1692,8 +1803,19 @@ export async function pushSyncHandler(
 
                     technicianId,
 
+                    /**
+                     * FIN-F02 server-owned cutover.
+                     *
+                     * Generic Sync may transport the local CREATE,
+                     * but it cannot choose the initial workflow state
+                     * or Finance Core version.
+                     */
                     status:
-                      newStatus,
+                      ServiceOrderStatus
+                        .DIAGNOSTICO,
+
+                    financeCoreVersion:
+                      2,
 
                     problemDescription,
 
@@ -1719,22 +1841,34 @@ export async function pushSyncHandler(
                     status:
                       newStatus,
 
-                    diagnosis:
-                      entry.payload
-                        .diagnosis ??
-                      null,
+                    /**
+                     * Published commercial fields are immutable
+                     * through generic Sync. Equal echoed values
+                     * were validated above and are ignored here.
+                     */
+                    ...(
+                      existingOS
+                        ?.currentQuoteRevisionId
+                        ? {}
+                        : {
+                          diagnosis:
+                            entry.payload
+                              .diagnosis ??
+                            null,
+
+                          totalAmount:
+                            entry.payload
+                              .total_amount ??
+                            entry.payload
+                              .totalAmount ??
+                            0,
+                        }
+                    ),
 
                     solution:
                       entry.payload
                         .solution ??
                       null,
-
-                    totalAmount:
-                      entry.payload
-                        .total_amount ??
-                      entry.payload
-                        .totalAmount ??
-                      0,
                   },
                 });
               /**
@@ -1813,6 +1947,38 @@ export async function pushSyncHandler(
               entry.operationType ===
               'DELETE'
             ) {
+              const existingForDelete =
+                await tx
+                  .serviceOrder
+                  .findUnique({
+                    where: {
+                      id:
+                        entry.entityId,
+                    },
+
+                    select: {
+                      financeCoreVersion:
+                        true,
+
+                      currentQuoteRevisionId:
+                        true,
+                    },
+                  });
+
+              if (
+                existingForDelete &&
+                isGenericServiceOrderDeleteBlocked(
+                  existingForDelete
+                )
+              ) {
+                throw new Error(
+                  'FORBIDDEN: FIN_F02_SERVICE_ORDER_GENERIC_DELETE_BLOCKED'
+                );
+              }
+
+              /**
+               * Legacy behavior stays separate from FIN-F02.
+               */
               await tx.serviceOrder
                 .delete({
                   where: {
@@ -1960,6 +2126,12 @@ export async function pushSyncHandler(
 
                     customerId:
                       true,
+
+                    financeCoreVersion:
+                      true,
+
+                    currentQuoteRevisionId:
+                      true,
                   },
                 });
 
@@ -1988,6 +2160,15 @@ export async function pushSyncHandler(
               ) {
                 throw new ForbiddenError(
                   'CUSTOMER cannot modify another Customer Service Order Item'
+                );
+              }
+
+              if (
+                serviceOrder
+                  .currentQuoteRevisionId
+              ) {
+                throw new ForbiddenError(
+                  'FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION'
                 );
               }
 
@@ -2063,6 +2244,70 @@ export async function pushSyncHandler(
               entry.operationType ===
               'DELETE'
             ) {
+              const existingItem =
+                await tx
+                  .serviceOrderItem
+                  .findUnique({
+                    where: {
+                      id:
+                        entry.entityId,
+                    },
+
+                    select: {
+                      serviceOrder: {
+                        select: {
+                          organizationId:
+                            true,
+
+                          customerId:
+                            true,
+
+                          currentQuoteRevisionId:
+                            true,
+                        },
+                      },
+                    },
+                  });
+
+              if (
+                existingItem
+                  ?.serviceOrder
+                  .organizationId !==
+                undefined &&
+                existingItem
+                  .serviceOrder
+                  .organizationId !==
+                organizationId
+              ) {
+                throw new ForbiddenError(
+                  'Service Order Item does not belong to the authenticated organization'
+                );
+              }
+
+              if (
+                authUser.role ===
+                  'CUSTOMER' &&
+                existingItem &&
+                existingItem
+                  .serviceOrder
+                  .customerId !==
+                authUser.customerId
+              ) {
+                throw new ForbiddenError(
+                  'CUSTOMER cannot modify another Customer Service Order Item'
+                );
+              }
+
+              if (
+                existingItem
+                  ?.serviceOrder
+                  .currentQuoteRevisionId
+              ) {
+                throw new ForbiddenError(
+                  'FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION'
+                );
+              }
+
               await tx.serviceOrderItem
                 .delete({
                   where: {
@@ -2289,6 +2534,17 @@ export async function pullSyncHandler(
     Set<string>;
 
   /**
+   * FIN-F01 compatibility boundary.
+   *
+   * Only actually-owned Payments whose ServiceOrder has never entered
+   * FIN-F02 may remain visible to ADMIN/TECH through legacy Sync Pull.
+   *
+   * CUSTOMER never receives PAYMENT through generic Sync.
+   */
+  let authorizedLegacyPaymentIds =
+    new Set<string>();
+
+  /**
    * CUSTOMER
    */
   if (
@@ -2501,6 +2757,13 @@ export async function pullSyncHandler(
           select: {
             id:
               true,
+
+            serviceOrder: {
+              select: {
+                financeCoreVersion:
+                  true,
+              },
+            },
           },
         }),
       ]);
@@ -2523,11 +2786,26 @@ export async function pullSyncHandler(
           order.id
       );
 
-    const paymentIds =
-      payments.map(
-        (payment) =>
-          payment.id
+    authorizedLegacyPaymentIds =
+      new Set<string>(
+        payments
+          .filter(
+            (payment) =>
+              payment
+                .serviceOrder
+                .financeCoreVersion ===
+              null
+          )
+          .map(
+            (payment) =>
+              payment.id
+          )
       );
+
+    const paymentIds =
+      [
+        ...authorizedLegacyPaymentIds,
+      ];
 
     /**
      * Part ainda e global no schema atual.
@@ -2604,26 +2882,46 @@ export async function pullSyncHandler(
     });
 
   /**
-   * Filtra somente entidades
-   * que o usuário atual pode receber.
+   * FIN-F02 GENERIC SYNC PULL FIREWALL
+   *
+   * Authorization is now two-dimensional:
+   * 1. entity type must be explicitly allowed by the Sync contract;
+   * 2. entity id must belong to the authenticated principal/tenant.
+   *
+   * This prevents a sensitive/unknown entityType from leaking merely
+   * because its entityId collides with an authorized resource id.
+   *
+   * PAYMENT is special:
+   * - CUSTOMER: denied;
+   * - FIN-F02: denied;
+   * - ADMIN/TECH legacy FIN-F01: allowed only when the actual Payment
+   *   belongs to the organization and its ServiceOrder.financeCoreVersion
+   *   is NULL.
    */
   const changes =
     allChanges.filter(
       (change) => {
-        /**
-         * FIN_F01_CUSTOMER_PAYMENT_PULL_DENY
-         *
-         * CUSTOMER is outside Finance V1.
-         * Deny PAYMENT by entity type in addition to ID authorization
-         * so an authorized entity-ID collision cannot expose Payment
-         * SyncChangeLog payloads.
-         */
-        if (
-          authUser.role ===
-            'CUSTOMER' &&
+        const entityUpper =
           change.entityType
-            .toUpperCase() ===
-            'PAYMENT'
+            .toUpperCase();
+
+        const typeAllowed =
+          isGenericSyncPullTypeAllowed({
+            entityType:
+              entityUpper,
+
+            role:
+              authUser.role,
+
+            isAuthorizedLegacyPayment:
+              authorizedLegacyPaymentIds
+                .has(
+                  change.entityId
+                ),
+          });
+
+        if (
+          !typeAllowed
         ) {
           return false;
         }

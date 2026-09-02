@@ -3697,32 +3697,116 @@ describe(
         ServiceOrderStatus.DIAGNOSTICO
       );
 
-      const awaiting =
+      /**
+       * C7_FIN_F02_COMMAND_FLOW
+       *
+       * The public ServiceOrder CREATE surface intentionally does not
+       * accept commercial diagnosis/price fields. Prepare the diagnosed
+       * live scope as fixture state, then exercise every FIN-F02 protected
+       * transition through its public command endpoint.
+       */
+      const prepared =
+        await prisma.serviceOrder.update({
+          where: {
+            id:
+              created.id,
+          },
+
+          data: {
+            diagnosis:
+              'C7 approved diagnostic scope',
+
+            totalAmount:
+              '150.00',
+          },
+        });
+
+      assert.equal(
+        prepared.status,
+        ServiceOrderStatus.DIAGNOSTICO
+      );
+
+      assert.equal(
+        prepared.financeCoreVersion,
+        2
+      );
+
+      const preparedLine =
+        await prisma.serviceOrderItem.create({
+          data: {
+            serviceOrderId:
+              created.id,
+
+            partId:
+              null,
+
+            description:
+              'C7 approved labor line',
+
+            quantity:
+              1,
+
+            unitPrice:
+              '150.00',
+
+            totalPrice:
+              '150.00',
+          },
+        });
+
+      assert.equal(
+        preparedLine.serviceOrderId,
+        created.id
+      );
+
+      const publishOperationId =
+        randomUUID();
+
+      const published =
         await app.inject({
           method:
-            'PATCH',
+            'POST',
 
           url:
-            `/api/v1/service-orders/${created.id}/status`,
+            `/api/v1/service-orders/${created.id}/quotes/publish`,
 
           headers: {
             authorization:
               `Bearer ${adminToken}`,
+
+            'x-operation-id':
+              publishOperationId,
           },
 
           payload: {
-            newStatus:
-              ServiceOrderStatus
-                .AGUARDANDO_APROVACAO,
-
-            notes:
+            changeReason:
               'Diagnóstico concluído e orçamento apresentado',
           },
         });
 
       assert.equal(
-        awaiting.statusCode,
-        200
+        published.statusCode,
+        201
+      );
+
+      assert.equal(
+        published.json().order.status,
+        ServiceOrderStatus
+          .AGUARDANDO_APROVACAO
+      );
+
+      const publishedQuoteRevisionId =
+        published
+          .json()
+          .quoteRevision
+          .id as string;
+
+      assert.equal(
+        published
+          .json()
+          .order
+          .currentQuoteRevisionId,
+        publishedQuoteRevisionId
       );
 
       const beforeApproveChange =
@@ -3757,11 +3841,20 @@ describe(
           headers: {
             authorization:
               `Bearer ${customerToken}`,
+
+            'x-operation-id':
+              randomUUID(),
           },
 
           payload: {
+            quoteRevisionId:
+              publishedQuoteRevisionId,
+
             decision:
               'APPROVE',
+
+            reason:
+              'C7 explicit approval of the exact published revision',
           },
         });
 
@@ -3773,6 +3866,14 @@ describe(
       assert.equal(
         approved.json().order.status,
         ServiceOrderStatus.EM_EXECUCAO
+      );
+
+      assert.equal(
+        approved
+          .json()
+          .order
+          .lastApprovedQuoteRevisionId,
+        publishedQuoteRevisionId
       );
 
       /**
@@ -3830,25 +3931,49 @@ describe(
       const ready =
         await app.inject({
           method:
-            'PATCH',
+            'POST',
 
           url:
-            `/api/v1/service-orders/${created.id}/status`,
+            `/api/v1/service-orders/${created.id}/mark-ready`,
 
           headers: {
             authorization:
               `Bearer ${adminToken}`,
+
+            'x-operation-id':
+              randomUUID(),
           },
 
           payload: {
-            newStatus:
-              ServiceOrderStatus.PRONTO,
+            notes:
+              'C7 execution completed; issue receivable atomically',
           },
         });
 
       assert.equal(
         ready.statusCode,
-        200
+        201
+      );
+
+      assert.equal(
+        ready.json().order.status,
+        ServiceOrderStatus.PRONTO
+      );
+
+      assert.equal(
+        ready
+          .json()
+          .receivable
+          .financialStatus,
+        'A_RECEBER'
+      );
+
+      assert.equal(
+        ready
+          .json()
+          .receivable
+          .sourceQuoteRevisionId,
+        publishedQuoteRevisionId
       );
 
       const delivered =
@@ -4026,92 +4151,17 @@ describe(
 
     after(
       async () => {
-        await prisma.customerEvent.deleteMany({
-          where: {
-            serviceOrderId: {
-              in:
-                createdOrderIds,
-            },
-          },
-        });
-
         /**
-         * CUSTOMER_ACTION_SYNC_TEST_C7_CLEANUP
+         * C7_FIN_F02_APPEND_ONLY_TEST_CLEANUP
+         *
+         * FIN-F02 success now creates append-only FinancialAuditEvent
+         * rows and immutable receivable history. Deleting individual
+         * C7 domain rows would violate the production integrity model.
+         *
+         * C7 therefore relies on the disposable-database boundary used
+         * by the backend/security gates. Random UUID/email fixture
+         * identities prevent cross-test collisions inside the run.
          */
-        await prisma.syncChangeLog.deleteMany({
-          where: {
-            entityId: {
-              in:
-                createdOrderIds,
-            },
-          },
-        });
-
-        await prisma.serviceOrderStatusHistory.deleteMany({
-          where: {
-            serviceOrderId: {
-              in:
-                createdOrderIds,
-            },
-          },
-        });
-
-        await prisma.serviceOrder.deleteMany({
-          where: {
-            id: {
-              in:
-                createdOrderIds,
-            },
-          },
-        });
-
-        await prisma.equipment.deleteMany({
-          where: {
-            id: {
-              in:
-                createdEquipmentIds,
-            },
-          },
-        });
-
-        await prisma.membership.deleteMany({
-          where: {
-            userId:
-              adminId,
-          },
-        });
-
-        await prisma.user.deleteMany({
-          where: {
-            id: {
-              in: [
-                adminId,
-                customerUserId,
-              ],
-            },
-          },
-        });
-
-        await prisma.customerOrganization.deleteMany({
-          where: {
-            customerId,
-          },
-        });
-
-        await prisma.customer.delete({
-          where: {
-            id:
-              customerId,
-          },
-        });
-
-        await prisma.organization.delete({
-          where: {
-            id:
-              organizationId,
-          },
-        });
-
         await app.close();
 
         if (

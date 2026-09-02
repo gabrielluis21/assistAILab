@@ -9,6 +9,11 @@ import {
 } from '../../core/middleware/auth.middleware.js';
 
 import {
+  prisma,
+} from '../../core/database/prisma.js';
+
+import {
+  AppError,
   ForbiddenError,
 } from '../../core/utils/errors.js';
 
@@ -17,6 +22,19 @@ import {
   markReturnedSchema,
   quoteDecisionSchema,
 } from './service_order_customer_actions.schema.js';
+
+import {
+  authorizeFinanceCustomerMutationLive,
+} from '../service_order_finance/service_order_finance.authorization.js';
+
+import {
+  executeFinanceCommand,
+  parseFinanceOperationIdHeader,
+} from '../service_order_finance/service_order_finance.controller.js';
+
+import {
+  customerQuoteDecisionFinanceService,
+} from '../service_order_finance/customer_quote_decision.service.js';
 
 import {
   serviceOrderCustomerActionsService,
@@ -165,6 +183,11 @@ export async function customerQuoteDecisionHandler(
       id: string;
     };
 
+  const authUser =
+    getAuthUser(
+      request
+    );
+
   const {
     customerId,
     userId,
@@ -179,16 +202,104 @@ export async function customerQuoteDecisionHandler(
         request.body
       );
 
-  const result =
-    await serviceOrderCustomerActionsService
-      .decideQuote(
-        id,
-        customerId,
-        userId,
-        body
-      );
+  /**
+   * Preserve legacy C6/C7 for pre-FIN-F02 orders.
+   *
+   * FIN-F02 is detected only from server-owned fields.
+   */
+  const orderMarker =
+    await prisma
+      .serviceOrder
+      .findFirst({
+        where: {
+          id,
+          customerId,
+        },
 
-  return reply.send(
-    result
+        select: {
+          financeCoreVersion:
+            true,
+
+          currentQuoteRevisionId:
+            true,
+        },
+      });
+
+  const financeCoreV2 =
+    orderMarker
+      ?.financeCoreVersion ===
+      2 ||
+    Boolean(
+      orderMarker
+        ?.currentQuoteRevisionId
+    );
+
+  if (
+    !financeCoreV2
+  ) {
+    const result =
+      await serviceOrderCustomerActionsService
+        .decideQuote(
+          id,
+          customerId,
+          userId,
+          body
+        );
+
+    return reply.send(
+      result
+    );
+  }
+
+  /**
+   * FIN-F02 frozen order:
+   * live auth -> exact X-Operation-Id -> H02 -> SO lock -> quote lock.
+   */
+  await authorizeFinanceCustomerMutationLive(
+    authUser
+  );
+
+  const quoteRevisionId =
+    body.quoteRevisionId;
+
+  if (
+    !quoteRevisionId
+  ) {
+    throw new AppError(
+      'quoteRevisionId is required for FIN-F02 quote decisions',
+      400
+    );
+  }
+
+  const operationId =
+    parseFinanceOperationIdHeader(
+      request.headers[
+        'x-operation-id'
+      ],
+      request.raw
+        .rawHeaders
+    );
+
+  return executeFinanceCommand(
+    reply,
+    () =>
+      customerQuoteDecisionFinanceService
+        .decideExactQuoteRevision(
+          customerId,
+          userId,
+          operationId,
+          id,
+          {
+            quoteRevisionId,
+
+            decision:
+              body
+                .decision,
+
+            reason:
+              body
+                .reason,
+          }
+        )
   );
 }
