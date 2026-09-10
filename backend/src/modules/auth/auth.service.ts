@@ -130,14 +130,8 @@ export class AuthService {
 
           include: {
             memberships: {
-              include: {
-                organization:
-                  true,
-              },
-
               orderBy: {
-                createdAt:
-                  'asc',
+                createdAt: 'asc',
               },
             },
           },

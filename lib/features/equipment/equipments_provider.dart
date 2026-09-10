@@ -12,7 +12,7 @@ final equipmentRepositoryProvider = Provider<EquipmentRepository>(
   (ref) => EquipmentLocalDataSource(),
 );
 
-class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
+class EquipmentsNotifier extends AutoDisposeAsyncNotifier<List<EquipmentEntity>> {
   @override
   Future<List<EquipmentEntity>> build() async {
     return _load();
@@ -100,7 +100,6 @@ class EquipmentsNotifier extends AsyncNotifier<List<EquipmentEntity>> {
   }
 }
 
-final equipmentsProvider =
-    AsyncNotifierProvider<EquipmentsNotifier, List<EquipmentEntity>>(
-  EquipmentsNotifier.new,
+final equipmentsProvider = AutoDisposeAsyncNotifierProvider<EquipmentsNotifier, List<EquipmentEntity>>(
+    EquipmentsNotifier.new,
 );

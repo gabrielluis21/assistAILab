@@ -44,7 +44,7 @@ List<ServiceOrderStatusEnum> allowedTransitionsFor(
   return _allowedTransitions[current] ?? <ServiceOrderStatusEnum>[];
 }
 
-class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
+class ServiceOrdersNotifier extends AutoDisposeAsyncNotifier<List<ServiceOrderEntity>> {
   @override
   Future<List<ServiceOrderEntity>> build() async {
     return _load();
@@ -136,7 +136,6 @@ class ServiceOrdersNotifier extends AsyncNotifier<List<ServiceOrderEntity>> {
   }
 }
 
-final serviceOrdersProvider =
-    AsyncNotifierProvider<ServiceOrdersNotifier, List<ServiceOrderEntity>>(
-  ServiceOrdersNotifier.new,
+final serviceOrdersProvider = AutoDisposeAsyncNotifierProvider<ServiceOrdersNotifier, List<ServiceOrderEntity>>(
+    ServiceOrdersNotifier.new,
 );

@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import '../../core/database/assert_web_no_sqlite.dart';
 import 'dart:math';
 import 'package:sqflite/sqflite.dart';
 import '../network/api_client.dart';
@@ -39,9 +41,15 @@ class SyncEngine {
     required this.apiClient,
     OutboxDao? outboxDao,
   }) : outboxDao = outboxDao ?? OutboxDao();
+  final ApiClient apiClient;
+  final OutboxDao outboxDao;
 
-  Future<String?> getLocalCursor() async {
-    final db = await SqliteDatabase.instance;
+
+
+
+  Future<String?> getLocalCursor({DatabaseExecutor? executor}) async {
+    assertWebNoSqlite();
+    final db = executor ?? await SqliteDatabase.instance;
     final res = await db
         .query('sync_metadata', where: 'key = ?', whereArgs: ['last_cursor']);
     if (res.isNotEmpty) {
@@ -50,8 +58,12 @@ class SyncEngine {
     return null;
   }
 
-  Future<void> saveLocalCursor(String cursor) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> saveLocalCursor(
+    String cursor,
+    {
+      DatabaseExecutor? executor,
+    }) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'sync_metadata',
       {'key': 'last_cursor', 'value': cursor},
@@ -70,8 +82,16 @@ class SyncEngine {
   }
 
   /// Executes push for pending outbox entries in batches.
-  Future<SyncPushSummary> pushPendingOutbox({int batchSize = 20}) async {
-    final pendingEntries = await outboxDao.getPendingEntries(limit: batchSize);
+  Future<SyncPushSummary> pushPendingOutbox({
+    int batchSize = 20,
+    Database? db,
+  }) async {
+    assertWebNoSqlite();
+    final targetDb = db ?? await SqliteDatabase.instance;
+    final pendingEntries = await outboxDao.getPendingEntries(
+      limit: batchSize,
+      executor: targetDb,
+    );
     if (pendingEntries.isEmpty) {
       return const SyncPushSummary();
     }
@@ -86,6 +106,7 @@ class SyncEngine {
         item.operationId,
         'PROCESSING',
         lastAttemptAt: nowIso,
+        executor: targetDb,
       );
     }
 
@@ -111,7 +132,11 @@ class SyncEngine {
           final error = res['error'] as String?;
 
           if (status == 'SYNCED') {
-            await outboxDao.updateStatus(opId, 'SYNCED');
+            await outboxDao.updateStatus(
+              opId,
+              'SYNCED',
+              executor: targetDb,
+            );
             synced++;
           } else {
             final existing =
@@ -134,6 +159,7 @@ class SyncEngine {
               lastAttemptAt: DateTime.now().toIso8601String(),
               nextRetryAt: nextRetry,
               lastError: error ?? 'Sync rejected by server',
+              executor: targetDb,
             );
           }
         }
@@ -150,6 +176,7 @@ class SyncEngine {
             lastAttemptAt: DateTime.now().toIso8601String(),
             nextRetryAt: nextRetry,
             lastError: 'HTTP ${response.statusCode}: ${response.body}',
+            executor: targetDb,
           );
         }
         throw Exception('HTTP ${response.statusCode}: Push failed');
@@ -168,6 +195,7 @@ class SyncEngine {
             lastAttemptAt: DateTime.now().toIso8601String(),
             nextRetryAt: nextRetry,
             lastError: e.toString(),
+            executor: targetDb,
           );
         }
       }
@@ -191,9 +219,11 @@ class SyncEngine {
   Future<SyncPullSummary> pullIncrementalChanges({
     int pullPageSize = 50,
     int maxPullPagesPerCycle = 10,
+    Database? db,
   }) async {
+    final targetDb = db ?? await SqliteDatabase.instance;
     int totalPulled = 0;
-    String? previousCursor = await getLocalCursor();
+    String? previousCursor = await getLocalCursor(executor: targetDb);
     String? latestCursor = previousCursor;
     int pageCount = 0;
 
@@ -203,8 +233,8 @@ class SyncEngine {
           : '?limit=$pullPageSize';
 
       final response = await apiClient
-          .get('/sync/changes$cursorParam')
-          .timeout(const Duration(seconds: 15));
+        .get('/sync/changes$cursorParam')
+        .timeout(const Duration(seconds: 15));
 
       if (response.statusCode != 200) {
         throw Exception('HTTP ${response.statusCode}: Pull changes failed');
@@ -216,10 +246,8 @@ class SyncEngine {
 
       pageCount++;
 
-      final db = await SqliteDatabase.instance;
-
-      // BEGIN ATOMIC TRANSACTION (Changes + Cursor)
-      await db.transaction((txn) async {
+      // BEGIN ATOMIC TRANSACTION (Changes + Cursor) bound to targetDb
+    await targetDb.transaction((txn) async {
         for (final change in changes) {
           final entityType = (change['entityType'] as String).toUpperCase();
           final entityId = change['entityId'] as String;
@@ -397,11 +425,11 @@ class SyncEngine {
 
       totalPulled += changes.length;
 
-      // Cursor-progress termination:
-      // Stop when cursor did not advance (stabilised) or server sent no cursor.
-      final cursorAdvanced = nextCursor != null &&
-          nextCursor.isNotEmpty &&
-          nextCursor != latestCursor;
+    // Cursor-progress termination:
+    // Stop when cursor did not advance (stabilised) or server sent no cursor.
+    final cursorAdvanced = nextCursor != null &&
+        nextCursor.isNotEmpty &&
+        nextCursor != latestCursor;
 
       if (cursorAdvanced) {
         previousCursor = latestCursor;
@@ -416,5 +444,13 @@ class SyncEngine {
       totalChanges: totalPulled,
       nextCursor: latestCursor,
     );
+  }
+
+  /// Performs a full synchronization cycle using the same executor/database.
+  /// Executes push of pending outbox entries followed by pull of server changes.
+  Future<void> performSync({Database? db}) async {
+    final targetDb = db ?? await SqliteDatabase.instance;
+    await pushPendingOutbox(db: targetDb);
+    await pullIncrementalChanges(db: targetDb);
   }
 }

@@ -26,6 +26,9 @@ import 'package:assistailab/features/parts/part_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
 
+import 'package:assistailab/core/database/auth_scoped_database_manager.dart';
+import 'package:assistailab/features/auth/domain/entities/auth_scope.dart';
+
 class FakeApiClient extends ApiClient {
   int pushCalls = 0;
   int pullCalls = 0;
@@ -42,11 +45,12 @@ class FakeOutboxDao extends OutboxDao {
   List<OutboxItem> pendingItems = [];
 
   @override
-  Future<int> getPendingCount() async => pendingCount;
+  Future<int> getPendingCount({DatabaseExecutor? executor}) async => pendingCount;
 
   @override
   Future<int> recoverProcessingEntries({
     Duration timeout = const Duration(minutes: 5),
+    DatabaseExecutor? executor,
   }) async {
     final count = recoveredCount;
     recoveredCount = 0;
@@ -54,7 +58,7 @@ class FakeOutboxDao extends OutboxDao {
   }
 
   @override
-  Future<List<OutboxItem>> getPendingEntries({int limit = 20}) async =>
+  Future<List<OutboxItem>> getPendingEntries({int limit = 20, DatabaseExecutor? executor}) async =>
       pendingItems;
 }
 
@@ -135,6 +139,14 @@ void main() {
     Hive.init(tempDir.path);
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
+  });
+
+  setUp(() async {
+    const testScope = ProfessionalAuthScope(
+      userId: 'test-user-sync',
+      organizationId: 'test-org-sync',
+    );
+    await AuthScopedDatabaseManager.instance.openDatabaseForScope(testScope);
   });
 
   group('SyncTrigger & SyncState Unit Tests', () {

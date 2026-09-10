@@ -28,6 +28,20 @@ class BackgroundSyncCoordinator {
   bool _hasPendingCatchUp = false;
   SyncTrigger? _pendingCatchUpTrigger;
   Timer? _debounceTimer;
+  int _currentGeneration = 0;
+  bool _isDisposed = false;
+
+  /// Cancels any active or scheduled sync cycle.
+  ///
+  /// Increments [_currentGeneration] to invalidate any in-flight async operations
+  /// and clears pending catch-ups.
+  void cancelActiveSync() {
+    _currentGeneration++;
+    _isSyncing = false;
+    _hasPendingCatchUp = false;
+    _pendingCatchUpTrigger = null;
+    _debounceTimer?.cancel();
+  }
 
   /// Whether the last completed sync cycle performed any real work.
   ///
@@ -96,6 +110,7 @@ class BackgroundSyncCoordinator {
     SyncTrigger trigger, {
     Duration debounceDuration = const Duration(milliseconds: 400),
   }) async {
+    if (_isDisposed) return;
     if (trigger == SyncTrigger.localMutation) {
       _debounceTimer?.cancel();
       _debounceTimer = Timer(debounceDuration, () {
@@ -109,14 +124,18 @@ class BackgroundSyncCoordinator {
   }
 
   Future<void> _dispatchSync(SyncTrigger trigger) async {
+    if (_isDisposed) return;
     if (_isSyncing) {
       _hasPendingCatchUp = true;
       _pendingCatchUpTrigger = trigger;
       return;
     }
 
+    final cycleGeneration = ++_currentGeneration;
     _isSyncing = true;
     final pendingCount = await _getPendingOutboxCount();
+
+    if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
     _emitState(state.copyWith(
       status: SyncStatus.syncing,
@@ -126,11 +145,17 @@ class BackgroundSyncCoordinator {
     ));
 
     try {
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+
       // 1. Push Phase: process pending Outbox entries
       final pushSummary = await syncEngine.pushPendingOutbox();
 
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+
       // 2. Pull Phase: fetch incremental updates from server
       final pullSummary = await syncEngine.pullIncrementalChanges();
+
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
       // Determine whether this cycle performed any real work.
       // Push counts as work if at least one entry was processed.
@@ -141,6 +166,8 @@ class BackgroundSyncCoordinator {
       final remainingPending = await _getPendingOutboxCount();
       final now = DateTime.now();
 
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+
       _emitState(state.copyWith(
         status: SyncStatus.idle,
         isSyncing: false,
@@ -149,9 +176,13 @@ class BackgroundSyncCoordinator {
         clearLastError: true,
       ));
     } catch (e) {
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+
       debugPrint('❌ BackgroundSyncCoordinator Sync Error: $e');
       lastCycleDidWork = false;
       final remainingPending = await _getPendingOutboxCount();
+
+      if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
       _emitState(state.copyWith(
         status: SyncStatus.error,
@@ -160,16 +191,18 @@ class BackgroundSyncCoordinator {
         pendingOutboxCount: remainingPending,
       ));
     } finally {
-      _isSyncing = false;
+      if (cycleGeneration == _currentGeneration) {
+        _isSyncing = false;
 
-      // Handle catch-up if triggers were enqueued while syncing
-      if (_hasPendingCatchUp) {
-        final nextTrigger =
-            _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
-        _hasPendingCatchUp = false;
-        _pendingCatchUpTrigger = null;
-        // Run next cycle asynchronously without blocking
-        scheduleMicrotask(() => _dispatchSync(nextTrigger));
+        // Handle catch-up if triggers were enqueued while syncing
+        if (_hasPendingCatchUp && !_isDisposed) {
+          final nextTrigger =
+              _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
+          _hasPendingCatchUp = false;
+          _pendingCatchUpTrigger = null;
+          // Run next cycle asynchronously without blocking
+          scheduleMicrotask(() => _dispatchSync(nextTrigger));
+        }
       }
     }
   }
@@ -188,6 +221,7 @@ class BackgroundSyncCoordinator {
   }
 
   void _emitState(SyncState newState) {
+    if (_isDisposed) return;
     _stateNotifier.value = newState;
     if (!_stateController.isClosed) {
       _stateController.add(newState);
@@ -195,7 +229,8 @@ class BackgroundSyncCoordinator {
   }
 
   void dispose() {
-    _debounceTimer?.cancel();
+    _isDisposed = true;
+    cancelActiveSync();
     _stateController.close();
     _stateNotifier.dispose();
   }

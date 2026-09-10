@@ -14,7 +14,7 @@ final customerRepositoryProvider = Provider<CustomerRepository>(
 );
 
 // Customers state
-class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
+class CustomersNotifier extends AutoDisposeAsyncNotifier<List<CustomerEntity>> {
   @override
   Future<List<CustomerEntity>> build() async {
     return _load();
@@ -102,7 +102,6 @@ class CustomersNotifier extends AsyncNotifier<List<CustomerEntity>> {
   }
 }
 
-final customersProvider =
-    AsyncNotifierProvider<CustomersNotifier, List<CustomerEntity>>(
+final customersProvider = AutoDisposeAsyncNotifierProvider<CustomersNotifier, List<CustomerEntity>>(
   CustomersNotifier.new,
 );

@@ -95,8 +95,11 @@ class OutboxDao {
     );
   }
 
-  Future<List<OutboxItem>> getPendingEntries({int limit = 20}) async {
-    final db = await SqliteDatabase.instance;
+  Future<List<OutboxItem>> getPendingEntries({
+    int limit = 20,
+    DatabaseExecutor? executor,
+  }) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final nowIso = DateTime.now().toIso8601String();
     final maps = await db.query(
       'outbox',
@@ -116,8 +119,9 @@ class OutboxDao {
     String? lastAttemptAt,
     String? nextRetryAt,
     String? lastError,
+    DatabaseExecutor? executor,
   }) async {
-    final db = await SqliteDatabase.instance;
+    final db = executor ?? await SqliteDatabase.instance;
     final data = <String, dynamic>{'status': status};
     if (attemptCount != null) {
       data['attempt_count'] = attemptCount;
@@ -139,8 +143,8 @@ class OutboxDao {
     );
   }
 
-  Future<void> delete(String operationId) async {
-    final db = await SqliteDatabase.instance;
+  Future<void> delete(String operationId, {DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     await db.delete(
       'outbox',
       where: 'operation_id = ?',
@@ -152,8 +156,9 @@ class OutboxDao {
   /// by transitioning them to FAILED so they can be diagnosed and retried.
   Future<int> recoverProcessingEntries({
     Duration timeout = const Duration(minutes: 5),
+    DatabaseExecutor? executor,
   }) async {
-    final db = await SqliteDatabase.instance;
+    final db = executor ?? await SqliteDatabase.instance;
     final cutoff = DateTime.now().subtract(timeout).toIso8601String();
     return db.update(
       'outbox',
@@ -167,8 +172,8 @@ class OutboxDao {
   }
 
   /// Returns total count of pending and failed entries waiting for synchronization.
-  Future<int> getPendingCount() async {
-    final db = await SqliteDatabase.instance;
+  Future<int> getPendingCount({DatabaseExecutor? executor}) async {
+    final db = executor ?? await SqliteDatabase.instance;
     final res = await db.rawQuery(
       'SELECT COUNT(*) as count FROM outbox WHERE status IN (?, ?, ?)',
       ['PENDING', 'PROCESSING', 'FAILED'],

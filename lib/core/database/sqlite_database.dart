@@ -1,21 +1,22 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'auth_scoped_database_manager.dart';
 
 import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
 class SqliteDatabase {
-  static Database? _database;
-
+  /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
+  ///
+  /// Lança [StateError] se nenhum escopo válido estiver ativo.
   static Future<Database> get instance async {
-    if (_database != null) return _database!;
-
-    _database = await _initDatabase();
-    return _database!;
+    assertWebNoSqlite();
+    return AuthScopedDatabaseManager.instance.activeDatabase;
   }
 
-  static Future<Database> _initDatabase() async {
+  /// Abre e inicializa o banco de dados SQLite com o nome [dbFileName] especificado,
+  /// aplicando o schema e migrations necessárias.
+  static Future<Database> openDatabaseByName(String dbFileName) async {
     if (kIsWeb) {
       throw UnsupportedError(
         'SQLite is not available on the Web platform. Use the API directly.',
@@ -27,7 +28,7 @@ class SqliteDatabase {
       databaseFactory = databaseFactoryFfi;
     }
 
-    final dbPath = await _getDbPath();
+    final dbPath = await getLocalDbPath(dbFileName);
 
     return openDatabase(
       dbPath,
@@ -57,9 +58,7 @@ class SqliteDatabase {
     );
   }
 
-  static Future<String> _getDbPath() async {
-    return getLocalDbPath('assistailab_local.db');
-  }
+
 
   static Future<void> _createTables(Database db) async {
     await db.execute('''

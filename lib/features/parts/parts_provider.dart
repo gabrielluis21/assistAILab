@@ -12,7 +12,7 @@ final partRepositoryProvider = Provider<PartRepository>(
   (ref) => PartLocalDataSource(),
 );
 
-class PartsNotifier extends AsyncNotifier<List<PartEntity>> {
+class PartsNotifier extends AutoDisposeAsyncNotifier<List<PartEntity>> {
   @override
   Future<List<PartEntity>> build() async {
     return _load();
@@ -98,6 +98,6 @@ class PartsNotifier extends AsyncNotifier<List<PartEntity>> {
   }
 }
 
-final partsProvider = AsyncNotifierProvider<PartsNotifier, List<PartEntity>>(
+final partsProvider = AutoDisposeAsyncNotifierProvider<PartsNotifier, List<PartEntity>>(
   PartsNotifier.new,
 );

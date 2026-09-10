@@ -5,6 +5,7 @@ class User {
   final String role;
   final String status;
   final String? customerId;
+  final String? organizationId;
 
   User({
     required this.id,
@@ -13,6 +14,7 @@ class User {
     required this.role,
     required this.status,
     this.customerId,
+    this.organizationId,
   });
 
   factory User.fromJson(Map<String, dynamic> json) {
@@ -23,6 +25,7 @@ class User {
       role: json['role'],
       status: json['status'],
       customerId: json['customerId'],
+      organizationId: json['organizationId'],
     );
   }
 
@@ -34,6 +37,7 @@ class User {
       'role': role,
       'status': status,
       'customerId': customerId,
+      'organizationId': organizationId,
     };
   }
 }

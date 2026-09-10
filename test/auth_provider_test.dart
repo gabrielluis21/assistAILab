@@ -6,8 +6,8 @@ import 'package:assistailab/core/network/api_client.dart';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-const _meResponse = '{"id":"u1","name":"Test User","email":"test@example.com",'
-    '"role":"TECHNICIAN","status":"ACTIVE","customerId":null}';
+const _meResponse = '{"user":{"id":"u1","name":"Test User","email":"test@example.com",'
+    '"role":"TECHNICIAN","status":"ACTIVE","customerId":null,"organizationId":"org-123"}}';
 
 class _FakeApiClient extends ApiClient {
   final int getMeStatus;
@@ -48,15 +48,18 @@ void main() {
         email: 'test@example.com',
         role: 'TECHNICIAN',
         status: 'ACTIVE',
+        organizationId: 'org-100',
       );
 
       final json = user.toJson();
       expect(json['id'], '1');
       expect(json['name'], 'Test User');
+      expect(json['organizationId'], 'org-100');
 
       final userFromJson = User.fromJson(json);
       expect(userFromJson.id, '1');
       expect(userFromJson.email, 'test@example.com');
+      expect(userFromJson.organizationId, 'org-100');
     });
   });
 
@@ -65,8 +68,10 @@ void main() {
     test('retorna usuário quando /auth/me responde 200', () async {
       final ds = AuthRemoteDataSource(_FakeApiClient(getMeStatus: 200));
       final result = await ds.getMe();
-      expect(result['id'], 'u1');
-      expect(result['email'], 'test@example.com');
+      final userObj = result['user'] as Map<String, dynamic>;
+      expect(userObj['id'], 'u1');
+      expect(userObj['email'], 'test@example.com');
+      expect(userObj['organizationId'], 'org-123');
     });
 
     test('lança UnauthorizedException quando /auth/me responde 401', () async {
@@ -99,9 +104,11 @@ void main() {
     test('retorna dados do backend quando /auth/me é 200', () async {
       final ds = AuthRemoteDataSource(_FakeApiClient(getMeStatus: 200));
       final data = await ds.getMe();
-      final user = User.fromJson(data);
+      final userMap = (data['user'] as Map<String, dynamic>?) ?? data;
+      final user = User.fromJson(userMap);
       expect(user.id, 'u1');
       expect(user.role, 'TECHNICIAN');
+      expect(user.organizationId, 'org-123');
     });
 
     test('UnauthorizedException quando token expirado (401)', () async {

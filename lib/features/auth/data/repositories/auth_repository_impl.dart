@@ -42,7 +42,8 @@ class AuthRepositoryImpl implements AuthRepository {
     try {
       // Valida o token no backend e obtém dados frescos do usuário.
       final meData = await remoteDataSource.getMe();
-      final user = User.fromJson(meData);
+      final userMap = (meData['user'] as Map<String, dynamic>?) ?? meData;
+      final user = User.fromJson(userMap);
 
       // Atualiza o cache local com dados vindos do backend.
       await box.put('current_user', jsonEncode(user.toJson()));
