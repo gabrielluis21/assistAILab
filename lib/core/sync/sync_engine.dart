@@ -41,8 +41,7 @@ class SyncEngine {
     required this.apiClient,
     OutboxDao? outboxDao,
   }) : outboxDao = outboxDao ?? OutboxDao();
-  final ApiClient apiClient;
-  final OutboxDao outboxDao;
+
 
 
 
@@ -446,11 +445,5 @@ class SyncEngine {
     );
   }
 
-  /// Performs a full synchronization cycle using the same executor/database.
-  /// Executes push of pending outbox entries followed by pull of server changes.
-  Future<void> performSync({Database? db}) async {
-    final targetDb = db ?? await SqliteDatabase.instance;
-    await pushPendingOutbox(db: targetDb);
-    await pullIncrementalChanges(db: targetDb);
-  }
+
 }

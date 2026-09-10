@@ -2,14 +2,17 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'auth_scoped_database_manager.dart';
 
-import 'sqlite_database_io.dart'
+import 'sqlite_database_io.dart';
+import 'assert_web_no_sqlite.dart';
     if (dart.library.html) 'sqlite_database_web.dart';
 
-class SqliteDatabase {
+import 'package:sqflite/sqflite.dart';
+
+class FakeSyncEngine extends SyncEngine {
   /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
   ///
   /// Lança [StateError] se nenhum escopo válido estiver ativo.
-  static Future<Database> get instance async {
+  static Future<SyncPushSummary> pushPendingOutbox({int batchSize = 20, Database? db}) async {
     assertWebNoSqlite();
     return AuthScopedDatabaseManager.instance.activeDatabase;
   }
@@ -275,7 +278,11 @@ class SqliteDatabase {
     }
   }
 
-  static Future<Set<String>> _columnNames(
+  static Future<SyncPullSummary> pullIncrementalChanges({
+    int pullPageSize = 50,
+    int maxPullPagesPerCycle = 10,
+    Database? db,
+  }) async {
     Database db,
     String table,
   ) async {
