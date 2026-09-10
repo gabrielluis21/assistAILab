@@ -19,6 +19,20 @@ export const ALLOWED_TRANSITIONS: Record<
     ServiceOrderStatus.CANCELADO,
   ],
 
+  /**
+   * FIN-F02 Phase 1A:
+   *
+   * Keep the new state structurally represented without
+   * prematurely opening the protected reapproval edge.
+   *
+   * AGUARDANDO_REAPROVACAO -> EM_EXECUCAO will only be
+   * introduced together with the dedicated quote-decision
+   * command and generic-status edge protection.
+   */
+  AGUARDANDO_REAPROVACAO: [
+    ServiceOrderStatus.CANCELADO,
+  ],
+
   EM_EXECUCAO: [
     ServiceOrderStatus.PRONTO,
     ServiceOrderStatus.CANCELADO,
@@ -33,6 +47,72 @@ export const ALLOWED_TRANSITIONS: Record<
 
   CANCELADO: [],
 };
+
+/**
+ * FIN-F02 protected state edges.
+ *
+ * These transitions may exist in the domain state machine,
+ * but generic PATCH/Sync writers are never authoritative for them.
+ */
+export function isFinanceCommandOnlyStatusTransition(
+  currentStatus: ServiceOrderStatus,
+  newStatus: ServiceOrderStatus,
+  financeCoreVersion?: number | null
+): boolean {
+  /**
+   * FIN-F02-R02
+   *
+   * Once a v2 ServiceOrder reaches PRONTO, the Receivable already
+   * exists. Generic cancellation would split operational and financial
+   * truth, so cancellation from this point must fail closed until a
+   * dedicated finance-aware command is formally introduced.
+   *
+   * Legacy ServiceOrders (financeCoreVersion NULL) keep their previous
+   * FIN-F01 transition behavior.
+   */
+  if (
+    financeCoreVersion === 2 &&
+    currentStatus ===
+      ServiceOrderStatus.PRONTO &&
+    newStatus ===
+      ServiceOrderStatus.CANCELADO
+  ) {
+    return true;
+  }
+
+  return (
+    (
+      currentStatus ===
+        ServiceOrderStatus.DIAGNOSTICO &&
+      newStatus ===
+        ServiceOrderStatus.AGUARDANDO_APROVACAO
+    ) ||
+    (
+      currentStatus ===
+        ServiceOrderStatus.AGUARDANDO_APROVACAO &&
+      newStatus ===
+        ServiceOrderStatus.EM_EXECUCAO
+    ) ||
+    (
+      currentStatus ===
+        ServiceOrderStatus.EM_EXECUCAO &&
+      newStatus ===
+        ServiceOrderStatus.AGUARDANDO_REAPROVACAO
+    ) ||
+    (
+      currentStatus ===
+        ServiceOrderStatus.AGUARDANDO_REAPROVACAO &&
+      newStatus ===
+        ServiceOrderStatus.EM_EXECUCAO
+    ) ||
+    (
+      currentStatus ===
+        ServiceOrderStatus.EM_EXECUCAO &&
+      newStatus ===
+        ServiceOrderStatus.PRONTO
+    )
+  );
+}
 
 export function isValidStatusTransition(
   currentStatus:

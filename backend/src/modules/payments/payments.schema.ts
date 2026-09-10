@@ -28,13 +28,52 @@ export const paymentIdParamsSchema = z
 
 export const createPaymentSchema = z
   .object({
-    serviceOrderId: z.string().uuid(),
+    serviceOrderId:
+      z.string().uuid(),
+
     amountMinor:
       positiveMoneyMinorSchema,
-    method: paymentMethodSchema,
-    notes: z.string().max(1000).optional(),
+
+    method:
+      paymentMethodSchema,
+
+    cardInstallmentCount:
+      z.number()
+        .int()
+        .min(1)
+        .max(24)
+        .optional(),
+
+    notes:
+      z.string()
+        .max(1000)
+        .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(
+    (
+      value,
+      ctx
+    ) => {
+      if (
+        value
+          .cardInstallmentCount !==
+          undefined &&
+        value.method !==
+          'CARTAO_CREDITO'
+      ) {
+        ctx.addIssue({
+          code:
+            z.ZodIssueCode.custom,
+          path: [
+            'cardInstallmentCount',
+          ],
+          message:
+            'cardInstallmentCount is allowed only for CARTAO_CREDITO',
+        });
+      }
+    }
+  );
 
 export const updatePaymentStatusSchema = z
   .object({

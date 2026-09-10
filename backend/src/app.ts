@@ -19,6 +19,7 @@ import { equipmentAcquisitionRoutes } from './modules/equipment_acquisitions/equ
 import {
   serviceOrderCustomerActionRoutes,
 } from './modules/service_order_customer_actions/service_order_customer_actions.routes.js';
+import { receivablesRoutes } from './modules/receivables/receivables.routes.js';
 import { paymentsRoutes } from './modules/payments/payments.routes.js';
 
 import { AppError } from './core/utils/errors.js';
@@ -105,6 +106,10 @@ export function buildApp() {
         '/api/v1/equipment-acquisitions',
     }
   );
+
+  app.register(receivablesRoutes, {
+    prefix: '/api/v1/receivables',
+  });
 
   app.register(paymentsRoutes, {
     prefix: '/api/v1/payments',

@@ -1977,7 +1977,7 @@ test(
  * ============================================================
  */
 test(
-  'CUSTOMER Sync Push resolves ServiceOrder Organization from the target resource',
+  'CUSTOMER Sync Push resolves target Organization and still blocks FIN-F02 approval edge',
   async () => {
     const runId =
       randomUUID();
@@ -2226,12 +2226,32 @@ test(
         200
       );
 
+      /**
+       * FIN-F02 security semantics:
+       *
+       * This request must get far enough to resolve the ServiceOrder tenant
+       * from Organization B, but generic Sync cannot perform the protected
+       * CUSTOMER approval edge:
+       *
+       * AGUARDANDO_APROVACAO -> EM_EXECUCAO
+       *
+       * Reaching FINANCE_COMMAND_REQUIRED proves the target-resource tenant
+       * resolution succeeded instead of failing earlier on Organization
+       * ownership.
+       */
       assert.equal(
         response.json().results[0].status,
-        'SYNCED'
+        'FAILED'
       );
 
-      const updated =
+      assert.match(
+        String(
+          response.json().results[0].error
+        ),
+        /FINANCE_COMMAND_REQUIRED/
+      );
+
+      const unchanged =
         await prisma.serviceOrder.findUniqueOrThrow({
           where: {
             id:
@@ -2240,16 +2260,16 @@ test(
         });
 
       assert.equal(
-        updated.organizationId,
+        unchanged.organizationId,
         organizationBId
       );
 
       assert.equal(
-        updated.status,
-        ServiceOrderStatus.EM_EXECUCAO
+        unchanged.status,
+        ServiceOrderStatus.AGUARDANDO_APROVACAO
       );
 
-      const history =
+      const forbiddenHistory =
         await prisma.serviceOrderStatusHistory.findFirst({
           where: {
             serviceOrderId:
@@ -2260,13 +2280,28 @@ test(
           },
         });
 
-      assert.ok(
-        history
+      assert.equal(
+        forbiddenHistory,
+        null
       );
 
+      const forbiddenChange =
+        await prisma.syncChangeLog.findFirst({
+          where: {
+            entityType:
+              'SERVICE_ORDER',
+
+            entityId:
+              orderId,
+
+            operationType:
+              OperationType.UPDATE,
+          },
+        });
+
       assert.equal(
-        history.changedById,
-        customerUserId
+        forbiddenChange,
+        null
       );
     } finally {
       await prisma.operationIdempotency.deleteMany({

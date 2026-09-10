@@ -14,6 +14,16 @@ export const customerCancelReturnSchema =
 
 export const quoteDecisionSchema =
   z.object({
+    /**
+     * Legacy OS may omit this field.
+     *
+     * FIN-F02 v2 requires it at the command boundary.
+     */
+    quoteRevisionId:
+      z.string()
+        .uuid()
+        .optional(),
+
     decision:
       z.enum([
         'APPROVE',

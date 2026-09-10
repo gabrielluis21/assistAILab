@@ -44,6 +44,7 @@ enum ServiceOrderStatus {
   DRAFT
   DIAGNOSTICO
   AGUARDANDO_APROVACAO
+  AGUARDANDO_REAPROVACAO
   EM_EXECUCAO
   PRONTO
   ENTREGUE
@@ -75,6 +76,26 @@ enum PaymentStatus {
   CONFIRMED
   CANCELLED
   REFUNDED
+}
+
+enum QuoteDecision {
+  APPROVE
+  REJECT
+}
+
+enum QuoteChangeType {
+  INITIAL
+  COMMERCIAL_CHANGE
+}
+
+enum ReceivableLifecycleStatus {
+  ACTIVE
+  CANCELLED
+}
+
+enum FinancialAuditOrigin {
+  USER_COMMAND
+  SYSTEM_DERIVED
 }
 
 enum CustomerEventType {
@@ -221,9 +242,16 @@ model User {
   createdAccessGrants  AccessGrant[]               @relation("AccessGrantCreator")
   uploadedMedia        MediaAsset[]                @relation("MediaUploadedBy")
   createdCampaigns     Campaign[]                  @relation("CampaignCreatedBy")
-  paymentsCreated      Payment[]                   @relation("PaymentCreatedBy")
-  paymentsConfirmed    Payment[]                   @relation("PaymentConfirmedBy")
-  paymentsCancelled    Payment[]                   @relation("PaymentCancelledBy")
+  paymentsCreated       Payment[]                    @relation("PaymentCreatedBy")
+  paymentsConfirmed     Payment[]                    @relation("PaymentConfirmedBy")
+  paymentsCancelled     Payment[]                    @relation("PaymentCancelledBy")
+  quoteRevisionsCreated ServiceOrderQuoteRevision[]  @relation("QuoteRevisionCreatedBy")
+  quoteDecisions        CustomerQuoteDecision[]      @relation("QuoteDecisionBy")
+  receivablesCreated    Receivable[]                 @relation("ReceivableCreatedBy")
+  receivablesCancelled  Receivable[]                 @relation("ReceivableCancelledBy")
+  schedulesCreated      ReceivableSchedule[]         @relation("ReceivableScheduleCreatedBy")
+  allocationsCreated    PaymentAllocation[]          @relation("PaymentAllocationCreatedBy")
+  financialAuditEvents  FinancialAuditEvent[]        @relation("FinancialAuditActor")
 
   @@index([status])
   @@index([role])
@@ -236,6 +264,7 @@ model Organization {
   document  String?  @unique
   email     String?
   phone     String?
+  timezone  String   @default("America/Sao_Paulo") @db.VarChar(64)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -249,9 +278,16 @@ model Organization {
   mediaAssets           MediaAsset[]
   aiAnalyses            AIAnalysis[]
   customerFeedbacks     CustomerFeedback[]
-  ownedEquipments       Equipment[]
-  equipmentAcquisitions EquipmentAcquisition[]
+  ownedEquipments        Equipment[]
+  equipmentAcquisitions  EquipmentAcquisition[]
   payments               Payment[]
+  quoteRevisions         ServiceOrderQuoteRevision[]
+  quoteDecisions         CustomerQuoteDecision[]
+  receivables            Receivable[]
+  receivableSchedules    ReceivableSchedule[]
+  receivableInstallments ReceivableInstallment[]
+  paymentAllocations     PaymentAllocation[]
+  financialAuditEvents   FinancialAuditEvent[]
 
   @@index([name])
   @@map("organizations")
@@ -295,6 +331,10 @@ model Customer {
   CustomerFeedback      CustomerFeedback[]
   MediaAsset            MediaAsset[]
   equipmentAcquisitions EquipmentAcquisition[]
+  quoteRevisions         ServiceOrderQuoteRevision[]
+  quoteDecisions         CustomerQuoteDecision[]
+  receivables            Receivable[]
+  paymentAllocations     PaymentAllocation[]
 
   @@index([name])
   @@index([email])
@@ -441,6 +481,10 @@ model ServiceOrder {
   equipmentId    String
   technicianId   String?
 
+  financeCoreVersion          Int?
+  currentQuoteRevisionId      String? @unique
+  lastApprovedQuoteRevisionId String? @unique
+
   status ServiceOrderStatus @default(DIAGNOSTICO)
 
   problemDescription String  @db.Text
@@ -460,9 +504,16 @@ model ServiceOrder {
   items                 ServiceOrderItem[]
   payments              Payment[]
   customerEvents        CustomerEvent[]
-  mediaAssets           MediaAsset[]
-  CustomerFeedback      CustomerFeedback[]
-  equipmentAcquisitions EquipmentAcquisition[]
+  mediaAssets                MediaAsset[]
+  CustomerFeedback           CustomerFeedback[]
+  equipmentAcquisitions      EquipmentAcquisition[]
+  quoteRevisions             ServiceOrderQuoteRevision[] @relation("ServiceOrderQuoteRevisions")
+  currentQuoteRevision       ServiceOrderQuoteRevision?  @relation("CurrentQuoteRevision", fields: [currentQuoteRevisionId], references: [id], onDelete: SetNull)
+  lastApprovedQuoteRevision  ServiceOrderQuoteRevision?  @relation("LastApprovedQuoteRevision", fields: [lastApprovedQuoteRevisionId], references: [id], onDelete: SetNull)
+  quoteDecisions             CustomerQuoteDecision[]
+  receivables                Receivable[]
+  paymentAllocations         PaymentAllocation[]
+  financialAuditEvents       FinancialAuditEvent[]
 
   @@index([organizationId])
   @@index([customerId])
@@ -471,6 +522,7 @@ model ServiceOrder {
   @@index([status])
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
+  @@index([financeCoreVersion])
   @@map("service_orders")
 }
 
@@ -540,6 +592,8 @@ model Payment {
   method PaymentMethod
   status PaymentStatus @default(PENDING)
 
+  cardInstallmentCount Int?
+
   notes String? @db.Text
 
   paidAt      DateTime?
@@ -561,6 +615,7 @@ model Payment {
   createdBy   User? @relation("PaymentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   confirmedBy User? @relation("PaymentConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: Restrict)
   cancelledBy User? @relation("PaymentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
 
   @@index([organizationId])
   @@index([organizationId, status])
@@ -575,6 +630,224 @@ model Payment {
   @@index([paidAt])
   @@index([cancelledAt])
   @@map("payments")
+}
+
+model ServiceOrderQuoteRevision {
+  id             String @id @default(uuid())
+  serviceOrderId String
+  organizationId String
+  customerId     String
+  revisionNumber Int
+
+  diagnosisSnapshot    String? @db.Text
+  serviceItemsSnapshot Json
+  partsSnapshot        Json
+
+  totalAmount Decimal @db.Decimal(14, 2)
+
+  changeType   QuoteChangeType
+  changeReason String? @db.Text
+
+  quoteSnapshot Json
+  quoteHash     String @db.Char(64)
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  serviceOrder ServiceOrder @relation("ServiceOrderQuoteRevisions", fields: [serviceOrderId], references: [id], onDelete: Restrict)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdBy    User         @relation("QuoteRevisionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  decision   CustomerQuoteDecision?
+  receivable Receivable?
+
+  currentForServiceOrder      ServiceOrder? @relation("CurrentQuoteRevision")
+  lastApprovedForServiceOrder ServiceOrder? @relation("LastApprovedQuoteRevision")
+
+  @@unique([serviceOrderId, revisionNumber])
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([serviceOrderId, createdAt])
+  @@index([quoteHash])
+  @@map("service_order_quote_revisions")
+}
+
+model CustomerQuoteDecision {
+  id              String @id @default(uuid())
+  quoteRevisionId String @unique
+  serviceOrderId  String
+  organizationId  String
+  customerId      String
+
+  decision QuoteDecision
+  reason   String? @db.Text
+
+  decidedByUserId String
+  decidedAt       DateTime @default(now())
+
+  quoteRevision ServiceOrderQuoteRevision @relation(fields: [quoteRevisionId], references: [id], onDelete: Restrict)
+  serviceOrder  ServiceOrder              @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
+  organization  Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer      Customer                  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  decidedBy     User                      @relation("QuoteDecisionBy", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([serviceOrderId])
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([decidedAt])
+  @@map("customer_quote_decisions")
+}
+
+model Receivable {
+  id                    String @id @default(uuid())
+  organizationId        String
+  customerId            String
+  serviceOrderId        String
+  sourceQuoteRevisionId String @unique
+
+  totalAmount Decimal @db.Decimal(14, 2)
+
+  lifecycleStatus ReceivableLifecycleStatus @default(ACTIVE)
+
+  currentScheduleVersion Int @default(1)
+  version                Int @default(1)
+
+  issuedAt DateTime @default(now())
+
+  createdByUserId    String
+  cancelledAt        DateTime?
+  cancelledByUserId  String?
+  cancellationReason String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization        Organization                  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer            Customer                      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  serviceOrder        ServiceOrder                  @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  sourceQuoteRevision ServiceOrderQuoteRevision     @relation(fields: [sourceQuoteRevisionId], references: [id], onDelete: Restrict)
+  createdBy           User                          @relation("ReceivableCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  cancelledBy         User?                         @relation("ReceivableCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  schedules           ReceivableSchedule[]
+  installments        ReceivableInstallment[]
+  allocations         PaymentAllocation[]
+
+  @@index([organizationId])
+  @@index([organizationId, lifecycleStatus])
+  @@index([customerId])
+  @@index([serviceOrderId])
+  @@index([issuedAt])
+  @@map("receivables")
+}
+
+model ReceivableSchedule {
+  id             String @id @default(uuid())
+  organizationId String
+  receivableId   String
+  version        Int
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  receivable   Receivable              @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  createdBy    User                    @relation("ReceivableScheduleCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  installments ReceivableInstallment[]
+
+  @@unique([receivableId, version])
+  @@index([organizationId])
+  @@index([createdAt])
+  @@map("receivable_schedules")
+}
+
+model ReceivableInstallment {
+  id              String @id @default(uuid())
+  organizationId  String
+  receivableId    String
+  scheduleId      String
+  scheduleVersion Int
+
+  sequence Int
+  amount   Decimal  @db.Decimal(14, 2)
+  dueDate  DateTime @db.Date
+
+  createdAt DateTime @default(now())
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  receivable   Receivable             @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  schedule     ReceivableSchedule     @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  allocations  PaymentAllocation[]
+
+  @@unique([scheduleId, sequence])
+  @@index([organizationId])
+  @@index([receivableId])
+  @@index([receivableId, scheduleVersion])
+  @@index([dueDate])
+  @@map("receivable_installments")
+}
+
+model PaymentAllocation {
+  id             String @id @default(uuid())
+  organizationId String
+  customerId     String
+  serviceOrderId String
+
+  receivableId  String
+  installmentId String
+  paymentId     String
+
+  amount Decimal @db.Decimal(14, 2)
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer     Customer              @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  serviceOrder ServiceOrder          @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
+  receivable   Receivable            @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  installment  ReceivableInstallment @relation(fields: [installmentId], references: [id], onDelete: Restrict)
+  payment      Payment               @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  createdBy    User                  @relation("PaymentAllocationCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([serviceOrderId])
+  @@index([receivableId])
+  @@index([installmentId])
+  @@index([paymentId])
+  @@index([createdAt])
+  @@map("payment_allocations")
+}
+
+model FinancialAuditEvent {
+  id             String @id @default(uuid())
+  organizationId String
+  serviceOrderId String
+
+  actorUserId String?
+  origin      FinancialAuditOrigin
+
+  eventType  String
+  entityType String
+  entityId   String
+
+  operationId String
+  ordinal     Int
+
+  occurredAt DateTime @default(now())
+  metadata   Json?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  serviceOrder ServiceOrder  @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
+  actor        User?         @relation("FinancialAuditActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@unique([operationId, ordinal])
+  @@index([organizationId])
+  @@index([serviceOrderId])
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+  @@map("financial_audit_events")
 }
 
 model Device {
