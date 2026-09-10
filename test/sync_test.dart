@@ -45,7 +45,8 @@ class FakeOutboxDao extends OutboxDao {
   List<OutboxItem> pendingItems = [];
 
   @override
-  Future<int> getPendingCount({DatabaseExecutor? executor}) async => pendingCount;
+  Future<int> getPendingCount({DatabaseExecutor? executor}) async =>
+      pendingCount;
 
   @override
   Future<int> recoverProcessingEntries({
@@ -58,7 +59,8 @@ class FakeOutboxDao extends OutboxDao {
   }
 
   @override
-  Future<List<OutboxItem>> getPendingEntries({int limit = 20, DatabaseExecutor? executor}) async =>
+  Future<List<OutboxItem>> getPendingEntries(
+          {int limit = 20, DatabaseExecutor? executor}) async =>
       pendingItems;
 }
 
@@ -78,7 +80,10 @@ class FakeSyncEngine extends SyncEngine {
   FakeSyncEngine({required super.apiClient, super.outboxDao});
 
   @override
-  Future<SyncPushSummary> pushPendingOutbox({int batchSize = 20}) async {
+  Future<SyncPushSummary> pushPendingOutbox({
+    int batchSize = 20,
+    Database? db,
+  }) async {
     pushCount++;
     if (delay > Duration.zero) {
       await Future.delayed(delay);
@@ -97,6 +102,7 @@ class FakeSyncEngine extends SyncEngine {
   Future<SyncPullSummary> pullIncrementalChanges({
     int pullPageSize = 50,
     int maxPullPagesPerCycle = 10,
+    Database? db,
   }) async {
     pullCount++;
     if (delay > Duration.zero) {

@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
 import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:assistailab/core/network/api_client.dart';
+import 'package:assistailab/core/database/outbox_dao.dart';
 
 void main() {
   test('sync race condition with detailed logs', () async {
