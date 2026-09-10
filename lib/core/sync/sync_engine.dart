@@ -116,17 +116,25 @@ class SyncEngine {
       return const SyncPushSummary();
     }
 
+    // Fail-closed credential guard: when operating under a session-bound lease
+    // the credential must be explicit and valid. An explicit null/empty credential
+    // means the session had no token — reject before issuing any authenticated HTTP.
+    if (lease != null && !lease.credential.hasValidToken) {
+      return const SyncPushSummary();
+    }
+
     int synced = 0;
     int failed = 0;
     int conflict = 0;
 
     try {
-      final response = await apiClient
-          .post(
-            '/sync/push',
-            body: payload,
-            authToken: lease?.authToken,
-          )
+      final response = await (lease != null
+              ? apiClient.postBound(
+                  '/sync/push',
+                  lease.credential,
+                  body: payload,
+                )
+              : apiClient.post('/sync/push', body: payload))
           .timeout(const Duration(seconds: 15));
 
       if (lease != null && !lease.isStillValid) {
@@ -247,6 +255,11 @@ class SyncEngine {
     String? latestCursor = previousCursor;
     int pageCount = 0;
 
+    // Fail-closed credential guard for the pull phase.
+    if (lease != null && !lease.credential.hasValidToken) {
+      return const SyncPullSummary();
+    }
+
     while (pageCount < maxPullPagesPerCycle) {
       if (lease != null && !lease.isStillValid) {
         break;
@@ -256,11 +269,12 @@ class SyncEngine {
           ? '?cursor=$latestCursor&limit=$pullPageSize'
           : '?limit=$pullPageSize';
 
-      final response = await apiClient
-          .get(
-            '/sync/changes$cursorParam',
-            authToken: lease?.authToken,
-          )
+      final response = await (lease != null
+              ? apiClient.getBound(
+                  '/sync/changes$cursorParam',
+                  lease.credential,
+                )
+              : apiClient.get('/sync/changes$cursorParam'))
           .timeout(const Duration(seconds: 15));
 
       if (lease != null && !lease.isStillValid) {

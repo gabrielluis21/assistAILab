@@ -259,7 +259,7 @@ void main() {
       int cancelChecks = 0;
       final lease = SyncLease(
         db: dbA,
-        authToken: 'TOKEN_A',
+        credential: BoundCredential.explicit('TOKEN_A'),
         isCancelled: () {
           cancelChecks++;
           // Checks 1-3 occur for page 1 (entry, before HTTP 1, before DB write 1).
@@ -387,7 +387,7 @@ void main() {
       // Create lease bound to DBA
       final lease = SyncLease(
         db: dbA,
-        authToken: 'TOKEN_A',
+        credential: BoundCredential.explicit('TOKEN_A'),
         isCancelled: () => false,
       );
 
@@ -429,7 +429,7 @@ void main() {
       // Capture lease with pinned token
       final lease = SyncLease(
         db: dbA,
-        authToken: 'PINNED_SESSION_TOKEN',
+        credential: BoundCredential.explicit('PINNED_SESSION_TOKEN'),
         isCancelled: () => false,
       );
 
@@ -500,7 +500,7 @@ void main() {
 
       final lease = SyncLease(
         db: dbA,
-        authToken: 'VALID_TOKEN',
+        credential: BoundCredential.explicit('VALID_TOKEN'),
         isCancelled: () => false,
       );
 
@@ -515,6 +515,169 @@ void main() {
       expect(records.length, 2);
       expect(records[0]['name'], 'Customer 1');
       expect(records[1]['name'], 'Customer 2');
+    });
+
+    // =========================================================
+    // NULL CREDENTIAL SEMANTICS — FE-01B SECURITY HARDENING
+    // =========================================================
+
+    test(
+        'NULL TOKEN SEMANTICS: SyncLease with explicit null token never issues any HTTP request',
+        () async {
+      final dbA =
+          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+
+      // Hive contains a valid token that must NEVER be used by a leased cycle.
+      final authBox = await Hive.openBox('auth_box');
+      await authBox.put('jwt_token', 'TOKEN_B_HIVE_POISON');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(
+            jsonEncode({'nextCursor': null, 'changes': []}), 200);
+      });
+
+      final apiClient =
+          ApiClient(baseUrl: 'http://fake.api', client: transport);
+      final syncEngine = SyncEngine(apiClient: apiClient);
+
+      // Explicit null credential: the session had no valid token.
+      // Must fail closed — zero HTTP requests.
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit(null),
+        isCancelled: () => false,
+      );
+
+      await syncEngine.pushPendingOutbox(lease: lease);
+      await syncEngine.pullIncrementalChanges(lease: lease);
+
+      expect(
+        transport.recordedRequests,
+        isEmpty,
+        reason:
+            'Explicit null credential must prevent ALL HTTP requests; Hive token must not be used',
+      );
+    });
+
+    test(
+        'TOKEN RESOLVER FAILURE FAILS CLOSED: throws stops cycle before any HTTP',
+        () async {
+      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+
+      // Hive contains a valid unrelated token — must never be used.
+      final authBox = await Hive.openBox('auth_box');
+      await authBox.put('jwt_token', 'UNRELATED_HIVE_TOKEN');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(
+            jsonEncode({'nextCursor': null, 'changes': []}), 200);
+      });
+
+      final apiClient =
+          ApiClient(baseUrl: 'http://fake.api', client: transport);
+      final syncEngine = SyncEngine(apiClient: apiClient);
+      final outboxDao = OutboxDao();
+
+      // tokenResolver throws — coordinator must stop the cycle before any HTTP.
+      final coordinator = BackgroundSyncCoordinator(
+        syncEngine: syncEngine,
+        outboxDao: outboxDao,
+        databaseResolver: () async =>
+            AuthScopedDatabaseManager.instance.activeDatabase,
+        tokenResolver: () async =>
+            throw Exception('credential store unavailable'),
+      );
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      // Allow microtasks to settle
+      await Future.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        transport.recordedRequests,
+        isEmpty,
+        reason:
+            'tokenResolver throw must stop the cycle; unrelated Hive token must never be used',
+      );
+
+      coordinator.dispose();
+    });
+
+    test(
+        'EMPTY TOKEN FAILS CLOSED: tokenResolver returns empty string stops cycle before any HTTP',
+        () async {
+      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+
+      // Hive contains a valid token — must never be used.
+      final authBox = await Hive.openBox('auth_box');
+      await authBox.put('jwt_token', 'EXISTING_HIVE_TOKEN');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(
+            jsonEncode({'nextCursor': null, 'changes': []}), 200);
+      });
+
+      final apiClient =
+          ApiClient(baseUrl: 'http://fake.api', client: transport);
+      final syncEngine = SyncEngine(apiClient: apiClient);
+      final outboxDao = OutboxDao();
+
+      // tokenResolver returns '' — coordinator must treat this as fail-closed.
+      final coordinator = BackgroundSyncCoordinator(
+        syncEngine: syncEngine,
+        outboxDao: outboxDao,
+        databaseResolver: () async =>
+            AuthScopedDatabaseManager.instance.activeDatabase,
+        tokenResolver: () async => '',
+      );
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      await Future.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        transport.recordedRequests,
+        isEmpty,
+        reason:
+            'Empty credential must stop the sync cycle; existing Hive token must never be used',
+      );
+
+      coordinator.dispose();
+    });
+
+    test(
+        'CREDENTIAL PINNING REGRESSION: lease tokenA remains pinned when Hive changes to tokenB',
+        () async {
+      final dbA =
+          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+
+      final authBox = await Hive.openBox('auth_box');
+      await authBox.put('jwt_token', 'INITIAL_TOKEN_REG');
+
+      late String observedHeader;
+      final transport = _CapturingHttpClient((request) async {
+        observedHeader = request.headers['authorization'] ?? '';
+        return http.Response(
+            jsonEncode({'nextCursor': null, 'changes': []}), 200);
+      });
+
+      final apiClient =
+          ApiClient(baseUrl: 'http://fake.api', client: transport);
+      final syncEngine = SyncEngine(apiClient: apiClient);
+
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('PINNED_TOKEN_REG'),
+        isCancelled: () => false,
+      );
+
+      // Change Hive token after lease creation
+      await authBox.put('jwt_token', 'CHANGED_HIVE_TOKEN_REG');
+
+      await syncEngine.pullIncrementalChanges(lease: lease);
+
+      expect(observedHeader, 'Bearer PINNED_TOKEN_REG',
+          reason:
+              'Lease credential must be pinned; Hive change must have no effect');
+      expect(observedHeader, isNot('Bearer CHANGED_HIVE_TOKEN_REG'));
     });
   });
 }

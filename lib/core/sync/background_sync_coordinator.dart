@@ -157,20 +157,46 @@ class BackgroundSyncCoordinator {
       }
     }
 
-    // Resolve bound auth token for initiating session
+    // Re-check generation validity after async DB resolution before token fetch.
+    if (cycleGeneration != _currentGeneration || _isDisposed) {
+      _isSyncing = false;
+      return;
+    }
+
+    // Resolve bound auth token for initiating session.
+    // FAIL-CLOSED SEMANTICS: if the resolver throws, returns null, or returns an
+    // empty string, the cycle MUST stop. A leased sync operation must never fall
+    // back to dynamic Hive credential resolution.
     String? boundToken;
     if (tokenResolver != null) {
       try {
         boundToken = await tokenResolver!();
       } catch (_) {
-        // Fallback or empty if token cannot be retrieved
+        // Resolver threw — stop the cycle before any HTTP.
+        _isSyncing = false;
+        return;
+      }
+      if (boundToken == null || boundToken.isEmpty) {
+        // Null or empty credential — stop the cycle before any HTTP.
+        _isSyncing = false;
+        return;
       }
     }
 
-    // Bind operational sync lease
+    // Re-check generation after async credential resolution.
+    if (cycleGeneration != _currentGeneration || _isDisposed) {
+      _isSyncing = false;
+      return;
+    }
+
+    // Bind operational sync lease with explicit session credential.
+    // BoundCredential.explicit ensures SyncEngine never falls back to Hive.
+    final credential = tokenResolver != null
+        ? BoundCredential.explicit(boundToken)
+        : BoundCredential.absent;
     final lease = SyncLease(
       db: boundDb,
-      authToken: boundToken,
+      credential: credential,
       isCancelled: () => cycleGeneration != _currentGeneration || _isDisposed,
     );
 
