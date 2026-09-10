@@ -679,5 +679,138 @@ void main() {
               'Lease credential must be pinned; Hive change must have no effect');
       expect(observedHeader, isNot('Bearer CHANGED_HIVE_TOKEN_REG'));
     });
+
+    test('BoundCredential: whitespace token is invalid', () {
+      expect(BoundCredential.explicit('   ').hasValidToken, isFalse);
+      expect(BoundCredential.explicit(' \t\n ').hasValidToken, isFalse);
+      expect(BoundCredential.explicit('').hasValidToken, isFalse);
+      expect(BoundCredential.explicit(null).hasValidToken, isFalse);
+      expect(BoundCredential.explicit('valid_token').hasValidToken, isTrue);
+      expect(BoundCredential.absent.hasValidToken, isFalse);
+    });
+
+    test(
+        'WHITESPACE TOKEN FAILS CLOSED: tokenResolver returns whitespace string stops cycle before any HTTP',
+        () async {
+      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+
+      // Hive contains unrelated valid tokenB — must never be used.
+      final authBox = await Hive.openBox('auth_box');
+      await authBox.put('jwt_token', 'UNRELATED_VALID_TOKEN_B');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(
+            jsonEncode({'nextCursor': null, 'changes': []}), 200);
+      });
+
+      final apiClient =
+          ApiClient(baseUrl: 'http://fake.api', client: transport);
+      final syncEngine = SyncEngine(apiClient: apiClient);
+      final outboxDao = OutboxDao();
+
+      // tokenResolver returns '   ' — coordinator must treat this as fail-closed.
+      final coordinator = BackgroundSyncCoordinator(
+        syncEngine: syncEngine,
+        outboxDao: outboxDao,
+        databaseResolver: () async =>
+            AuthScopedDatabaseManager.instance.activeDatabase,
+        tokenResolver: () async => '   ',
+      );
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      await Future.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        transport.recordedRequests,
+        isEmpty,
+        reason:
+            'Whitespace credential must stop the sync cycle; unrelated Hive token must never be used',
+      );
+
+      coordinator.dispose();
+    });
+
+    // =========================================================
+    // INVARIANT: VALIDATE CREDENTIAL BEFORE OUTBOX MUTATION
+    // =========================================================
+    for (final invalidToken in [null, '', '   ']) {
+      final tokenDesc = invalidToken == null
+          ? 'null'
+          : (invalidToken.isEmpty ? 'empty' : 'whitespace-only');
+
+      test(
+          'INVALID CREDENTIAL OUTBOX MUTATION ($tokenDesc): entries remain PENDING, 0 HTTP, no Hive fallback',
+          () async {
+        final dbA = await AuthScopedDatabaseManager.instance
+            .openDatabaseForScope(scopeA);
+
+        await dbA.delete('outbox');
+
+        final outboxDao = OutboxDao();
+        final opId = 'op-invalid-$tokenDesc';
+        final item = OutboxItem(
+          operationId: opId,
+          entityType: 'CUSTOMER',
+          entityId: 'cust-1',
+          operationType: 'CREATE',
+          payload: {'name': 'Pending Customer'},
+          createdAt: DateTime.now().toIso8601String(),
+          attemptCount: 0,
+          status: 'PENDING',
+        );
+        await outboxDao.insert(item, executor: dbA);
+
+        // Hive contains TOKEN_B — must NEVER be used
+        final authBox = await Hive.openBox('auth_box');
+        await authBox.put('jwt_token', 'TOKEN_B_POISON');
+
+        final transport = _CapturingHttpClient((request) async {
+          return http.Response(
+              jsonEncode({
+                'results': [
+                  {'operationId': opId, 'status': 'SYNCED'}
+                ]
+              }),
+              200);
+        });
+
+        final apiClient =
+            ApiClient(baseUrl: 'http://fake.api', client: transport);
+        final syncEngine =
+            SyncEngine(apiClient: apiClient, outboxDao: outboxDao);
+
+        final lease = SyncLease(
+          db: dbA,
+          credential: BoundCredential.explicit(invalidToken),
+          isCancelled: () => false,
+        );
+
+        final summary = await syncEngine.pushPendingOutbox(lease: lease);
+
+        // 1. ZERO HTTP requests issued
+        expect(transport.recordedRequests, isEmpty,
+            reason:
+                'Invalid credential must fail closed before HTTP; zero requests');
+
+        // 2. Summary indicates 0 processed
+        expect(summary.totalProcessed, 0);
+        expect(summary.syncedCount, 0);
+
+        // 3. Outbox item remains PENDING, attemptCount unchanged (0), lastAttemptAt is null
+        final rows = await dbA.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [opId],
+        );
+        expect(rows.length, 1);
+        expect(rows.first['status'], 'PENDING',
+            reason:
+                'Outbox item must not be transitioned to PROCESSING when credential is invalid');
+        expect(rows.first['attempt_count'], 0,
+            reason: 'attemptCount must remain unchanged');
+        expect(rows.first['last_attempt_at'], isNull,
+            reason: 'last_attempt_at must not be mutated');
+      });
+    }
   });
 }

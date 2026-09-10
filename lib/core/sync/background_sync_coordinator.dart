@@ -176,8 +176,8 @@ class BackgroundSyncCoordinator {
         _isSyncing = false;
         return;
       }
-      if (boundToken == null || boundToken.isEmpty) {
-        // Null or empty credential — stop the cycle before any HTTP.
+      if (boundToken == null || boundToken.trim().isEmpty) {
+        // Null, empty, or whitespace-only credential — stop the cycle before any HTTP.
         _isSyncing = false;
         return;
       }

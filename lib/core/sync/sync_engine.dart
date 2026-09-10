@@ -82,10 +82,20 @@ class SyncEngine {
     SyncLease? lease,
   }) async {
     assertWebNoSqlite();
+    // 1. Validate lease lifecycle
     if (lease != null && !lease.isStillValid) {
       return const SyncPushSummary();
     }
+
+    // 2. Validate explicit credential (fail-closed before any DB mutations or HTTP)
+    if (lease != null && !lease.credential.hasValidToken) {
+      return const SyncPushSummary();
+    }
+
+    // 3. Resolve/use bound DB
     final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
+
+    // 4. Read pending entries
     final pendingEntries = await outboxDao.getPendingEntries(
       limit: batchSize,
       executor: targetDb,
@@ -102,6 +112,7 @@ class SyncEngine {
       'entries': pendingEntries.map((e) => e.toApiPayload()).toList(),
     };
 
+    // 5. Only then mark entries PROCESSING
     final nowIso = DateTime.now().toIso8601String();
     for (final item in pendingEntries) {
       await outboxDao.updateStatus(
@@ -116,13 +127,7 @@ class SyncEngine {
       return const SyncPushSummary();
     }
 
-    // Fail-closed credential guard: when operating under a session-bound lease
-    // the credential must be explicit and valid. An explicit null/empty credential
-    // means the session had no token — reject before issuing any authenticated HTTP.
-    if (lease != null && !lease.credential.hasValidToken) {
-      return const SyncPushSummary();
-    }
-
+    // 6. Issue HTTP
     int synced = 0;
     int failed = 0;
     int conflict = 0;
@@ -249,16 +254,15 @@ class SyncEngine {
     if (lease != null && !lease.isStillValid) {
       return const SyncPullSummary();
     }
+    // Fail-closed credential guard for the pull phase.
+    if (lease != null && !lease.credential.hasValidToken) {
+      return const SyncPullSummary();
+    }
     final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
     int totalPulled = 0;
     String? previousCursor = await getLocalCursor(executor: targetDb);
     String? latestCursor = previousCursor;
     int pageCount = 0;
-
-    // Fail-closed credential guard for the pull phase.
-    if (lease != null && !lease.credential.hasValidToken) {
-      return const SyncPullSummary();
-    }
 
     while (pageCount < maxPullPagesPerCycle) {
       if (lease != null && !lease.isStillValid) {

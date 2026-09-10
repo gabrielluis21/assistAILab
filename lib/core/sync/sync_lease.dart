@@ -44,7 +44,7 @@ sealed class BoundCredential {
   /// Always false for [absent].
   bool get hasValidToken => switch (this) {
         _AbsentCredential() => false,
-        _ExplicitCredential(token: final t) => t != null && t.isNotEmpty,
+        _ExplicitCredential(token: final t) => t != null && t.trim().isNotEmpty,
       };
 }
 
