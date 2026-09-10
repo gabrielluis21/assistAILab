@@ -19,13 +19,16 @@ class ApiClient {
     return box.get('jwt_token');
   }
 
-  Future<Map<String, String>> _getHeaders() async {
+  /// Exposes the current auth token for session-bound lease creation at orchestration boundaries.
+  Future<String?> getAuthToken() => _getToken();
+
+  Future<Map<String, String>> _getHeaders({String? authToken}) async {
     final headers = <String, String>{
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
 
-    final token = await _getToken();
+    final token = authToken ?? await _getToken();
 
     if (token != null && token.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
@@ -34,8 +37,8 @@ class ApiClient {
     return headers;
   }
 
-  Future<http.Response> get(String endpoint) async {
-    final headers = await _getHeaders();
+  Future<http.Response> get(String endpoint, {String? authToken}) async {
+    final headers = await _getHeaders(authToken: authToken);
 
     return _client.get(
       Uri.parse('$baseUrl$endpoint'),
@@ -46,8 +49,9 @@ class ApiClient {
   Future<http.Response> post(
     String endpoint, {
     Map<String, dynamic>? body,
+    String? authToken,
   }) async {
-    final headers = await _getHeaders();
+    final headers = await _getHeaders(authToken: authToken);
 
     return _client.post(
       Uri.parse('$baseUrl$endpoint'),
@@ -59,8 +63,9 @@ class ApiClient {
   Future<http.Response> put(
     String endpoint, {
     Map<String, dynamic>? body,
+    String? authToken,
   }) async {
-    final headers = await _getHeaders();
+    final headers = await _getHeaders(authToken: authToken);
 
     return _client.put(
       Uri.parse('$baseUrl$endpoint'),
@@ -69,8 +74,8 @@ class ApiClient {
     );
   }
 
-  Future<http.Response> delete(String endpoint) async {
-    final headers = await _getHeaders();
+  Future<http.Response> delete(String endpoint, {String? authToken}) async {
+    final headers = await _getHeaders(authToken: authToken);
 
     return _client.delete(
       Uri.parse('$baseUrl$endpoint'),

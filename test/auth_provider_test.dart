@@ -6,7 +6,8 @@ import 'package:assistailab/core/network/api_client.dart';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-const _meResponse = '{"user":{"id":"u1","name":"Test User","email":"test@example.com",'
+const _meResponse =
+    '{"user":{"id":"u1","name":"Test User","email":"test@example.com",'
     '"role":"TECHNICIAN","status":"ACTIVE","customerId":null,"organizationId":"org-123"}}';
 
 class _FakeApiClient extends ApiClient {
@@ -19,7 +20,7 @@ class _FakeApiClient extends ApiClient {
   }) : super(baseUrl: 'http://fake.api');
 
   @override
-  Future<http.Response> get(String endpoint) async {
+  Future<http.Response> get(String endpoint, {String? authToken}) async {
     if (endpoint == '/auth/me') {
       return http.Response(getMeBody, getMeStatus);
     }
@@ -31,6 +32,7 @@ class _FakeApiClient extends ApiClient {
   Future<http.Response> post(
     String endpoint, {
     Map<String, dynamic>? body,
+    String? authToken,
   }) async {
     throw UnimplementedError('POST $endpoint');
   }

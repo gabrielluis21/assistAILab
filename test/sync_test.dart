@@ -14,6 +14,7 @@ import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:assistailab/core/network/api_client.dart';
 import 'package:assistailab/core/sync/background_sync_coordinator.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
+import 'package:assistailab/core/sync/sync_lease.dart';
 import 'package:assistailab/core/sync/sync_payload_mapper.dart';
 import 'package:assistailab/core/sync/sync_scheduler.dart';
 import 'package:assistailab/core/sync/sync_state.dart';
@@ -83,6 +84,7 @@ class FakeSyncEngine extends SyncEngine {
   Future<SyncPushSummary> pushPendingOutbox({
     int batchSize = 20,
     Database? db,
+    SyncLease? lease,
   }) async {
     pushCount++;
     if (delay > Duration.zero) {
@@ -103,6 +105,7 @@ class FakeSyncEngine extends SyncEngine {
     int pullPageSize = 50,
     int maxPullPagesPerCycle = 10,
     Database? db,
+    SyncLease? lease,
   }) async {
     pullCount++;
     if (delay > Duration.zero) {

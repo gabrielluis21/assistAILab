@@ -1,11 +1,11 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import '../../core/database/assert_web_no_sqlite.dart';
 import 'dart:math';
 import 'package:sqflite/sqflite.dart';
 import '../network/api_client.dart';
 import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
+import 'sync_lease.dart';
 
 class SyncPushSummary {
   final int totalProcessed;
@@ -42,10 +42,6 @@ class SyncEngine {
     OutboxDao? outboxDao,
   }) : outboxDao = outboxDao ?? OutboxDao();
 
-
-
-
-
   Future<String?> getLocalCursor({DatabaseExecutor? executor}) async {
     assertWebNoSqlite();
     final db = executor ?? await SqliteDatabase.instance;
@@ -58,10 +54,9 @@ class SyncEngine {
   }
 
   Future<void> saveLocalCursor(
-    String cursor,
-    {
-      DatabaseExecutor? executor,
-    }) async {
+    String cursor, {
+    DatabaseExecutor? executor,
+  }) async {
     final db = executor ?? await SqliteDatabase.instance;
     await db.insert(
       'sync_metadata',
@@ -84,14 +79,22 @@ class SyncEngine {
   Future<SyncPushSummary> pushPendingOutbox({
     int batchSize = 20,
     Database? db,
+    SyncLease? lease,
   }) async {
     assertWebNoSqlite();
-    final targetDb = db ?? await SqliteDatabase.instance;
+    if (lease != null && !lease.isStillValid) {
+      return const SyncPushSummary();
+    }
+    final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
     final pendingEntries = await outboxDao.getPendingEntries(
       limit: batchSize,
       executor: targetDb,
     );
     if (pendingEntries.isEmpty) {
+      return const SyncPushSummary();
+    }
+
+    if (lease != null && !lease.isStillValid) {
       return const SyncPushSummary();
     }
 
@@ -109,6 +112,10 @@ class SyncEngine {
       );
     }
 
+    if (lease != null && !lease.isStillValid) {
+      return const SyncPushSummary();
+    }
+
     int synced = 0;
     int failed = 0;
     int conflict = 0;
@@ -118,8 +125,18 @@ class SyncEngine {
           .post(
             '/sync/push',
             body: payload,
+            authToken: lease?.authToken,
           )
           .timeout(const Duration(seconds: 15));
+
+      if (lease != null && !lease.isStillValid) {
+        return SyncPushSummary(
+          totalProcessed: pendingEntries.length,
+          syncedCount: synced,
+          failedCount: failed,
+          conflictCount: conflict,
+        );
+      }
 
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
@@ -219,21 +236,36 @@ class SyncEngine {
     int pullPageSize = 50,
     int maxPullPagesPerCycle = 10,
     Database? db,
+    SyncLease? lease,
   }) async {
-    final targetDb = db ?? await SqliteDatabase.instance;
+    if (lease != null && !lease.isStillValid) {
+      return const SyncPullSummary();
+    }
+    final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
     int totalPulled = 0;
     String? previousCursor = await getLocalCursor(executor: targetDb);
     String? latestCursor = previousCursor;
     int pageCount = 0;
 
     while (pageCount < maxPullPagesPerCycle) {
+      if (lease != null && !lease.isStillValid) {
+        break;
+      }
+
       final cursorParam = (latestCursor != null && latestCursor.isNotEmpty)
           ? '?cursor=$latestCursor&limit=$pullPageSize'
           : '?limit=$pullPageSize';
 
       final response = await apiClient
-        .get('/sync/changes$cursorParam')
-        .timeout(const Duration(seconds: 15));
+          .get(
+            '/sync/changes$cursorParam',
+            authToken: lease?.authToken,
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (lease != null && !lease.isStillValid) {
+        break;
+      }
 
       if (response.statusCode != 200) {
         throw Exception('HTTP ${response.statusCode}: Pull changes failed');
@@ -246,7 +278,7 @@ class SyncEngine {
       pageCount++;
 
       // BEGIN ATOMIC TRANSACTION (Changes + Cursor) bound to targetDb
-    await targetDb.transaction((txn) async {
+      await targetDb.transaction((txn) async {
         for (final change in changes) {
           final entityType = (change['entityType'] as String).toUpperCase();
           final entityId = change['entityId'] as String;
@@ -424,11 +456,11 @@ class SyncEngine {
 
       totalPulled += changes.length;
 
-    // Cursor-progress termination:
-    // Stop when cursor did not advance (stabilised) or server sent no cursor.
-    final cursorAdvanced = nextCursor != null &&
-        nextCursor.isNotEmpty &&
-        nextCursor != latestCursor;
+      // Cursor-progress termination:
+      // Stop when cursor did not advance (stabilised) or server sent no cursor.
+      final cursorAdvanced = nextCursor != null &&
+          nextCursor.isNotEmpty &&
+          nextCursor != latestCursor;
 
       if (cursorAdvanced) {
         previousCursor = latestCursor;
@@ -444,6 +476,4 @@ class SyncEngine {
       nextCursor: latestCursor,
     );
   }
-
-
 }

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:sqflite/sqflite.dart';
 import '../database/outbox_dao.dart';
 import 'sync_engine.dart';
+import 'sync_lease.dart';
 import 'sync_state.dart';
 import 'sync_trigger.dart';
 
@@ -14,10 +16,13 @@ import 'sync_trigger.dart';
 /// - Debounce high-frequency triggers (like repeated local mutations);
 /// - Recover interrupted operations on initialization;
 /// - Expose reactive SyncState;
-/// - Expose [lastCycleDidWork] so the Scheduler can make accurate IDLE decisions.
+/// - Expose [lastCycleDidWork] so the Scheduler can make accurate IDLE decisions;
+/// - Provide SessionBoundSyncLease per logical cycle with database and credential binding.
 class BackgroundSyncCoordinator {
   final SyncEngine syncEngine;
   final OutboxDao outboxDao;
+  final Future<Database?> Function()? databaseResolver;
+  final Future<String?> Function()? tokenResolver;
 
   final ValueNotifier<SyncState> _stateNotifier =
       ValueNotifier<SyncState>(SyncState.initial());
@@ -53,6 +58,8 @@ class BackgroundSyncCoordinator {
   BackgroundSyncCoordinator({
     required this.syncEngine,
     OutboxDao? outboxDao,
+    this.databaseResolver,
+    this.tokenResolver,
   }) : outboxDao = outboxDao ?? OutboxDao();
 
   /// Current synchronization state snapshot.
@@ -91,7 +98,12 @@ class BackgroundSyncCoordinator {
   /// Only recovers entries stale for more than 5 minutes.
   Future<void> recoverInterruptedOperations() async {
     try {
-      final recovered = await outboxDao.recoverProcessingEntries();
+      DatabaseExecutor? targetDb;
+      if (databaseResolver != null) {
+        targetDb = await databaseResolver!();
+      }
+      final recovered =
+          await outboxDao.recoverProcessingEntries(executor: targetDb);
       if (recovered > 0) {
         debugPrint(
             '🔄 BackgroundSyncCoordinator: Recovered $recovered stale PROCESSING entries → FAILED.');
@@ -133,7 +145,36 @@ class BackgroundSyncCoordinator {
 
     final cycleGeneration = ++_currentGeneration;
     _isSyncing = true;
-    final pendingCount = await _getPendingOutboxCount();
+
+    // Resolve bound database for initiating scope
+    Database? boundDb;
+    if (databaseResolver != null) {
+      try {
+        boundDb = await databaseResolver!();
+      } catch (_) {
+        _isSyncing = false;
+        return;
+      }
+    }
+
+    // Resolve bound auth token for initiating session
+    String? boundToken;
+    if (tokenResolver != null) {
+      try {
+        boundToken = await tokenResolver!();
+      } catch (_) {
+        // Fallback or empty if token cannot be retrieved
+      }
+    }
+
+    // Bind operational sync lease
+    final lease = SyncLease(
+      db: boundDb,
+      authToken: boundToken,
+      isCancelled: () => cycleGeneration != _currentGeneration || _isDisposed,
+    );
+
+    final pendingCount = await _getPendingOutboxCount(executor: boundDb);
 
     if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
@@ -148,12 +189,12 @@ class BackgroundSyncCoordinator {
       if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
       // 1. Push Phase: process pending Outbox entries
-      final pushSummary = await syncEngine.pushPendingOutbox();
+      final pushSummary = await syncEngine.pushPendingOutbox(lease: lease);
 
       if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
       // 2. Pull Phase: fetch incremental updates from server
-      final pullSummary = await syncEngine.pullIncrementalChanges();
+      final pullSummary = await syncEngine.pullIncrementalChanges(lease: lease);
 
       if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
@@ -163,7 +204,7 @@ class BackgroundSyncCoordinator {
       lastCycleDidWork =
           pushSummary.totalProcessed > 0 || pullSummary.totalChanges > 0;
 
-      final remainingPending = await _getPendingOutboxCount();
+      final remainingPending = await _getPendingOutboxCount(executor: boundDb);
       final now = DateTime.now();
 
       if (cycleGeneration != _currentGeneration || _isDisposed) return;
@@ -180,7 +221,7 @@ class BackgroundSyncCoordinator {
 
       debugPrint('❌ BackgroundSyncCoordinator Sync Error: $e');
       lastCycleDidWork = false;
-      final remainingPending = await _getPendingOutboxCount();
+      final remainingPending = await _getPendingOutboxCount(executor: boundDb);
 
       if (cycleGeneration != _currentGeneration || _isDisposed) return;
 
@@ -207,9 +248,13 @@ class BackgroundSyncCoordinator {
     }
   }
 
-  Future<int> _getPendingOutboxCount() async {
+  Future<int> _getPendingOutboxCount({DatabaseExecutor? executor}) async {
     try {
-      return await outboxDao.getPendingCount();
+      DatabaseExecutor? targetExecutor = executor;
+      if (targetExecutor == null && databaseResolver != null) {
+        targetExecutor = await databaseResolver!();
+      }
+      return await outboxDao.getPendingCount(executor: targetExecutor);
     } catch (_) {
       return 0;
     }

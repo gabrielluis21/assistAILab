@@ -12,6 +12,7 @@ class FakeApiClient extends ApiClient {
   Future<http.Response> post(
     String endpoint, {
     Map<String, dynamic>? body,
+    String? authToken,
   }) async {
     if (endpoint.contains('grant')) {
       return http.Response(

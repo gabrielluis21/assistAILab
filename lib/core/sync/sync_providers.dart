@@ -37,13 +37,21 @@ final syncEngineProvider = Provider<SyncEngine>((ref) {
 final backgroundSyncCoordinatorProvider =
     Provider<BackgroundSyncCoordinator>((ref) {
   // Invalidate and recreate coordinator when auth scope changes to isolate sync state per scope.
-  ref.watch(authScopeProvider);
+  final scope = ref.watch(authScopeProvider);
   final syncEngine = ref.watch(syncEngineProvider);
   final outboxDao = ref.watch(outboxDaoProvider);
+  final apiClient = ref.watch(apiClientProvider);
 
   final coordinator = BackgroundSyncCoordinator(
     syncEngine: syncEngine,
     outboxDao: outboxDao,
+    databaseResolver: () async {
+      if (kIsWeb || scope == null || scope is InvalidAuthScope) return null;
+      return AuthScopedDatabaseManager.instance.activeDatabase;
+    },
+    tokenResolver: () async {
+      return apiClient.getAuthToken();
+    },
   );
 
   ref.onDispose(() {
