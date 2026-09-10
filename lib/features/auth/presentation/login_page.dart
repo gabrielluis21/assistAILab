@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../application/auth_route_resolver.dart';
 import '../application/auth_provider.dart';
+import '../domain/entities/session_state.dart';
 
 class LoginPage extends ConsumerStatefulWidget {
   const LoginPage({super.key});
@@ -38,19 +39,16 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   @override
   Widget build(BuildContext context) {
     ref.listen(authStateProvider, (previous, next) {
-      next.whenOrNull(
-        data: (user) {
-          if (user == null) {
-            return;
-          }
-
+      switch (next) {
+        case AuthenticatedSession(:final user):
           final route = AuthRouteResolver.routeFor(user);
-
           if (Modular.to.path != route) {
             Modular.to.navigate(route);
           }
-        },
-        error: (error, stackTrace) {
+        case SessionFailure(
+            operation: SessionOperation.login,
+            :final error,
+          ):
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
@@ -58,12 +56,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
               ),
             ),
           );
-        },
-      );
+        default:
+          break;
+      }
     });
 
     final authState = ref.watch(authStateProvider);
-    final isLoading = authState.isLoading;
+    final isLoading = authState is SessionAuthenticating;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),

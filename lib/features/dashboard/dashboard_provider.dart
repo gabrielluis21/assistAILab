@@ -4,6 +4,7 @@ import '../service_orders/service_order_entity.dart';
 import '../customers/customers_provider.dart';
 import '../equipment/equipments_provider.dart';
 import '../finance/payments_provider.dart';
+import '../auth/application/auth_provider.dart';
 
 class DashboardMetrics {
   final int totalOrders;
@@ -34,11 +35,20 @@ class DashboardMetrics {
 }
 
 final dashboardMetricsProvider = FutureProvider<DashboardMetrics>((ref) async {
+  final sessionKey = ref.watch(authenticatedSessionKeyProvider);
+  if (sessionKey == null) {
+    throw StateError('Dashboard requires an authenticated session.');
+  }
+
   // Watch all providers simultaneously
   final orders = await ref.watch(serviceOrdersProvider.future);
   final customers = await ref.watch(customersProvider.future);
   final equipments = await ref.watch(equipmentsProvider.future);
   final financeSummary = await ref.watch(financeSummaryProvider.future);
+
+  if (ref.read(authenticatedSessionKeyProvider) != sessionKey) {
+    throw StateError('Dashboard fetch was superseded by another session.');
+  }
 
   final ordersOpen = orders
       .where((o) =>

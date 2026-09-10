@@ -10,19 +10,17 @@ class ScopeHashGenerator {
   ///
   /// Throws [ArgumentError] if passed an invalid scope.
   static String canonicalScopeKey(AuthScope scope) {
-    if (scope is ProfessionalAuthScope) {
-      return 'PROFESSIONAL:${scope.userId}:${scope.organizationId}';
-    } else if (scope is CustomerAuthScope) {
-      return 'CUSTOMER:${scope.userId}:${scope.customerId}';
-    } else if (scope is InvalidAuthScope) {
+    if (scope is InvalidAuthScope) {
       throw ArgumentError(
         'Cannot generate database scope key for InvalidAuthScope: ${scope.reason}',
       );
-    } else {
+    }
+    if (scope is! ProfessionalAuthScope && scope is! CustomerAuthScope) {
       throw ArgumentError(
         'Unknown or unsupported AuthScope type: ${scope.runtimeType}',
       );
     }
+    return scope.canonicalKey;
   }
 
   /// Generates a deterministic SHA-256 hex string hash from a canonical scope key.

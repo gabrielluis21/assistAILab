@@ -7,6 +7,23 @@ import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
 import 'sync_lease.dart';
 
+/// HTTP response failure returned by a Sync endpoint.
+final class SyncHttpException implements Exception {
+  final int statusCode;
+  final String operation;
+  final String responseBody;
+
+  const SyncHttpException({
+    required this.statusCode,
+    required this.operation,
+    required this.responseBody,
+  });
+
+  @override
+  String toString() =>
+      'SyncHttpException($operation, HTTP $statusCode): $responseBody';
+}
+
 class SyncPushSummary {
   final int totalProcessed;
   final int syncedCount;
@@ -87,13 +104,19 @@ class SyncEngine {
       return const SyncPushSummary();
     }
 
+    // A leased native cycle must never fall through to the process-global DB.
+    if (lease != null && lease.db == null) {
+      return const SyncPushSummary();
+    }
+
     // 2. Validate explicit credential (fail-closed before any DB mutations or HTTP)
     if (lease != null && !lease.credential.hasValidToken) {
       return const SyncPushSummary();
     }
 
     // 3. Resolve/use bound DB
-    final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
+    final targetDb =
+        lease != null ? lease.db! : db ?? await SqliteDatabase.instance;
 
     // 4. Read pending entries
     final pendingEntries = await outboxDao.getPendingEntries(
@@ -208,7 +231,11 @@ class SyncEngine {
             executor: targetDb,
           );
         }
-        throw Exception('HTTP ${response.statusCode}: Push failed');
+        throw SyncHttpException(
+          statusCode: response.statusCode,
+          operation: 'push',
+          responseBody: response.body,
+        );
       }
     } catch (e) {
       // Network or timeout exception - schedule retries safely
@@ -254,11 +281,16 @@ class SyncEngine {
     if (lease != null && !lease.isStillValid) {
       return const SyncPullSummary();
     }
+    // A leased native cycle must never fall through to the process-global DB.
+    if (lease != null && lease.db == null) {
+      return const SyncPullSummary();
+    }
     // Fail-closed credential guard for the pull phase.
     if (lease != null && !lease.credential.hasValidToken) {
       return const SyncPullSummary();
     }
-    final targetDb = lease?.db ?? db ?? await SqliteDatabase.instance;
+    final targetDb =
+        lease != null ? lease.db! : db ?? await SqliteDatabase.instance;
     int totalPulled = 0;
     String? previousCursor = await getLocalCursor(executor: targetDb);
     String? latestCursor = previousCursor;
@@ -286,7 +318,11 @@ class SyncEngine {
       }
 
       if (response.statusCode != 200) {
-        throw Exception('HTTP ${response.statusCode}: Pull changes failed');
+        throw SyncHttpException(
+          statusCode: response.statusCode,
+          operation: 'pull',
+          responseBody: response.body,
+        );
       }
 
       final body = jsonDecode(response.body) as Map<String, dynamic>;

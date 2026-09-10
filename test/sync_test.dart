@@ -136,6 +136,40 @@ class MockHttpClientWithCustomResponses extends http.BaseClient {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  const testScope = ProfessionalAuthScope(
+    userId: 'test-user-sync',
+    organizationId: 'test-org-sync',
+  );
+  var sessionGeneration = 0;
+  late int activeSessionGeneration;
+
+  SyncSessionBinding currentSessionBinding() {
+    final boundGeneration = activeSessionGeneration;
+    final manager = AuthScopedDatabaseManager.instance;
+    return SyncSessionBinding(
+      scope: testScope,
+      sessionGeneration: boundGeneration,
+      resolveBoundHandle: () async {
+        final handle = manager.currentHandle;
+        return handle != null &&
+                handle.authScope == testScope &&
+                handle.sessionGeneration == boundGeneration
+            ? handle
+            : null;
+      },
+      isHandleCurrent: manager.isCurrentHandle,
+      resolveToken: () async => 'test-session-token',
+      isCurrentOnline: () => activeSessionGeneration == boundGeneration,
+      isAuthHttpGenerationCurrent: (generation) =>
+          generation == activeSessionGeneration,
+      onAuthorizationFailure: ({
+        required sessionGeneration,
+        required statusCode,
+        required authorityRevalidation,
+      }) {},
+    );
+  }
+
   setUpAll(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
@@ -151,11 +185,11 @@ void main() {
   });
 
   setUp(() async {
-    const testScope = ProfessionalAuthScope(
-      userId: 'test-user-sync',
-      organizationId: 'test-org-sync',
+    activeSessionGeneration = ++sessionGeneration;
+    await AuthScopedDatabaseManager.instance.openDatabaseForScope(
+      testScope,
+      sessionGeneration: activeSessionGeneration,
     );
-    await AuthScopedDatabaseManager.instance.openDatabaseForScope(testScope);
   });
 
   group('SyncTrigger & SyncState Unit Tests', () {
@@ -609,6 +643,7 @@ void main() {
       coordinator = BackgroundSyncCoordinator(
         syncEngine: fakeEngine,
         outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
       );
     });
 
@@ -744,6 +779,7 @@ void main() {
       coordinator = BackgroundSyncCoordinator(
         syncEngine: fakeEngine,
         outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
       );
       scheduler = SyncScheduler(coordinator: coordinator);
     });
@@ -1226,6 +1262,7 @@ void main() {
       coordinator = BackgroundSyncCoordinator(
         syncEngine: fakeEngine,
         outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
       );
       scheduler = SyncScheduler(coordinator: coordinator);
     });
@@ -1525,15 +1562,6 @@ void main() {
         () async {
       final db = await SqliteDatabase.instance;
       const opId = 'op-atomic-fail-entity';
-
-      final outboxItem = OutboxItem(
-        operationId: opId,
-        entityType: 'CUSTOMER',
-        entityId: 'cust-xyz',
-        operationType: 'CREATE',
-        payload: {'name': 'Rolled Back Outbox'},
-        createdAt: DateTime.now().toIso8601String(),
-      );
 
       try {
         await db.transaction((txn) async {

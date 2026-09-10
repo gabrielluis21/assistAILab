@@ -10,11 +10,8 @@ class CustomerDashboardPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final auth = ref.watch(authStateProvider);
-    final ordersAsync =
-        ref.watch(customerServiceOrdersProvider);
-
-    final user = auth.valueOrNull;
+    final user = ref.watch(currentUserProvider);
+    final ordersAsync = ref.watch(customerServiceOrdersProvider);
 
     final firstName = user?.name.trim().isNotEmpty == true
         ? user!.name.trim().split(RegExp(r'\s+')).first
@@ -40,26 +37,21 @@ class CustomerDashboardPage extends ConsumerWidget {
             ),
             data: (orders) {
               final active = orders.where((order) {
-                return order.status !=
-                        ServiceOrderStatusEnum.entregue &&
-                    order.status !=
-                        ServiceOrderStatusEnum.cancelado;
+                return order.status != ServiceOrderStatusEnum.entregue &&
+                    order.status != ServiceOrderStatusEnum.cancelado;
               }).length;
 
               final awaitingApproval = orders
                   .where(
                     (order) =>
                         order.status ==
-                        ServiceOrderStatusEnum
-                            .aguardandoAprovacao,
+                        ServiceOrderStatusEnum.aguardandoAprovacao,
                   )
                   .length;
 
               final ready = orders
                   .where(
-                    (order) =>
-                        order.status ==
-                        ServiceOrderStatusEnum.pronto,
+                    (order) => order.status == ServiceOrderStatusEnum.pronto,
                   )
                   .length;
 

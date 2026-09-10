@@ -14,6 +14,22 @@ class AuthScopeManager {
 
     final role = user.role.trim().toUpperCase();
 
+    if (user.id.trim().isEmpty) {
+      return InvalidAuthScope(
+        userId: user.id,
+        role: user.role,
+        reason: 'Authenticated user is missing authoritative userId',
+      );
+    }
+
+    if (user.status.trim().toUpperCase() != 'ACTIVE') {
+      return InvalidAuthScope(
+        userId: user.id,
+        role: user.role,
+        reason: 'Authenticated user status is not ACTIVE',
+      );
+    }
+
     if (role == 'CUSTOMER') {
       final customerId = user.customerId;
       if (customerId == null || customerId.trim().isEmpty) {
@@ -27,7 +43,7 @@ class AuthScopeManager {
         userId: user.id,
         customerId: customerId,
       );
-    } else {
+    } else if (role == 'ADMIN' || role == 'TECHNICIAN') {
       final organizationId = user.organizationId;
       if (organizationId == null || organizationId.trim().isEmpty) {
         return InvalidAuthScope(
@@ -42,5 +58,11 @@ class AuthScopeManager {
         organizationId: organizationId,
       );
     }
+
+    return InvalidAuthScope(
+      userId: user.id,
+      role: user.role,
+      reason: 'Unsupported authenticated role: $role',
+    );
   }
 }

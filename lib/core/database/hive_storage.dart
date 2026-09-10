@@ -18,14 +18,6 @@ class HiveStorage {
     return _box.get('dark_mode', defaultValue: false) as bool;
   }
 
-  static Future<void> setAuthToken(String token) async {
-    await _box.put('auth_token', token);
-  }
-
-  static String? getAuthToken() {
-    return _box.get('auth_token') as String?;
-  }
-
   static Future<void> setLocalServicePort(int port) async {
     await _box.put('local_service_port', port);
   }

@@ -1,50 +1,23 @@
+import 'dart:convert';
+
+import 'package:assistailab/core/network/api_client.dart';
+import 'package:assistailab/core/security/credential_storage.dart';
+import 'package:assistailab/features/auth/data/datasources/auth_remote_datasource.dart';
+import 'package:assistailab/features/auth/data/repositories/auth_repository_impl.dart';
+import 'package:assistailab/features/auth/domain/entities/user.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
-import 'package:assistailab/features/auth/domain/entities/user.dart';
-import 'package:assistailab/features/auth/data/datasources/auth_remote_datasource.dart';
-import 'package:assistailab/core/network/api_client.dart';
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
+import 'package:http/testing.dart';
 
 const _meResponse =
     '{"user":{"id":"u1","name":"Test User","email":"test@example.com",'
-    '"role":"TECHNICIAN","status":"ACTIVE","customerId":null,"organizationId":"org-123"}}';
-
-class _FakeApiClient extends ApiClient {
-  final int getMeStatus;
-  final String getMeBody;
-
-  _FakeApiClient({
-    this.getMeStatus = 200,
-    this.getMeBody = _meResponse,
-  }) : super(baseUrl: 'http://fake.api');
-
-  @override
-  Future<http.Response> get(String endpoint, {String? authToken}) async {
-    if (endpoint == '/auth/me') {
-      return http.Response(getMeBody, getMeStatus);
-    }
-
-    throw UnimplementedError('GET $endpoint');
-  }
-
-  @override
-  Future<http.Response> post(
-    String endpoint, {
-    Map<String, dynamic>? body,
-    String? authToken,
-  }) async {
-    throw UnimplementedError('POST $endpoint');
-  }
-}
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
+    '"role":"TECHNICIAN","status":"ACTIVE","customerId":null,'
+    '"organizationId":"org-123"}}';
 
 void main() {
-  group('Auth Tests', () {
-    // ── Serialização básica (existente) ──────────────────────────────────────
-    test('User serialization', () {
-      final user = User(
+  group('User', () {
+    test('round-trips required and scoped fields', () {
+      const user = User(
         id: '1',
         name: 'Test User',
         email: 'test@example.com',
@@ -53,81 +26,242 @@ void main() {
         organizationId: 'org-100',
       );
 
-      final json = user.toJson();
-      expect(json['id'], '1');
-      expect(json['name'], 'Test User');
-      expect(json['organizationId'], 'org-100');
+      final restored = User.fromJson(user.toJson());
 
-      final userFromJson = User.fromJson(json);
-      expect(userFromJson.id, '1');
-      expect(userFromJson.email, 'test@example.com');
-      expect(userFromJson.organizationId, 'org-100');
+      expect(restored.id, '1');
+      expect(restored.email, 'test@example.com');
+      expect(restored.organizationId, 'org-100');
+    });
+
+    test('rejects a non-string required field', () {
+      expect(
+        () => User.fromJson(<String, dynamic>{
+          'id': 1,
+          'name': 'Test User',
+          'email': 'test@example.com',
+          'role': 'TECHNICIAN',
+          'status': 'ACTIVE',
+        }),
+        throwsA(isA<FormatException>()),
+      );
     });
   });
 
-  // ── Bootstrap de sessão ──────────────────────────────────────────────────
-  group('AuthRemoteDataSource.getMe()', () {
-    test('retorna usuário quando /auth/me responde 200', () async {
-      final ds = AuthRemoteDataSource(_FakeApiClient(getMeStatus: 200));
-      final result = await ds.getMe();
-      final userObj = result['user'] as Map<String, dynamic>;
-      expect(userObj['id'], 'u1');
-      expect(userObj['email'], 'test@example.com');
-      expect(userObj['organizationId'], 'org-123');
+  group('AuthRemoteDataSource credential provenance', () {
+    test('login is explicitly anonymous even when storage contains a token',
+        () async {
+      final storage = _RecordingCredentialStorage(
+        StoredCredential(
+          accessToken: 'residual-session-token',
+          bindingId: 'old-binding',
+        ),
+      );
+      late http.Request captured;
+      final client = MockClient((request) async {
+        captured = request;
+        return http.Response(
+          '{"token":"new-token","user":${jsonEncode(_userJson)}}',
+          200,
+        );
+      });
+      final dataSource = AuthRemoteDataSource(
+        ApiClient(
+          baseUrl: 'https://api.example.test',
+          client: client,
+          credentialStorage: storage,
+        ),
+      );
+
+      await dataSource.login('test@example.com', 'secret');
+
+      expect(captured.method, 'POST');
+      expect(captured.url.path, '/auth/login');
+      expect(captured.headers, isNot(contains('authorization')));
+      expect(storage.readCalls, 0);
+      expect(jsonDecode(captured.body), <String, dynamic>{
+        'email': 'test@example.com',
+        'password': 'secret',
+      });
     });
 
-    test('lança UnauthorizedException quando /auth/me responde 401', () async {
-      final ds = AuthRemoteDataSource(
-        _FakeApiClient(getMeStatus: 401, getMeBody: '{"error":"Unauthorized"}'),
+    test('/auth/me uses the exact captured token, never the stored token',
+        () async {
+      final storage = _RecordingCredentialStorage(
+        StoredCredential(
+          accessToken: 'different-current-token',
+          bindingId: 'current-binding',
+        ),
       );
-      expect(ds.getMe(), throwsA(isA<UnauthorizedException>()));
+      late http.Request captured;
+      final dataSource = AuthRemoteDataSource(
+        ApiClient(
+          baseUrl: 'https://api.example.test',
+          client: MockClient((request) async {
+            captured = request;
+            return http.Response(_meResponse, 200);
+          }),
+          credentialStorage: storage,
+        ),
+      );
+
+      final result = await dataSource.getMe('captured-bootstrap-token');
+
+      expect((result['user'] as Map<String, dynamic>)['id'], 'u1');
+      expect(captured.method, 'GET');
+      expect(captured.url.path, '/auth/me');
+      expect(
+        captured.headers['authorization'],
+        'Bearer captured-bootstrap-token',
+      );
+      expect(storage.readCalls, 0);
     });
 
-    test('lança UnauthorizedException quando /auth/me responde 403', () async {
-      final ds = AuthRemoteDataSource(
-        _FakeApiClient(getMeStatus: 403, getMeBody: '{"error":"Forbidden"}'),
+    for (final statusCode in <int>[401, 403]) {
+      test('/auth/me maps HTTP $statusCode to UnauthorizedException', () async {
+        final dataSource = _dataSourceReturning(
+          statusCode,
+          '{"error":"rejected"}',
+        );
+
+        await expectLater(
+          dataSource.getMe('captured-token'),
+          throwsA(
+            isA<UnauthorizedException>().having(
+              (error) => error.statusCode,
+              'statusCode',
+              statusCode,
+            ),
+          ),
+        );
+      });
+    }
+
+    test('/auth/me exposes typed server-unavailable failure', () async {
+      final dataSource = _dataSourceReturning(
+        503,
+        '{"error":"unavailable"}',
       );
-      expect(ds.getMe(), throwsA(isA<UnauthorizedException>()));
+
+      await expectLater(
+        dataSource.getMe('captured-token'),
+        throwsA(
+          isA<AuthRemoteException>()
+              .having((error) => error.statusCode, 'statusCode', 503)
+              .having(
+                (error) => error.isServerUnavailable,
+                'isServerUnavailable',
+                isTrue,
+              ),
+        ),
+      );
     });
 
-    test('lança Exception genérica para outros status HTTP', () async {
-      final ds = AuthRemoteDataSource(
-        _FakeApiClient(
-            getMeStatus: 500, getMeBody: '{"error":"Internal Server Error"}'),
+    test('malformed success payload fails as AuthResponseFormatException',
+        () async {
+      final dataSource = _dataSourceReturning(200, 'not-json');
+
+      await expectLater(
+        dataSource.getMe('captured-token'),
+        throwsA(isA<AuthResponseFormatException>()),
       );
-      expect(ds.getMe(), throwsA(isA<Exception>()));
     });
   });
 
-  group('AuthRepositoryImpl.getCurrentUser() — lógica de bootstrap', () {
-    // Estes testes exercem APENAS AuthRemoteDataSource diretamente
-    // (sem Hive, que requer plataforma nativa).
+  group('AuthRepositoryImpl', () {
+    test('parses the authoritative /auth/me user', () async {
+      final repository = AuthRepositoryImpl(
+        _dataSourceReturning(200, _meResponse),
+      );
 
-    test('retorna dados do backend quando /auth/me é 200', () async {
-      final ds = AuthRemoteDataSource(_FakeApiClient(getMeStatus: 200));
-      final data = await ds.getMe();
-      final userMap = (data['user'] as Map<String, dynamic>?) ?? data;
-      final user = User.fromJson(userMap);
+      final user = await repository.getCurrentUser('exact-token');
+
       expect(user.id, 'u1');
       expect(user.role, 'TECHNICIAN');
       expect(user.organizationId, 'org-123');
     });
 
-    test('UnauthorizedException quando token expirado (401)', () async {
-      final ds = AuthRemoteDataSource(
-        _FakeApiClient(getMeStatus: 401, getMeBody: '{"error":"expired"}'),
+    test('rejects login response without a non-empty token', () async {
+      final repository = AuthRepositoryImpl(
+        _dataSourceReturning(
+          200,
+          '{"token":"","user":${jsonEncode(_userJson)}}',
+        ),
       );
-      expect(ds.getMe(), throwsA(isA<UnauthorizedException>()));
-    });
 
-    test(
-        'current_user local SEM token não deve autenticar (sem token = null retornado)',
-        () {
-      // O repositório verifica jwt_token ANTES de chamar /auth/me.
-      // Sem Hive disponível no test runner, validamos apenas que
-      // a fonte remota não é chamada sem necessidade.
-      // O comportamento é garantido pelo code-path em AuthRepositoryImpl.
-      expect(true, isTrue); // placeholder documental
+      await expectLater(
+        repository.login('test@example.com', 'secret'),
+        throwsA(isA<AuthResponseFormatException>()),
+      );
     });
   });
+}
+
+const Map<String, dynamic> _userJson = <String, dynamic>{
+  'id': 'u1',
+  'name': 'Test User',
+  'email': 'test@example.com',
+  'role': 'TECHNICIAN',
+  'status': 'ACTIVE',
+  'customerId': null,
+  'organizationId': 'org-123',
+};
+
+AuthRemoteDataSource _dataSourceReturning(int statusCode, String body) {
+  return AuthRemoteDataSource(
+    ApiClient(
+      baseUrl: 'https://api.example.test',
+      client: MockClient((_) async => http.Response(body, statusCode)),
+      credentialStorage: _RecordingCredentialStorage(),
+    ),
+  );
+}
+
+final class _RecordingCredentialStorage implements CredentialStorage {
+  _RecordingCredentialStorage([this.value]);
+
+  StoredCredential? value;
+  String? cleanupPendingBindingId;
+  int readCalls = 0;
+
+  @override
+  Future<StoredCredential?> read() async {
+    readCalls++;
+    return value;
+  }
+
+  @override
+  Future<void> write(StoredCredential credential) async {
+    value = credential;
+  }
+
+  @override
+  Future<String?> readCleanupPendingBindingId() async =>
+      cleanupPendingBindingId;
+
+  @override
+  Future<void> markCleanupPending(String bindingId) async {
+    cleanupPendingBindingId = bindingId;
+  }
+
+  @override
+  Future<void> delete() async {
+    value = null;
+  }
+
+  @override
+  Future<bool> deleteIfMatches(String bindingId) async {
+    if (value?.bindingId != bindingId) return false;
+    value = null;
+    return true;
+  }
+
+  @override
+  Future<void> clearCleanupPending(String bindingId) async {
+    if (cleanupPendingBindingId == bindingId) {
+      cleanupPendingBindingId = null;
+    }
+  }
+
+  @override
+  Future<void> purgeLegacyCredentials() async {}
 }

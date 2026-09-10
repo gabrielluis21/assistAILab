@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/auth/application/auth_provider.dart';
+import '../../features/auth/application/auth_route_resolver.dart';
+import '../../features/auth/domain/entities/session_state.dart';
 import '../../features/dashboard/dashboard_page.dart';
 import '../../features/service_orders/service_orders_page.dart';
 import '../../features/customers/customers_page.dart';
@@ -16,7 +20,7 @@ final _navIndexProvider = StateProvider<int>((ref) => 0);
 class AppShell extends ConsumerWidget {
   const AppShell({super.key});
 
-  static final _pages = <Widget>[
+  static const _pages = <Widget>[
     DashboardPage(),
     ServiceOrdersPage(),
     CustomersPage(),
@@ -60,8 +64,21 @@ class AppShell extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(authStateProvider);
+    if (session is! AuthenticatedSession) {
+      if (session is SessionUnauthenticated || session is SessionFailure) {
+        _navigateAfterBuild(AuthRouteResolver.loginRoute);
+      }
+      return const _SessionTransitionPage();
+    }
+    if (AuthRouteResolver.isCustomer(session.user)) {
+      _navigateAfterBuild(AuthRouteResolver.customerRoute);
+      return const _SessionTransitionPage();
+    }
+
     final selectedIndex = ref.watch(_navIndexProvider);
     final isWide = MediaQuery.of(context).size.width >= 800;
+    final isOfflineLimited = session is AuthenticatedOfflineLimited;
 
     if (isWide) {
       // Desktop / Tablet: Navigation Rail
@@ -69,9 +86,19 @@ class AppShell extends ConsumerWidget {
         backgroundColor: const Color(0xFF0F172A),
         body: Row(
           children: [
-            _buildNavigationRail(context, ref, selectedIndex),
+            _buildNavigationRail(
+              context,
+              ref,
+              selectedIndex,
+              isOfflineLimited,
+            ),
             const VerticalDivider(color: Color(0xFF1E293B), width: 1),
-            Expanded(child: _pages[selectedIndex]),
+            Expanded(
+              child: _pageFor(
+                selectedIndex,
+                isOfflineLimited: isOfflineLimited,
+              ),
+            ),
           ],
         ),
       );
@@ -80,10 +107,13 @@ class AppShell extends ConsumerWidget {
     // Mobile: Bottom Navigation Bar (only first 5 items)
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
-      body: _pages[selectedIndex < 5 ? selectedIndex : 0],
+      body: _pageFor(
+        selectedIndex < 5 ? selectedIndex : 0,
+        isOfflineLimited: isOfflineLimited,
+      ),
       bottomNavigationBar: NavigationBar(
         backgroundColor: const Color(0xFF1E293B),
-        indicatorColor: const Color(0xFF0284C7).withOpacity(0.2),
+        indicatorColor: const Color(0xFF0284C7).withValues(alpha: 0.2),
         selectedIndex: selectedIndex < 5 ? selectedIndex : 0,
         onDestinationSelected: (i) =>
             ref.read(_navIndexProvider.notifier).state = i,
@@ -121,12 +151,27 @@ class AppShell extends ConsumerWidget {
   }
 
   Widget _buildNavigationRail(
-      BuildContext context, WidgetRef ref, int selectedIndex) {
+    BuildContext context,
+    WidgetRef ref,
+    int selectedIndex,
+    bool isOfflineLimited,
+  ) {
     return NavigationRail(
       backgroundColor: const Color(0xFF1E293B),
       selectedIndex: selectedIndex,
-      onDestinationSelected: (i) =>
-          ref.read(_navIndexProvider.notifier).state = i,
+      onDestinationSelected: (i) {
+        if (isOfflineLimited && i == 5) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Comandos financeiros exigem autoridade online atual.',
+              ),
+            ),
+          );
+          return;
+        }
+        ref.read(_navIndexProvider.notifier).state = i;
+      },
       selectedIconTheme: const IconThemeData(color: Color(0xFF38BDF8)),
       unselectedIconTheme: const IconThemeData(color: Colors.white38),
       selectedLabelTextStyle: const TextStyle(
@@ -170,12 +215,70 @@ class AppShell extends ConsumerWidget {
                 const Divider(color: Color(0xFF334155)),
                 const SizedBox(height: 8),
                 _SyncStatusIndicator(),
+                const SizedBox(height: 8),
+                IconButton(
+                  tooltip: 'Sair',
+                  icon: const Icon(Icons.logout, color: Colors.white70),
+                  onPressed: () async {
+                    await ref.read(authStateProvider.notifier).logout();
+                    Modular.to.navigate(AuthRouteResolver.loginRoute);
+                  },
+                ),
               ],
             ),
           ),
         ),
       ),
       destinations: _destinations,
+    );
+  }
+
+  Widget _pageFor(
+    int index, {
+    required bool isOfflineLimited,
+  }) {
+    if (isOfflineLimited && index == 5) {
+      return const _OfflineFinancialBoundary();
+    }
+    return _pages[index];
+  }
+
+  static void _navigateAfterBuild(String route) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (Modular.to.path != route) {
+        Modular.to.navigate(route);
+      }
+    });
+  }
+}
+
+class _SessionTransitionPage extends StatelessWidget {
+  const _SessionTransitionPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFF0F172A),
+      body: Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+class _OfflineFinancialBoundary extends StatelessWidget {
+  const _OfflineFinancialBoundary();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Text(
+          'O financeiro fica indisponível durante uma sessão offline limitada. '
+          'Reconecte e valide sua autoridade para continuar.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white70),
+        ),
+      ),
     );
   }
 }
@@ -252,7 +355,7 @@ class _SyncStatusIndicator extends ConsumerWidget {
             color: const Color(0xFF0F172A),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: dotColor.withOpacity(0.3),
+              color: dotColor.withValues(alpha: 0.3),
               width: 1,
             ),
           ),

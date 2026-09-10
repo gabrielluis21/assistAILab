@@ -39,9 +39,46 @@ class _CapturingHttpClient extends http.BaseClient {
   }
 }
 
+SyncSessionBinding _sessionBinding({
+  required BoundDatabaseHandle handle,
+  required Future<String?> Function() resolveToken,
+}) {
+  final manager = AuthScopedDatabaseManager.instance;
+  return SyncSessionBinding(
+    scope: handle.authScope,
+    sessionGeneration: handle.sessionGeneration,
+    resolveBoundHandle: () async => handle,
+    isHandleCurrent: manager.isCurrentHandle,
+    resolveToken: resolveToken,
+    isCurrentOnline: () => manager.isCurrentHandle(handle),
+    isAuthHttpGenerationCurrent: (sessionGeneration) =>
+        sessionGeneration == handle.sessionGeneration &&
+        manager.isCurrentHandle(handle),
+    onAuthorizationFailure: ({
+      required int sessionGeneration,
+      required int statusCode,
+      required bool authorityRevalidation,
+    }) {},
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late Directory tempDir;
+  var nextSessionGeneration = 0;
+
+  Future<BoundDatabaseHandle> openScopedDatabase(AuthScope scope) {
+    return AuthScopedDatabaseManager.instance.openDatabaseForScope(
+      scope,
+      sessionGeneration: ++nextSessionGeneration,
+    );
+  }
+
+  Future<void> closeScopedDatabase() {
+    return AuthScopedDatabaseManager.instance.closeCurrentDatabase(
+      sessionGeneration: ++nextSessionGeneration,
+    );
+  }
 
   setUpAll(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -61,7 +98,7 @@ void main() {
   });
 
   tearDown(() async {
-    await AuthScopedDatabaseManager.instance.closeCurrentDatabase();
+    await closeScopedDatabase();
     if (Hive.isBoxOpen('auth_box')) {
       final box = Hive.box('auth_box');
       await box.close();
@@ -84,8 +121,8 @@ void main() {
         'DETERMINISTIC SECURITY RACE: Stale Sync A never uses token B, never mutates DB B, and does not leak state',
         () async {
       // Step A: Establish Scope A and DB A
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final handleA = await openScopedDatabase(scopeA);
+      final dbA = handleA.database;
 
       // Step B: Establish token A in Hive
       final authBox = await Hive.openBox('auth_box');
@@ -125,9 +162,10 @@ void main() {
       final coordinatorA = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async =>
-            AuthScopedDatabaseManager.instance.activeDatabase,
-        tokenResolver: () async => apiClient.getAuthToken(),
+        sessionBinding: _sessionBinding(
+          handle: handleA,
+          resolveToken: () async => 'TOKEN_A_SECRET',
+        ),
       );
 
       // Trigger Sync A
@@ -146,11 +184,11 @@ void main() {
       coordinatorA.dispose();
 
       // Step G: Close DB A
-      await AuthScopedDatabaseManager.instance.closeCurrentDatabase();
+      await closeScopedDatabase();
 
       // Step H: Establish Scope B and DB B
-      final dbB =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeB);
+      final handleB = await openScopedDatabase(scopeB);
+      final dbB = handleB.database;
 
       // Step I: Replace current credential with token B
       await authBox.put('jwt_token', 'TOKEN_B_SECRET');
@@ -199,9 +237,10 @@ void main() {
       final coordinatorB = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async =>
-            AuthScopedDatabaseManager.instance.activeDatabase,
-        tokenResolver: () async => apiClient.getAuthToken(),
+        sessionBinding: _sessionBinding(
+          handle: handleB,
+          resolveToken: () async => 'TOKEN_B_SECRET',
+        ),
       );
       expect(coordinatorB.state.status, SyncStatus.idle);
       expect(coordinatorB.state.lastError, isNull);
@@ -217,15 +256,14 @@ void main() {
           reason: 'Scope B must legitimately use token B');
 
       // 8. Fail-closed database behavior: closing scope prevents activeDatabase access
-      await AuthScopedDatabaseManager.instance.closeCurrentDatabase();
+      await closeScopedDatabase();
       expect(() => SqliteDatabase.instance, throwsA(isA<StateError>()));
     });
 
     test(
         'CANCELLATION LEASE: Multi-page pull immediately halts before page 2 when cancelled',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final dbA = (await openScopedDatabase(scopeA)).database;
       int pullPageCount = 0;
 
       final transport = _CapturingHttpClient((request) async {
@@ -287,8 +325,8 @@ void main() {
     test(
         'CANCELLATION LEASE: Cancelling between push and pull prevents pull phase from starting',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final handleA = await openScopedDatabase(scopeA);
+      final dbA = handleA.database;
       final outboxDao = OutboxDao();
 
       // Insert pending entry so push phase runs an HTTP call
@@ -325,8 +363,10 @@ void main() {
       final coordinator = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async => dbA,
-        tokenResolver: () async => 'TOKEN_A',
+        sessionBinding: _sessionBinding(
+          handle: handleA,
+          resolveToken: () async => 'TOKEN_A',
+        ),
       );
 
       // Start sync
@@ -360,8 +400,7 @@ void main() {
         () async {
       // Open dbA and dbB directly to test cross-database isolation
       final dbA = await SqliteDatabase.openDatabaseByName('db_a_explicit.db');
-      final dbB =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeB);
+      final dbB = (await openScopedDatabase(scopeB)).database;
 
       final transport = _CapturingHttpClient((request) async {
         return http.Response(
@@ -409,8 +448,7 @@ void main() {
     test(
         'CREDENTIAL PINNING: SyncLease pins auth token regardless of subsequent Hive changes',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final dbA = (await openScopedDatabase(scopeA)).database;
 
       final authBox = await Hive.openBox('auth_box');
       await authBox.put('jwt_token', 'INITIAL_TOKEN');
@@ -446,8 +484,7 @@ void main() {
     test(
         'NORMAL OPERATION: Same-session multi-page pull succeeds completely when valid',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final dbA = (await openScopedDatabase(scopeA)).database;
 
       int pagesRequested = 0;
       final transport = _CapturingHttpClient((request) async {
@@ -524,8 +561,7 @@ void main() {
     test(
         'NULL TOKEN SEMANTICS: SyncLease with explicit null token never issues any HTTP request',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final dbA = (await openScopedDatabase(scopeA)).database;
 
       // Hive contains a valid token that must NEVER be used by a leased cycle.
       final authBox = await Hive.openBox('auth_box');
@@ -562,7 +598,7 @@ void main() {
     test(
         'TOKEN RESOLVER FAILURE FAILS CLOSED: throws stops cycle before any HTTP',
         () async {
-      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final handleA = await openScopedDatabase(scopeA);
 
       // Hive contains a valid unrelated token — must never be used.
       final authBox = await Hive.openBox('auth_box');
@@ -582,10 +618,11 @@ void main() {
       final coordinator = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async =>
-            AuthScopedDatabaseManager.instance.activeDatabase,
-        tokenResolver: () async =>
-            throw Exception('credential store unavailable'),
+        sessionBinding: _sessionBinding(
+          handle: handleA,
+          resolveToken: () async =>
+              throw Exception('credential store unavailable'),
+        ),
       );
 
       await coordinator.requestSync(SyncTrigger.manual);
@@ -605,7 +642,7 @@ void main() {
     test(
         'EMPTY TOKEN FAILS CLOSED: tokenResolver returns empty string stops cycle before any HTTP',
         () async {
-      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final handleA = await openScopedDatabase(scopeA);
 
       // Hive contains a valid token — must never be used.
       final authBox = await Hive.openBox('auth_box');
@@ -625,9 +662,10 @@ void main() {
       final coordinator = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async =>
-            AuthScopedDatabaseManager.instance.activeDatabase,
-        tokenResolver: () async => '',
+        sessionBinding: _sessionBinding(
+          handle: handleA,
+          resolveToken: () async => '',
+        ),
       );
 
       await coordinator.requestSync(SyncTrigger.manual);
@@ -646,8 +684,7 @@ void main() {
     test(
         'CREDENTIAL PINNING REGRESSION: lease tokenA remains pinned when Hive changes to tokenB',
         () async {
-      final dbA =
-          await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final dbA = (await openScopedDatabase(scopeA)).database;
 
       final authBox = await Hive.openBox('auth_box');
       await authBox.put('jwt_token', 'INITIAL_TOKEN_REG');
@@ -692,7 +729,7 @@ void main() {
     test(
         'WHITESPACE TOKEN FAILS CLOSED: tokenResolver returns whitespace string stops cycle before any HTTP',
         () async {
-      await AuthScopedDatabaseManager.instance.openDatabaseForScope(scopeA);
+      final handleA = await openScopedDatabase(scopeA);
 
       // Hive contains unrelated valid tokenB — must never be used.
       final authBox = await Hive.openBox('auth_box');
@@ -712,9 +749,10 @@ void main() {
       final coordinator = BackgroundSyncCoordinator(
         syncEngine: syncEngine,
         outboxDao: outboxDao,
-        databaseResolver: () async =>
-            AuthScopedDatabaseManager.instance.activeDatabase,
-        tokenResolver: () async => '   ',
+        sessionBinding: _sessionBinding(
+          handle: handleA,
+          resolveToken: () async => '   ',
+        ),
       );
 
       await coordinator.requestSync(SyncTrigger.manual);
@@ -741,8 +779,7 @@ void main() {
       test(
           'INVALID CREDENTIAL OUTBOX MUTATION ($tokenDesc): entries remain PENDING, 0 HTTP, no Hive fallback',
           () async {
-        final dbA = await AuthScopedDatabaseManager.instance
-            .openDatabaseForScope(scopeA);
+        final dbA = (await openScopedDatabase(scopeA)).database;
 
         await dbA.delete('outbox');
 

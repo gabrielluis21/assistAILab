@@ -1,23 +1,33 @@
 import 'dart:convert';
 
 import 'package:assistailab/core/config/app_env.dart';
+import 'package:assistailab/core/security/credential_storage.dart';
+import 'package:assistailab/core/security/hive_credential_storage.dart';
 import 'package:assistailab/core/sync/sync_lease.dart';
-import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
 
 class ApiClient {
   final String baseUrl;
   final http.Client _client;
+  final CredentialStorage credentialStorage;
 
   ApiClient({
     String? baseUrl,
     http.Client? client,
+    CredentialStorage? credentialStorage,
   })  : baseUrl = baseUrl ?? AppEnv.apiBaseUrl,
-        _client = client ?? http.Client();
+        _client = client ?? http.Client(),
+        credentialStorage = credentialStorage ?? HiveCredentialStorage();
 
   Future<String?> _getToken() async {
-    final box = await Hive.openBox('auth_box');
-    return box.get('jwt_token');
+    final credential = await credentialStorage.read();
+    if (credential == null) return null;
+
+    final cleanupBinding =
+        await credentialStorage.readCleanupPendingBindingId();
+    if (cleanupBinding == credential.bindingId) return null;
+
+    return credential.accessToken;
   }
 
   /// Exposes the current auth token for session-bound lease creation at orchestration boundaries.
@@ -25,10 +35,10 @@ class ApiClient {
 
   /// Builds HTTP headers using the [BoundCredential] abstraction.
   ///
-  /// - [BoundCredential.absent] (or null): fall back to Hive dynamic resolution
+  /// - [BoundCredential.absent] (or null): use canonical CredentialStorage
   ///   (normal non-leased caller behaviour).
   /// - [BoundCredential.explicit]: use the pinned token exactly, NEVER falling
-  ///   back to Hive. Callers must ensure validity before calling this.
+  ///   back to storage. Callers must ensure validity before calling this.
   Future<Map<String, String>> _getHeadersBound(BoundCredential bound) async {
     final headers = <String, String>{
       'Content-Type': 'application/json',
@@ -37,10 +47,10 @@ class ApiClient {
 
     final String? token;
     if (bound.isExplicit) {
-      // Explicit lease credential: use exactly this value, no Hive fallback.
+      // Explicit lease credential: use exactly this value, no storage fallback.
       token = bound.pinnedToken;
     } else {
-      // No override: normal Hive-based dynamic resolution for non-leased callers.
+      // No override: canonical storage resolution for non-leased callers.
       token = await _getToken();
     }
 
@@ -55,7 +65,8 @@ class ApiClient {
   ///
   /// When [authToken] is provided (non-null), it is used directly as an explicit
   /// value (equivalent to [BoundCredential.explicit]). When null, falls back to
-  /// Hive dynamic resolution (equivalent to [BoundCredential.absent]).
+  /// dynamic canonical-storage resolution (equivalent to
+  /// [BoundCredential.absent]).
   Future<Map<String, String>> _getHeaders({String? authToken}) async {
     final bound = authToken != null
         ? BoundCredential.explicit(authToken)
@@ -75,7 +86,7 @@ class ApiClient {
   /// Session-bound variant of [get] that uses an explicit [BoundCredential].
   ///
   /// Callers that hold a [SyncLease] must use this variant to ensure no
-  /// dynamic Hive lookup can occur during an authenticated leased request.
+  /// dynamic credential lookup can occur during an authenticated leased request.
   Future<http.Response> getBound(
     String endpoint,
     BoundCredential credential,
@@ -94,6 +105,21 @@ class ApiClient {
   }) async {
     final headers = await _getHeaders(authToken: authToken);
 
+    return _client.post(
+      Uri.parse('$baseUrl$endpoint'),
+      headers: headers,
+      body: body != null ? jsonEncode(body) : null,
+    );
+  }
+
+  /// Explicitly anonymous POST. Unlike [post] with a null token, this path
+  /// never consults credential storage and therefore cannot attach a previous
+  /// Bearer credential to login or another public authentication endpoint.
+  Future<http.Response> postUnauthenticated(
+    String endpoint, {
+    Map<String, dynamic>? body,
+  }) async {
+    final headers = await _getHeadersBound(BoundCredential.explicit(null));
     return _client.post(
       Uri.parse('$baseUrl$endpoint'),
       headers: headers,

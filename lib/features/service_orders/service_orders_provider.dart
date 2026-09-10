@@ -1,12 +1,19 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import 'service_order_entity.dart';
+import '../../core/database/auth_scoped_database_manager.dart';
 import '../../core/database/service_order_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../../core/database/sqlite_database.dart';
 import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
+import '../auth/application/auth_provider.dart';
+import '../auth/domain/entities/session_state.dart';
+
+typedef _SessionDatabaseBinding = ({
+  AuthenticatedSessionKey sessionKey,
+  BoundDatabaseHandle databaseHandle,
+});
 
 final serviceOrderRepositoryProvider = Provider<ServiceOrderRepository>(
   (ref) => ServiceOrderLocalDataSource(),
@@ -44,14 +51,23 @@ List<ServiceOrderStatusEnum> allowedTransitionsFor(
   return _allowedTransitions[current] ?? <ServiceOrderStatusEnum>[];
 }
 
-class ServiceOrdersNotifier extends AutoDisposeAsyncNotifier<List<ServiceOrderEntity>> {
+class ServiceOrdersNotifier
+    extends AutoDisposeAsyncNotifier<List<ServiceOrderEntity>> {
   @override
   Future<List<ServiceOrderEntity>> build() async {
-    return _load();
+    final sessionKey = ref.watch(authenticatedSessionKeyProvider);
+    final binding = _captureBinding(sessionKey);
+    return _load(binding);
   }
 
-  Future<List<ServiceOrderEntity>> _load() async {
-    return ref.read(serviceOrderRepositoryProvider).listAll();
+  Future<List<ServiceOrderEntity>> _load(
+    _SessionDatabaseBinding binding,
+  ) async {
+    final orders = await ref.read(serviceOrderRepositoryProvider).listAll(
+          executor: binding.databaseHandle.database,
+        );
+    _ensureBindingCurrent(binding);
+    return orders;
   }
 
   Future<void> createOrder({
@@ -60,6 +76,9 @@ class ServiceOrdersNotifier extends AutoDisposeAsyncNotifier<List<ServiceOrderEn
     required String problemDescription,
     String? technicianId,
   }) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
     const uuid = Uuid();
     final order = ServiceOrderEntity(
       id: uuid.v4(),
@@ -83,22 +102,31 @@ class ServiceOrdersNotifier extends AutoDisposeAsyncNotifier<List<ServiceOrderEn
       createdAt: DateTime.now().toIso8601String(),
     );
 
-    final db = await SqliteDatabase.instance;
-    await db.transaction((txn) async {
+    await binding.databaseHandle.database.transaction((txn) async {
       await repo.upsert(order, executor: txn);
       await outbox.insert(outboxItem, executor: txn);
     });
 
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
 
-    state = AsyncData(await _load());
+    final orders = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(orders);
   }
 
   Future<bool> updateStatus(String id, ServiceOrderStatusEnum newStatus) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
     final repo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    final order = await repo.findById(id);
+    final order = await repo.findById(
+      id,
+      executor: binding.databaseHandle.database,
+    );
+    _ensureBindingCurrent(binding);
     if (order == null) return false;
 
     final allowed = allowedTransitionsFor(order.status);
@@ -118,24 +146,83 @@ class ServiceOrdersNotifier extends AutoDisposeAsyncNotifier<List<ServiceOrderEn
       createdAt: DateTime.now().toIso8601String(),
     );
 
-    final db = await SqliteDatabase.instance;
-    await db.transaction((txn) async {
+    await binding.databaseHandle.database.transaction((txn) async {
       await repo.upsert(updatedOrder, executor: txn);
       await outbox.insert(outboxItem, executor: txn);
     });
 
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
 
-    state = AsyncData(await _load());
+    final orders = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(orders);
     return true;
   }
 
   Future<void> refresh() async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    _ensureBindingCurrent(binding);
     state = const AsyncLoading();
-    state = AsyncData(await _load());
+    final orders = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(orders);
+  }
+
+  _SessionDatabaseBinding _captureBinding(
+    AuthenticatedSessionKey? sessionKey,
+  ) {
+    if (sessionKey == null) {
+      throw StateError(
+        'An authenticated session is required for service orders.',
+      );
+    }
+
+    final manager = AuthScopedDatabaseManager.instance;
+    final handle = manager.currentHandle;
+    if (handle == null ||
+        handle.authScope != sessionKey.scope ||
+        handle.sessionGeneration != sessionKey.sessionGeneration ||
+        !manager.isCurrentHandle(handle)) {
+      throw StateError(
+        'No current database is bound to the authenticated service-order session.',
+      );
+    }
+
+    return (
+      sessionKey: sessionKey,
+      databaseHandle: handle,
+    );
+  }
+
+  bool _isBindingCurrent(_SessionDatabaseBinding binding) {
+    return ref.read(authenticatedSessionKeyProvider) == binding.sessionKey &&
+        binding.databaseHandle.authScope == binding.sessionKey.scope &&
+        binding.databaseHandle.sessionGeneration ==
+            binding.sessionKey.sessionGeneration &&
+        AuthScopedDatabaseManager.instance
+            .isCurrentHandle(binding.databaseHandle);
+  }
+
+  void _ensureBindingCurrent(_SessionDatabaseBinding binding) {
+    if (!_isBindingCurrent(binding)) {
+      throw StateError(
+        'The service-order operation belongs to a stale session.',
+      );
+    }
+  }
+
+  void _requestSyncIfOnline(_SessionDatabaseBinding binding) {
+    _ensureBindingCurrent(binding);
+    if (ref.read(isOnlineSessionProvider)) {
+      ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+    }
   }
 }
 
-final serviceOrdersProvider = AutoDisposeAsyncNotifierProvider<ServiceOrdersNotifier, List<ServiceOrderEntity>>(
-    ServiceOrdersNotifier.new,
+final serviceOrdersProvider = AutoDisposeAsyncNotifierProvider<
+    ServiceOrdersNotifier, List<ServiceOrderEntity>>(
+  ServiceOrdersNotifier.new,
 );

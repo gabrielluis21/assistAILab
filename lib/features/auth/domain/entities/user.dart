@@ -7,7 +7,7 @@ class User {
   final String? customerId;
   final String? organizationId;
 
-  User({
+  const User({
     required this.id,
     required this.name,
     required this.email,
@@ -19,13 +19,13 @@ class User {
 
   factory User.fromJson(Map<String, dynamic> json) {
     return User(
-      id: json['id'],
-      name: json['name'],
-      email: json['email'],
-      role: json['role'],
-      status: json['status'],
-      customerId: json['customerId'],
-      organizationId: json['organizationId'],
+      id: _requiredString(json, 'id'),
+      name: _requiredString(json, 'name'),
+      email: _requiredString(json, 'email'),
+      role: _requiredString(json, 'role'),
+      status: _requiredString(json, 'status'),
+      customerId: _nullableString(json, 'customerId'),
+      organizationId: _nullableString(json, 'organizationId'),
     );
   }
 
@@ -39,5 +39,22 @@ class User {
       'customerId': customerId,
       'organizationId': organizationId,
     };
+  }
+
+  static String _requiredString(Map<String, dynamic> json, String key) {
+    final value = json[key];
+    if (value is! String) {
+      throw FormatException('User.$key must be a string.');
+    }
+    return value;
+  }
+
+  static String? _nullableString(Map<String, dynamic> json, String key) {
+    final value = json[key];
+    if (value == null) return null;
+    if (value is! String) {
+      throw FormatException('User.$key must be a string or null.');
+    }
+    return value;
   }
 }

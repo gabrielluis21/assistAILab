@@ -1,13 +1,20 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import 'service_order_item_entity.dart';
+import '../../core/database/auth_scoped_database_manager.dart';
 import '../../core/database/service_order_item_repository.dart';
 import '../../core/database/outbox_dao.dart';
-import '../../core/database/sqlite_database.dart';
 import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
+import '../auth/application/auth_provider.dart';
+import '../auth/domain/entities/session_state.dart';
 import 'service_orders_provider.dart';
+
+typedef _SessionDatabaseBinding = ({
+  AuthenticatedSessionKey sessionKey,
+  BoundDatabaseHandle databaseHandle,
+});
 
 final serviceOrderItemRepositoryProvider = Provider<ServiceOrderItemRepository>(
   (ref) => ServiceOrderItemLocalDataSource(),
@@ -17,12 +24,22 @@ class ServiceOrderItemsNotifier
     extends FamilyAsyncNotifier<List<ServiceOrderItemEntity>, String> {
   @override
   Future<List<ServiceOrderItemEntity>> build(String arg) async {
-    return _load(arg);
+    final sessionKey = ref.watch(authenticatedSessionKeyProvider);
+    final binding = _captureBinding(sessionKey);
+    return _load(arg, binding);
   }
 
-  Future<List<ServiceOrderItemEntity>> _load(String orderId) async {
+  Future<List<ServiceOrderItemEntity>> _load(
+    String orderId,
+    _SessionDatabaseBinding binding,
+  ) async {
     final repo = ref.read(serviceOrderItemRepositoryProvider);
-    return repo.listByOrder(orderId);
+    final items = await repo.listByOrder(
+      orderId,
+      executor: binding.databaseHandle.database,
+    );
+    _ensureBindingCurrent(binding);
+    return items;
   }
 
   Future<void> addItem({
@@ -32,6 +49,9 @@ class ServiceOrderItemsNotifier
     required int quantity,
     required double unitPrice,
   }) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
     const uuid = Uuid();
     final totalPrice = quantity * unitPrice;
     final item = ServiceOrderItemEntity(
@@ -49,8 +69,7 @@ class ServiceOrderItemsNotifier
     final orderRepo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    final db = await SqliteDatabase.instance;
-    await db.transaction((txn) async {
+    await binding.databaseHandle.database.transaction((txn) async {
       await itemRepo.upsert(item, executor: txn);
 
       await outbox.insert(
@@ -94,18 +113,26 @@ class ServiceOrderItemsNotifier
       }
     });
 
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-    ref.read(serviceOrdersProvider.notifier).refresh();
-    state = AsyncData(await _load(serviceOrderId));
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
+
+    _ensureBindingCurrent(binding);
+    await ref.read(serviceOrdersProvider.notifier).refresh();
+
+    final items = await _load(serviceOrderId, binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(items);
   }
 
   Future<void> deleteItem(String itemId, String serviceOrderId) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
     final itemRepo = ref.read(serviceOrderItemRepositoryProvider);
     final orderRepo = ref.read(serviceOrderRepositoryProvider);
     final outbox = ref.read(outboxDaoProvider);
 
-    final db = await SqliteDatabase.instance;
-    await db.transaction((txn) async {
+    await binding.databaseHandle.database.transaction((txn) async {
       await itemRepo.delete(itemId, executor: txn);
 
       await outbox.insert(
@@ -149,9 +176,65 @@ class ServiceOrderItemsNotifier
       }
     });
 
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-    ref.read(serviceOrdersProvider.notifier).refresh();
-    state = AsyncData(await _load(serviceOrderId));
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
+
+    _ensureBindingCurrent(binding);
+    await ref.read(serviceOrdersProvider.notifier).refresh();
+
+    final items = await _load(serviceOrderId, binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(items);
+  }
+
+  _SessionDatabaseBinding _captureBinding(
+    AuthenticatedSessionKey? sessionKey,
+  ) {
+    if (sessionKey == null) {
+      throw StateError(
+        'An authenticated session is required for service-order items.',
+      );
+    }
+
+    final manager = AuthScopedDatabaseManager.instance;
+    final handle = manager.currentHandle;
+    if (handle == null ||
+        handle.authScope != sessionKey.scope ||
+        handle.sessionGeneration != sessionKey.sessionGeneration ||
+        !manager.isCurrentHandle(handle)) {
+      throw StateError(
+        'No current database is bound to the authenticated service-order-item session.',
+      );
+    }
+
+    return (
+      sessionKey: sessionKey,
+      databaseHandle: handle,
+    );
+  }
+
+  bool _isBindingCurrent(_SessionDatabaseBinding binding) {
+    return ref.read(authenticatedSessionKeyProvider) == binding.sessionKey &&
+        binding.databaseHandle.authScope == binding.sessionKey.scope &&
+        binding.databaseHandle.sessionGeneration ==
+            binding.sessionKey.sessionGeneration &&
+        AuthScopedDatabaseManager.instance
+            .isCurrentHandle(binding.databaseHandle);
+  }
+
+  void _ensureBindingCurrent(_SessionDatabaseBinding binding) {
+    if (!_isBindingCurrent(binding)) {
+      throw StateError(
+        'The service-order-item operation belongs to a stale session.',
+      );
+    }
+  }
+
+  void _requestSyncIfOnline(_SessionDatabaseBinding binding) {
+    _ensureBindingCurrent(binding);
+    if (ref.read(isOnlineSessionProvider)) {
+      ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
+    }
   }
 }
 

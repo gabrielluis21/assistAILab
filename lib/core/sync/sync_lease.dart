@@ -6,30 +6,32 @@ import 'package:sqflite/sqflite.dart';
 ///
 /// - [BoundCredential.absent]: No credential override is supplied.
 ///   The caller has NOT bound a credential; ApiClient may use its normal
-///   dynamic Hive-based resolution. This is appropriate for non-leased callers.
+///   dynamic canonical-storage resolution. This is appropriate for non-leased
+///   callers.
 ///
 /// - [BoundCredential.explicit]: An explicit credential has been captured at
 ///   scope initiation. ApiClient MUST use exactly this value and MUST NOT fall
 ///   back to any dynamic credential store. A null or empty explicit credential
 ///   means the session had no valid token — the leased operation must fail
-///   closed rather than fall through to Hive.
+///   closed rather than fall through to canonical credential storage.
 ///
 /// Never use a magic sentinel string to encode this distinction.
 sealed class BoundCredential {
   const BoundCredential._();
 
-  /// No credential override — normal ApiClient Hive-based resolution applies.
+  /// No credential override — normal ApiClient canonical-storage resolution
+  /// applies.
   static const BoundCredential absent = _AbsentCredential();
 
   /// Explicit credential captured at session initiation.
   ///
   /// [token] is the exact value to use. A null or empty [token] means the
   /// session had no valid credential; leased operations must reject HTTP
-  /// execution rather than fall back to Hive.
+  /// execution rather than fall back to dynamic credential resolution.
   static BoundCredential explicit(String? token) => _ExplicitCredential(token);
 
   /// Returns the pinned token value if this is an [explicit] credential, or
-  /// null if [absent]. Does NOT resolve from Hive.
+  /// null if [absent]. Does NOT resolve from credential storage.
   String? get pinnedToken => switch (this) {
         _AbsentCredential() => null,
         _ExplicitCredential(token: final t) => t,
@@ -63,7 +65,7 @@ final class _ExplicitCredential extends BoundCredential {
 /// 3. A lifecycle validity / cancellation guard.
 ///
 /// The [credential] field uses [BoundCredential] rather than a raw [String?]
-/// so that null cannot mean "fall back to Hive". A null token inside an
+/// so that null cannot mean "fall back to credential storage". A null token inside an
 /// [BoundCredential.explicit] means "this session had no credential" and
 /// the operation must fail closed.
 class SyncLease {

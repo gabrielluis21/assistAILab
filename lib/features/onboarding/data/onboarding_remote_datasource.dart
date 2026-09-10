@@ -1,8 +1,8 @@
 import 'dart:convert';
-import '../../../core/network/api_client.dart';
+import '../../auth/application/session_api_client.dart';
 
 class OnboardingRemoteDataSource {
-  final ApiClient apiClient;
+  final SessionApiClient apiClient;
 
   OnboardingRemoteDataSource(this.apiClient);
 
@@ -20,7 +20,7 @@ class OnboardingRemoteDataSource {
   }
 
   Future<void> claimOnboardingToken(String token) async {
-    final response = await apiClient.post(
+    final response = await apiClient.postUnauthenticated(
       '/auth/customer-onboarding/claim',
       body: {'token': token},
     );

@@ -1,66 +1,56 @@
-import 'dart:convert';
-import 'package:hive/hive.dart';
 import '../../domain/entities/user.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
 
 class AuthRepositoryImpl implements AuthRepository {
-  final AuthRemoteDataSource remoteDataSource;
-
   AuthRepositoryImpl(this.remoteDataSource);
 
+  final AuthRemoteDataSource remoteDataSource;
+
   @override
-  Future<User> login(String email, String password) async {
+  Future<AuthLoginResult> login(String email, String password) async {
     final response = await remoteDataSource.login(email, password);
-    final user = User.fromJson(response['user']);
     final token = response['token'];
+    final userJson = response['user'];
 
-    final box = await Hive.openBox('auth_box');
-    await box.put('jwt_token', token);
-    await box.put('current_user', jsonEncode(user.toJson()));
-
-    return user;
-  }
-
-  @override
-  Future<void> logout() async {
-    final box = await Hive.openBox('auth_box');
-    await box.delete('jwt_token');
-    await box.delete('current_user');
-  }
-
-  @override
-  Future<User?> getCurrentUser() async {
-    final box = await Hive.openBox('auth_box');
-    final token = box.get('jwt_token');
-
-    // Sem token local: sessão inválida.
-    if (token == null || (token as String).isEmpty) {
-      return null;
+    if (token is! String || token.trim().isEmpty || token != token.trim()) {
+      throw const AuthResponseFormatException(
+        '/auth/login',
+        'Response token is missing, empty, or not a string.',
+      );
+    }
+    if (userJson is! Map) {
+      throw const AuthResponseFormatException(
+        '/auth/login',
+        'Response user is missing or not an object.',
+      );
     }
 
     try {
-      // Valida o token no backend e obtém dados frescos do usuário.
-      final meData = await remoteDataSource.getMe();
-      final userMap = (meData['user'] as Map<String, dynamic>?) ?? meData;
-      final user = User.fromJson(userMap);
+      return AuthLoginResult(
+        user: User.fromJson(Map<String, dynamic>.from(userJson)),
+        accessToken: token,
+      );
+    } catch (error) {
+      throw AuthResponseFormatException('/auth/login', error);
+    }
+  }
 
-      // Atualiza o cache local com dados vindos do backend.
-      await box.put('current_user', jsonEncode(user.toJson()));
+  @override
+  Future<User> getCurrentUser(String accessToken) async {
+    final meData = await remoteDataSource.getMe(accessToken);
+    final userMap = meData['user'];
+    if (userMap is! Map) {
+      throw const AuthResponseFormatException(
+        '/auth/me',
+        'Response user is missing or not an object.',
+      );
+    }
 
-      return user;
-    } on UnauthorizedException {
-      // Token expirado ou revogado: limpa a sessão.
-      await box.delete('jwt_token');
-      await box.delete('current_user');
-      return null;
-    } catch (_) {
-      // Falha de rede (offline etc.): cai de volta no cache local.
-      final userStr = box.get('current_user');
-      if (userStr != null) {
-        return User.fromJson(jsonDecode(userStr as String));
-      }
-      return null;
+    try {
+      return User.fromJson(Map<String, dynamic>.from(userMap));
+    } catch (error) {
+      throw AuthResponseFormatException('/auth/me', error);
     }
   }
 }

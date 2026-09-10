@@ -1,8 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:sqflite/sqflite.dart';
+
 import '../../features/auth/application/auth_provider.dart';
-import '../../features/auth/domain/entities/auth_scope.dart';
+import '../../features/auth/domain/entities/session_state.dart';
 import '../database/auth_scoped_database_manager.dart';
 import '../database/outbox_dao.dart';
 import 'background_sync_coordinator.dart';
@@ -11,99 +13,136 @@ import 'sync_scheduler.dart';
 import 'sync_state.dart';
 import 'sync_trigger.dart';
 
-/// Provider for active scoped SQLite database.
-final scopedDatabaseProvider = FutureProvider<Database?>((ref) async {
-  final scope = ref.watch(authScopeProvider);
-  if (kIsWeb || scope == null || scope is InvalidAuthScope) {
-    await AuthScopedDatabaseManager.instance.closeCurrentDatabase();
+/// Read-only projection of the database handle already activated by the
+/// authoritative AuthNotifier lifecycle. This provider never opens a global or
+/// unbound database as a fallback.
+final scopedDatabaseProvider = Provider<BoundDatabaseHandle?>((ref) {
+  if (kIsWeb) return null;
+  final session = ref.watch(authStateProvider);
+  if (session is! AuthenticatedSession) return null;
+
+  final handle = AuthScopedDatabaseManager.instance.currentHandle;
+  if (handle == null ||
+      handle.authScope != session.scope ||
+      handle.sessionGeneration != session.generation ||
+      !AuthScopedDatabaseManager.instance.isCurrentHandle(handle)) {
     return null;
   }
-  return await AuthScopedDatabaseManager.instance.openDatabaseForScope(scope);
+  return handle;
 });
 
-/// Provider for OutboxDao.
-final outboxDaoProvider = Provider<OutboxDao>((ref) {
-  return OutboxDao();
-});
+final outboxDaoProvider = Provider<OutboxDao>((ref) => OutboxDao());
 
-/// Provider for SyncEngine.
 final syncEngineProvider = Provider<SyncEngine>((ref) {
-  final apiClient = ref.watch(apiClientProvider);
-  final outboxDao = ref.watch(outboxDaoProvider);
-  return SyncEngine(apiClient: apiClient, outboxDao: outboxDao);
+  return SyncEngine(
+    apiClient: ref.watch(apiClientProvider),
+    outboxDao: ref.watch(outboxDaoProvider),
+  );
 });
 
-/// Provider for BackgroundSyncCoordinator.
+/// A coordinator is recreated for every explicit SessionState transition.
+/// Only AuthenticatedOnline receives a complete pre-lease binding.
 final backgroundSyncCoordinatorProvider =
     Provider<BackgroundSyncCoordinator>((ref) {
-  // Invalidate and recreate coordinator when auth scope changes to isolate sync state per scope.
-  final scope = ref.watch(authScopeProvider);
-  final syncEngine = ref.watch(syncEngineProvider);
-  final outboxDao = ref.watch(outboxDaoProvider);
-  final apiClient = ref.watch(apiClientProvider);
+  final session = ref.watch(authStateProvider);
+  final authNotifier = ref.read(authStateProvider.notifier);
+  final manager = AuthScopedDatabaseManager.instance;
+
+  SyncSessionBinding? binding;
+  if (session is AuthenticatedOnline && !kIsWeb) {
+    final scope = session.scope;
+    final generation = session.generation;
+    binding = SyncSessionBinding(
+      scope: scope,
+      sessionGeneration: generation,
+      resolveBoundHandle: () async {
+        final handle = manager.currentHandle;
+        if (handle == null ||
+            handle.authScope != scope ||
+            handle.sessionGeneration != generation ||
+            !manager.isCurrentHandle(handle)) {
+          return null;
+        }
+        return handle;
+      },
+      isHandleCurrent: (handle) =>
+          handle.authScope == scope &&
+          handle.sessionGeneration == generation &&
+          manager.isCurrentHandle(handle),
+      resolveToken: () async {
+        final request = await authNotifier.acquireOnlineRequestCredential();
+        if (request.sessionGeneration != generation) return null;
+        return request.accessToken;
+      },
+      isCurrentOnline: () => authNotifier.isCurrentOnlineGeneration(generation),
+      isAuthHttpGenerationCurrent: authNotifier.isGenerationCurrent,
+      onAuthorizationFailure: ({
+        required sessionGeneration,
+        required statusCode,
+        required authorityRevalidation,
+      }) {
+        return authNotifier.handleAuthorizationFailure(
+          sessionGeneration: sessionGeneration,
+          statusCode: statusCode,
+          authorityRevalidation: authorityRevalidation,
+        );
+      },
+    );
+  }
 
   final coordinator = BackgroundSyncCoordinator(
-    syncEngine: syncEngine,
-    outboxDao: outboxDao,
-    databaseResolver: () async {
-      if (kIsWeb || scope == null || scope is InvalidAuthScope) return null;
-      return AuthScopedDatabaseManager.instance.activeDatabase;
-    },
-    tokenResolver: () async {
-      return apiClient.getAuthToken();
-    },
+    syncEngine: ref.watch(syncEngineProvider),
+    outboxDao: ref.watch(outboxDaoProvider),
+    sessionBinding: binding,
   );
-
-  ref.onDispose(() {
-    coordinator.dispose();
-  });
-
+  ref.onDispose(coordinator.dispose);
   return coordinator;
 });
 
-/// Provider for SyncScheduler.
 final syncSchedulerProvider = Provider<SyncScheduler>((ref) {
+  final session = ref.watch(authStateProvider);
+  final authNotifier = ref.read(authStateProvider.notifier);
   final coordinator = ref.watch(backgroundSyncCoordinatorProvider);
   final scheduler = SyncScheduler(coordinator: coordinator);
+  var disposed = false;
 
-  // Listen to auth scope state to manage database opening and sync lifecycle
-  ref.listen<AuthScope?>(authScopeProvider, (previous, nextScope) async {
-    if (kIsWeb) return;
-
-    // Invalidate any in-flight sync operations from previous scope immediately
-    coordinator.cancelActiveSync();
-
-    if (nextScope is ProfessionalAuthScope || nextScope is CustomerAuthScope) {
-      try {
-        await AuthScopedDatabaseManager.instance
-            .openDatabaseForScope(nextScope);
-        await coordinator.initialize();
-        scheduler.start();
-        scheduler.requestSync(SyncTrigger.authenticated);
-      } catch (_) {
-        scheduler.stop();
+  if (session is AuthenticatedOnline && !kIsWeb) {
+    final generation = session.generation;
+    unawaited(() async {
+      await coordinator.initialize();
+      if (disposed ||
+          !authNotifier.isCurrentOnlineGeneration(generation) ||
+          coordinator.sessionBinding?.sessionGeneration != generation) {
+        return;
       }
-    } else {
-      // InvalidAuthScope or null unauthenticated: fail closed
-      scheduler.stop();
-      await AuthScopedDatabaseManager.instance.closeCurrentDatabase();
-    }
-  }, fireImmediately: true);
+
+      final handle = AuthScopedDatabaseManager.instance.currentHandle;
+      if (handle == null ||
+          handle.authScope != session.scope ||
+          handle.sessionGeneration != generation ||
+          !AuthScopedDatabaseManager.instance.isCurrentHandle(handle)) {
+        return;
+      }
+
+      scheduler.start();
+      await scheduler.requestSync(SyncTrigger.authenticated);
+    }());
+  }
 
   ref.onDispose(() {
+    disposed = true;
+    coordinator.cancelActiveSync();
     scheduler.dispose();
   });
-
   return scheduler;
 });
 
-/// Reactive StateNotifier for UI consumption of SyncState.
 class SyncStateNotifier extends StateNotifier<SyncState> {
-  final BackgroundSyncCoordinator _coordinator;
-
   SyncStateNotifier(this._coordinator) : super(_coordinator.state) {
     _coordinator.stateListenable.addListener(_onStateChanged);
   }
+
+  final BackgroundSyncCoordinator _coordinator;
 
   void _onStateChanged() {
     state = _coordinator.state;
@@ -116,11 +155,9 @@ class SyncStateNotifier extends StateNotifier<SyncState> {
   }
 }
 
-/// Provider for reactive SyncState.
 final syncStateProvider =
     StateNotifierProvider<SyncStateNotifier, SyncState>((ref) {
   final coordinator = ref.watch(backgroundSyncCoordinatorProvider);
-  // Ensure scheduler is active whenever state is consumed
   ref.watch(syncSchedulerProvider);
   return SyncStateNotifier(coordinator);
 });

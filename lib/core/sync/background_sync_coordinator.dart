@@ -1,28 +1,65 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
+
+import '../../features/auth/domain/entities/auth_scope.dart';
+import '../database/auth_scoped_database_manager.dart';
 import '../database/outbox_dao.dart';
 import 'sync_engine.dart';
 import 'sync_lease.dart';
 import 'sync_state.dart';
 import 'sync_trigger.dart';
 
+typedef BoundDatabaseHandleResolver = Future<BoundDatabaseHandle?> Function();
+typedef BoundDatabaseHandleValidator = bool Function(
+  BoundDatabaseHandle handle,
+);
+typedef BoundTokenResolver = Future<String?> Function();
+typedef CurrentOnlinePredicate = bool Function();
+typedef AuthHttpGenerationPredicate = bool Function(int sessionGeneration);
+typedef SyncAuthorizationFailureHandler = FutureOr<void> Function({
+  required int sessionGeneration,
+  required int statusCode,
+  required bool authorityRevalidation,
+});
+
+/// Complete proof needed to start authenticated synchronization for a session.
+///
+/// The binding is immutable. Its callbacks must resolve and validate state only
+/// for [scope] and [sessionGeneration], never whichever session happens to be
+/// globally active when a callback runs.
+final class SyncSessionBinding {
+  final AuthScope scope;
+  final int sessionGeneration;
+  final BoundDatabaseHandleResolver resolveBoundHandle;
+  final BoundDatabaseHandleValidator isHandleCurrent;
+  final BoundTokenResolver resolveToken;
+  final CurrentOnlinePredicate isCurrentOnline;
+  final AuthHttpGenerationPredicate isAuthHttpGenerationCurrent;
+  final SyncAuthorizationFailureHandler onAuthorizationFailure;
+
+  const SyncSessionBinding({
+    required this.scope,
+    required this.sessionGeneration,
+    required this.resolveBoundHandle,
+    required this.isHandleCurrent,
+    required this.resolveToken,
+    required this.isCurrentOnline,
+    required this.isAuthHttpGenerationCurrent,
+    required this.onAuthorizationFailure,
+  });
+}
+
 /// Coordinator for Background Synchronization.
 ///
-/// Responsibilities:
-/// - Coordinate push and pull sync cycles;
-/// - Enforce concurrency locks so only one cycle runs at a time;
-/// - Queue catch-up cycles when triggers occur during an active sync;
-/// - Debounce high-frequency triggers (like repeated local mutations);
-/// - Recover interrupted operations on initialization;
-/// - Expose reactive SyncState;
-/// - Expose [lastCycleDidWork] so the Scheduler can make accurate IDLE decisions;
-/// - Provide SessionBoundSyncLease per logical cycle with database and credential binding.
+/// A cycle is allowed to touch the Outbox or authenticated HTTP only after a
+/// complete [SyncSessionBinding] proves its scope, session generation, online
+/// authority and current database handle. Missing or stale proof fails closed.
 class BackgroundSyncCoordinator {
   final SyncEngine syncEngine;
   final OutboxDao outboxDao;
-  final Future<Database?> Function()? databaseResolver;
-  final Future<String?> Function()? tokenResolver;
+  final SyncSessionBinding? sessionBinding;
 
   final ValueNotifier<SyncState> _stateNotifier =
       ValueNotifier<SyncState>(SyncState.initial());
@@ -36,10 +73,24 @@ class BackgroundSyncCoordinator {
   int _currentGeneration = 0;
   bool _isDisposed = false;
 
+  /// Whether the last completed sync cycle performed any real work.
+  bool lastCycleDidWork = false;
+
+  BackgroundSyncCoordinator({
+    required this.syncEngine,
+    OutboxDao? outboxDao,
+    this.sessionBinding,
+    @Deprecated(
+      'Use sessionBinding. Legacy resolvers do not provide scope/generation proof and are ignored.',
+    )
+    Future<Database?> Function()? databaseResolver,
+    @Deprecated(
+      'Use sessionBinding. Legacy resolvers do not provide scope/generation proof and are ignored.',
+    )
+    Future<String?> Function()? tokenResolver,
+  }) : outboxDao = outboxDao ?? OutboxDao();
+
   /// Cancels any active or scheduled sync cycle.
-  ///
-  /// Increments [_currentGeneration] to invalidate any in-flight async operations
-  /// and clears pending catch-ups.
   void cancelActiveSync() {
     _currentGeneration++;
     _isSyncing = false;
@@ -47,20 +98,6 @@ class BackgroundSyncCoordinator {
     _pendingCatchUpTrigger = null;
     _debounceTimer?.cancel();
   }
-
-  /// Whether the last completed sync cycle performed any real work.
-  ///
-  /// True when at least one Outbox entry was pushed OR at least one remote
-  /// change was pulled during the cycle. Used by [SyncScheduler] to decide
-  /// whether to increment [consecutiveEmptyCycles].
-  bool lastCycleDidWork = false;
-
-  BackgroundSyncCoordinator({
-    required this.syncEngine,
-    OutboxDao? outboxDao,
-    this.databaseResolver,
-    this.tokenResolver,
-  }) : outboxDao = outboxDao ?? OutboxDao();
 
   /// Current synchronization state snapshot.
   SyncState get state => _stateNotifier.value;
@@ -72,52 +109,88 @@ class BackgroundSyncCoordinator {
   Stream<SyncState> get stateStream => _stateController.stream;
 
   bool _isInitialized = false;
-  Future<void>? _initFuture;
+  Future<bool>? _initFuture;
 
-  /// Initializes coordinator and recovers any interrupted operations from prior sessions.
-  /// Idempotent: repeated or concurrent invocations do not duplicate recovery or state calls.
+  /// Initializes coordinator and recovers interrupted operations for the bound
+  /// session. A missing/stale binding performs no database access and remains
+  /// retryable rather than becoming initialized.
   Future<void> initialize() async {
-    if (_isInitialized) return;
-    if (_initFuture != null) return _initFuture;
+    if (_isInitialized || _isDisposed) return;
+    final existing = _initFuture;
+    if (existing != null) {
+      await existing;
+      return;
+    }
 
-    _initFuture = _performInitialization();
+    final future = _performInitialization();
+    _initFuture = future;
     try {
-      await _initFuture;
-      _isInitialized = true;
+      final initialized = await future;
+      if (initialized && !_isDisposed) {
+        _isInitialized = true;
+      }
     } finally {
-      _initFuture = null;
+      if (identical(_initFuture, future)) {
+        _initFuture = null;
+      }
     }
   }
 
-  Future<void> _performInitialization() async {
-    await recoverInterruptedOperations();
-    await _refreshPendingCount();
+  Future<bool> _performInitialization() async {
+    final operationGeneration = _currentGeneration;
+    final handle = await _resolveCurrentHandle(operationGeneration);
+    if (handle == null) return false;
+
+    await _recoverInterruptedOperations(
+      handle: handle,
+      operationGeneration: operationGeneration,
+    );
+    if (!_isBoundContextCurrent(operationGeneration, handle)) return false;
+
+    final count = await _getPendingOutboxCount(
+      handle: handle,
+      operationGeneration: operationGeneration,
+    );
+    if (!_isBoundContextCurrent(operationGeneration, handle)) return false;
+
+    _emitState(state.copyWith(pendingOutboxCount: count));
+    return true;
   }
 
-  /// Recovers operations stuck in PROCESSING status (e.g. app terminated during push).
-  /// Only recovers entries stale for more than 5 minutes.
+  /// Recovers stale PROCESSING rows only in the explicitly bound database.
   Future<void> recoverInterruptedOperations() async {
+    final operationGeneration = _currentGeneration;
+    final handle = await _resolveCurrentHandle(operationGeneration);
+    if (handle == null) return;
+    await _recoverInterruptedOperations(
+      handle: handle,
+      operationGeneration: operationGeneration,
+    );
+  }
+
+  Future<void> _recoverInterruptedOperations({
+    required BoundDatabaseHandle handle,
+    required int operationGeneration,
+  }) async {
+    if (!_isBoundContextCurrent(operationGeneration, handle)) return;
     try {
-      DatabaseExecutor? targetDb;
-      if (databaseResolver != null) {
-        targetDb = await databaseResolver!();
-      }
-      final recovered =
-          await outboxDao.recoverProcessingEntries(executor: targetDb);
+      final recovered = await outboxDao.recoverProcessingEntries(
+        executor: handle.database,
+      );
+      if (!_isBoundContextCurrent(operationGeneration, handle)) return;
       if (recovered > 0) {
         debugPrint(
-            '🔄 BackgroundSyncCoordinator: Recovered $recovered stale PROCESSING entries → FAILED.');
+          'BackgroundSyncCoordinator: Recovered $recovered stale PROCESSING entries to FAILED.',
+        );
       }
-    } catch (e) {
+    } catch (error) {
       debugPrint(
-          '⚠️ BackgroundSyncCoordinator: Error recovering interrupted operations: $e');
+        'BackgroundSyncCoordinator: Error recovering interrupted operations: $error',
+      );
     }
   }
 
   /// Requests a synchronization run.
-  ///
-  /// For high-frequency triggers (like local mutations), applies debouncing.
-  /// If another sync cycle is already active, queues a catch-up execution.
   Future<void> requestSync(
     SyncTrigger trigger, {
     Duration debounceDuration = const Duration(milliseconds: 400),
@@ -145,64 +218,51 @@ class BackgroundSyncCoordinator {
 
     final cycleGeneration = ++_currentGeneration;
     _isSyncing = true;
+    lastCycleDidWork = false;
 
-    // Resolve bound database for initiating scope
-    Database? boundDb;
-    if (databaseResolver != null) {
-      try {
-        boundDb = await databaseResolver!();
-      } catch (_) {
-        _isSyncing = false;
-        return;
-      }
-    }
-
-    // Re-check generation validity after async DB resolution before token fetch.
-    if (cycleGeneration != _currentGeneration || _isDisposed) {
-      _isSyncing = false;
+    final binding = sessionBinding;
+    if (binding == null) {
+      _finishUnstartedCycle(cycleGeneration);
       return;
     }
 
-    // Resolve bound auth token for initiating session.
-    // FAIL-CLOSED SEMANTICS: if the resolver throws, returns null, or returns an
-    // empty string, the cycle MUST stop. A leased sync operation must never fall
-    // back to dynamic Hive credential resolution.
-    String? boundToken;
-    if (tokenResolver != null) {
-      try {
-        boundToken = await tokenResolver!();
-      } catch (_) {
-        // Resolver threw — stop the cycle before any HTTP.
-        _isSyncing = false;
-        return;
-      }
-      if (boundToken == null || boundToken.trim().isEmpty) {
-        // Null, empty, or whitespace-only credential — stop the cycle before any HTTP.
-        _isSyncing = false;
-        return;
-      }
-    }
-
-    // Re-check generation after async credential resolution.
-    if (cycleGeneration != _currentGeneration || _isDisposed) {
-      _isSyncing = false;
+    final handle = await _resolveCurrentHandle(cycleGeneration);
+    if (handle == null) {
+      _finishUnstartedCycle(cycleGeneration);
       return;
     }
 
-    // Bind operational sync lease with explicit session credential.
-    // BoundCredential.explicit ensures SyncEngine never falls back to Hive.
-    final credential = tokenResolver != null
-        ? BoundCredential.explicit(boundToken)
-        : BoundCredential.absent;
+    String? token;
+    try {
+      token = await binding.resolveToken();
+    } catch (_) {
+      _finishUnstartedCycle(cycleGeneration);
+      return;
+    }
+
+    // Re-prove the full session after credential resolution. This prevents a
+    // resolver started by A from consuming the token installed later by B.
+    if (!_isBoundContextCurrent(cycleGeneration, handle) ||
+        token == null ||
+        token.trim().isEmpty) {
+      _finishUnstartedCycle(cycleGeneration);
+      return;
+    }
+
     final lease = SyncLease(
-      db: boundDb,
-      credential: credential,
-      isCancelled: () => cycleGeneration != _currentGeneration || _isDisposed,
+      db: handle.database,
+      credential: BoundCredential.explicit(token),
+      isCancelled: () => !_isBoundContextCurrent(cycleGeneration, handle),
     );
 
-    final pendingCount = await _getPendingOutboxCount(executor: boundDb);
-
-    if (cycleGeneration != _currentGeneration || _isDisposed) return;
+    final pendingCount = await _getPendingOutboxCount(
+      handle: handle,
+      operationGeneration: cycleGeneration,
+    );
+    if (!lease.isStillValid) {
+      _finishUnstartedCycle(cycleGeneration);
+      return;
+    }
 
     _emitState(state.copyWith(
       status: SyncStatus.syncing,
@@ -212,83 +272,155 @@ class BackgroundSyncCoordinator {
     ));
 
     try {
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+      if (!lease.isStillValid) return;
 
-      // 1. Push Phase: process pending Outbox entries
       final pushSummary = await syncEngine.pushPendingOutbox(lease: lease);
+      if (!lease.isStillValid) return;
 
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
-
-      // 2. Pull Phase: fetch incremental updates from server
       final pullSummary = await syncEngine.pullIncrementalChanges(lease: lease);
+      if (!lease.isStillValid) return;
 
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
-
-      // Determine whether this cycle performed any real work.
-      // Push counts as work if at least one entry was processed.
-      // Pull counts as work if at least one change was applied.
       lastCycleDidWork =
           pushSummary.totalProcessed > 0 || pullSummary.totalChanges > 0;
 
-      final remainingPending = await _getPendingOutboxCount(executor: boundDb);
-      final now = DateTime.now();
-
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+      final remainingPending = await _getPendingOutboxCount(
+        handle: handle,
+        operationGeneration: cycleGeneration,
+      );
+      if (!lease.isStillValid) return;
 
       _emitState(state.copyWith(
         status: SyncStatus.idle,
         isSyncing: false,
-        lastSyncAt: now,
+        lastSyncAt: DateTime.now(),
         pendingOutboxCount: remainingPending,
         clearLastError: true,
       ));
-    } catch (e) {
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+    } catch (error) {
+      if (!lease.isStillValid) return;
 
-      debugPrint('❌ BackgroundSyncCoordinator Sync Error: $e');
+      // Only a 401 from the still-current, generation-bound Sync request may
+      // terminate the session. Resource 403 is intentionally not global auth
+      // failure, and stale HTTP completions are discarded by the lease gate.
+      if (error is SyncHttpException && error.statusCode == 401) {
+        await binding.onAuthorizationFailure(
+          sessionGeneration: binding.sessionGeneration,
+          statusCode: error.statusCode,
+          authorityRevalidation: false,
+        );
+        if (!lease.isStillValid) return;
+      }
+
+      debugPrint('BackgroundSyncCoordinator Sync Error: $error');
       lastCycleDidWork = false;
-      final remainingPending = await _getPendingOutboxCount(executor: boundDb);
-
-      if (cycleGeneration != _currentGeneration || _isDisposed) return;
+      final remainingPending = await _getPendingOutboxCount(
+        handle: handle,
+        operationGeneration: cycleGeneration,
+      );
+      if (!lease.isStillValid) return;
 
       _emitState(state.copyWith(
         status: SyncStatus.error,
         isSyncing: false,
-        lastError: e.toString(),
+        lastError: error.toString(),
         pendingOutboxCount: remainingPending,
       ));
     } finally {
       if (cycleGeneration == _currentGeneration) {
         _isSyncing = false;
-
-        // Handle catch-up if triggers were enqueued while syncing
         if (_hasPendingCatchUp && !_isDisposed) {
           final nextTrigger =
               _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
           _hasPendingCatchUp = false;
           _pendingCatchUpTrigger = null;
-          // Run next cycle asynchronously without blocking
           scheduleMicrotask(() => _dispatchSync(nextTrigger));
         }
       }
     }
   }
 
-  Future<int> _getPendingOutboxCount({DatabaseExecutor? executor}) async {
+  Future<BoundDatabaseHandle?> _resolveCurrentHandle(
+    int operationGeneration,
+  ) async {
+    final binding = sessionBinding;
+    if (binding == null ||
+        !_isCoordinatorGenerationCurrent(operationGeneration) ||
+        !_isBindingAuthorityCurrent(binding)) {
+      return null;
+    }
+
+    BoundDatabaseHandle? handle;
     try {
-      DatabaseExecutor? targetExecutor = executor;
-      if (targetExecutor == null && databaseResolver != null) {
-        targetExecutor = await databaseResolver!();
-      }
-      return await outboxDao.getPendingCount(executor: targetExecutor);
+      handle = await binding.resolveBoundHandle();
+    } catch (_) {
+      return null;
+    }
+
+    if (handle == null ||
+        !_isCoordinatorGenerationCurrent(operationGeneration) ||
+        !_isBindingAuthorityCurrent(binding) ||
+        !_isHandleProofCurrent(binding, handle)) {
+      return null;
+    }
+    return handle;
+  }
+
+  bool _isCoordinatorGenerationCurrent(int operationGeneration) =>
+      !_isDisposed && operationGeneration == _currentGeneration;
+
+  bool _isBindingAuthorityCurrent(SyncSessionBinding binding) {
+    try {
+      return binding.isCurrentOnline() &&
+          binding.isAuthHttpGenerationCurrent(binding.sessionGeneration);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isHandleProofCurrent(
+    SyncSessionBinding binding,
+    BoundDatabaseHandle handle,
+  ) {
+    if (handle.authScope != binding.scope ||
+        handle.sessionGeneration != binding.sessionGeneration ||
+        !handle.database.isOpen) {
+      return false;
+    }
+    try {
+      return binding.isHandleCurrent(handle);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isBoundContextCurrent(
+    int operationGeneration,
+    BoundDatabaseHandle handle,
+  ) {
+    final binding = sessionBinding;
+    return binding != null &&
+        _isCoordinatorGenerationCurrent(operationGeneration) &&
+        _isBindingAuthorityCurrent(binding) &&
+        _isHandleProofCurrent(binding, handle);
+  }
+
+  Future<int> _getPendingOutboxCount({
+    required BoundDatabaseHandle handle,
+    required int operationGeneration,
+  }) async {
+    if (!_isBoundContextCurrent(operationGeneration, handle)) return 0;
+    try {
+      final count = await outboxDao.getPendingCount(executor: handle.database);
+      return _isBoundContextCurrent(operationGeneration, handle) ? count : 0;
     } catch (_) {
       return 0;
     }
   }
 
-  Future<void> _refreshPendingCount() async {
-    final count = await _getPendingOutboxCount();
-    _emitState(state.copyWith(pendingOutboxCount: count));
+  void _finishUnstartedCycle(int cycleGeneration) {
+    if (cycleGeneration == _currentGeneration) {
+      _isSyncing = false;
+    }
   }
 
   void _emitState(SyncState newState) {

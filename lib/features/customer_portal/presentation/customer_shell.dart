@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/application/auth_provider.dart';
 import '../../auth/application/auth_route_resolver.dart';
+import '../../auth/domain/entities/session_state.dart';
 import '../../service_orders/service_order_entity.dart';
 import 'customer_dashboard_page.dart';
 import 'customer_service_order_detail_page.dart';
@@ -41,90 +42,80 @@ class _CustomerShellState extends ConsumerState<CustomerShell> {
 
   @override
   Widget build(BuildContext context) {
-    final authState = ref.watch(authStateProvider);
-
-    return authState.when(
-      loading: () => const _LoadingPage(),
-      error: (error, stackTrace) {
+    final session = ref.watch(authStateProvider);
+    if (session is! AuthenticatedSession) {
+      if (session is SessionUnauthenticated || session is SessionFailure) {
         _redirectToLogin();
+      }
+      return const _LoadingPage();
+    }
 
-        return const _LoadingPage();
-      },
-      data: (user) {
-        if (user == null) {
-          _redirectToLogin();
+    final user = session.user;
+    if (!AuthRouteResolver.isCustomer(user)) {
+      _redirectToCorrectShell(user);
+      return const _LoadingPage();
+    }
 
-          return const _LoadingPage();
-        }
+    final content = _selectedOrderId != null
+        ? CustomerServiceOrderDetailPage(
+            orderId: _selectedOrderId!,
+          )
+        : _buildCurrentPage();
 
-        if (!AuthRouteResolver.isCustomer(user)) {
-          _redirectToCorrectShell(user);
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F172A),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1E293B),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title:
+            Text(_selectedOrderId != null ? 'Detalhes da OS' : 'AssistAILab'),
+        leading: _selectedOrderId != null
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back), onPressed: _closeOrder)
+            : null,
+        actions: [
+          IconButton(
+            tooltip: 'Sair',
+            icon: const Icon(Icons.logout),
+            onPressed: () async {
+              await ref.read(authStateProvider.notifier).logout();
 
-          return const _LoadingPage();
-        }
+              if (!mounted) return;
 
-        final content = _selectedOrderId != null
-            ? CustomerServiceOrderDetailPage(
-                orderId: _selectedOrderId!,
-              )
-            : _buildCurrentPage();
-
-        return Scaffold(
-          backgroundColor: const Color(0xFF0F172A),
-          appBar: AppBar(
-            backgroundColor: const Color(0xFF1E293B),
-            foregroundColor: Colors.white,
-            elevation: 0,
-            title: Text(
-                _selectedOrderId != null ? 'Detalhes da OS' : 'AssistAILab'),
-            leading: _selectedOrderId != null
-                ? IconButton(
-                    icon: const Icon(Icons.arrow_back), onPressed: _closeOrder)
-                : null,
-            actions: [
-              IconButton(
-                tooltip: 'Sair',
-                icon: const Icon(Icons.logout),
-                onPressed: () async {
-                  await ref.read(authStateProvider.notifier).logout();
-
-                  if (!mounted) return;
-
-                  Modular.to.navigate(
-                    AuthRouteResolver.loginRoute,
-                  );
-                },
-              ),
-            ],
+              Modular.to.navigate(
+                AuthRouteResolver.loginRoute,
+              );
+            },
           ),
-          body: content,
-          bottomNavigationBar: _selectedOrderId == null
-              ? NavigationBar(
-                  selectedIndex: _selectedIndex,
-                  onDestinationSelected: _selectTab,
-                  backgroundColor: const Color(0xFF1E293B),
-                  indicatorColor: const Color(0xFF0C4A6E),
-                  destinations: const [
-                    NavigationDestination(
-                      icon: Icon(Icons.home_outlined),
-                      selectedIcon: Icon(Icons.home),
-                      label: 'Início',
-                    ),
-                    NavigationDestination(
-                      icon: Icon(Icons.build_circle_outlined),
-                      selectedIcon: Icon(Icons.build_circle),
-                      label: 'Minhas OS',
-                    ),
-                    NavigationDestination(
-                      icon: Icon(Icons.person_outline),
-                      selectedIcon: Icon(Icons.person),
-                      label: 'Conta',
-                    ),
-                  ],
-                )
-              : null,
-        );
-      },
+        ],
+      ),
+      body: content,
+      bottomNavigationBar: _selectedOrderId == null
+          ? NavigationBar(
+              selectedIndex: _selectedIndex,
+              onDestinationSelected: _selectTab,
+              backgroundColor: const Color(0xFF1E293B),
+              indicatorColor: const Color(0xFF0C4A6E),
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.home_outlined),
+                  selectedIcon: Icon(Icons.home),
+                  label: 'Início',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.build_circle_outlined),
+                  selectedIcon: Icon(Icons.build_circle),
+                  label: 'Minhas OS',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.person_outline),
+                  selectedIcon: Icon(Icons.person),
+                  label: 'Conta',
+                ),
+              ],
+            )
+          : null,
     );
   }
 
@@ -172,8 +163,7 @@ class _CustomerAccountPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authState = ref.watch(authStateProvider);
-    final user = authState.valueOrNull;
+    final user = ref.watch(currentUserProvider);
 
     return ColoredBox(
       color: const Color(0xFF0F172A),
