@@ -113,7 +113,7 @@ export async function meHandler(
   const user =
     await authService
       .getCurrentUser(
-        authUser.sub
+        authUser
       );
 
   return reply.send({

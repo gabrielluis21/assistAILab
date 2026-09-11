@@ -16,8 +16,17 @@ import type {
 } from 'fastify';
 
 import {
+    Role,
+    UserStatus,
+} from '@prisma/client';
+
+import {
     buildApp,
 } from '../../app.js';
+
+import {
+    prisma,
+} from '../../core/database/prisma.js';
 
 const JWT_SECRET =
     'sec-dep-01-jwt-security-test-secret';
@@ -176,6 +185,83 @@ describe(
                 process.env.JWT_SECRET =
                     JWT_SECRET;
 
+                await prisma.membership.deleteMany({
+                    where: {
+                        userId:
+                            basePayload.sub,
+                    },
+                });
+
+                await prisma.user.deleteMany({
+                    where: {
+                        OR: [
+                            {
+                                id:
+                                    basePayload.sub,
+                            },
+                            {
+                                email:
+                                    'sec-dep-01-jwt-test@assistailab.test',
+                            },
+                        ],
+                    },
+                });
+
+                await prisma.organization.deleteMany({
+                    where: {
+                        id:
+                            basePayload.organizationId,
+                    },
+                });
+
+                await prisma.organization.create({
+                    data: {
+                        id:
+                            basePayload.organizationId,
+
+                        name:
+                            'SEC-DEP-01 JWT Test Organization',
+                    },
+                });
+
+                await prisma.user.create({
+                    data: {
+                        id:
+                            basePayload.sub,
+
+                        name:
+                            basePayload.name,
+
+                        email:
+                            'sec-dep-01-jwt-test@assistailab.test',
+
+                        passwordHash:
+                            'not-used',
+
+                        role:
+                            Role.ADMIN,
+
+                        status:
+                            UserStatus.ACTIVE,
+
+                        customerId:
+                            null,
+                    },
+                });
+
+                await prisma.membership.create({
+                    data: {
+                        userId:
+                            basePayload.sub,
+
+                        organizationId:
+                            basePayload.organizationId,
+
+                        role:
+                            Role.ADMIN,
+                    },
+                });
+
                 app =
                     buildApp();
 
@@ -208,6 +294,27 @@ describe(
         after(
             async () => {
                 await app.close();
+
+                await prisma.membership.deleteMany({
+                    where: {
+                        userId:
+                            basePayload.sub,
+                    },
+                });
+
+                await prisma.user.deleteMany({
+                    where: {
+                        id:
+                            basePayload.sub,
+                    },
+                });
+
+                await prisma.organization.deleteMany({
+                    where: {
+                        id:
+                            basePayload.organizationId,
+                    },
+                });
 
                 if (
                     previousJwtSecret

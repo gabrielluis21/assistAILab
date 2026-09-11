@@ -1,4 +1,4 @@
-﻿import {
+import {
   FastifyRequest,
   FastifyReply,
 } from 'fastify';
@@ -35,6 +35,7 @@ import {
 } from '../../core/sync/sync_change_log.service.js';
 import {
   getAuthUser,
+  requireOrganizationId,
 } from '../../core/middleware/auth.middleware.js';
 
 import {
@@ -198,70 +199,26 @@ async function reserveIdempotencySlot(
   }
 }
 /**
- * Obtém a organização associada
- * ao usuário autenticado.
+ * CUSTOMER-only helper retained to preserve existing CUSTOMER Sync semantics.
  *
- * ADMIN / TECHNICIAN:
- * organização vem da Membership.
- *
- * CUSTOMER:
- * organização vem da relação
- * CustomerOrganization ativa.
- *
- * O client nunca fornece organizationId
- * como fonte de autoridade.
+ * Professional Sync MUST consume request.user.organizationId after
+ * AUTH-BE-01 live validation and must never rediscover a Membership.
  */
-async function getAuthenticatedOrganizationId(
-  userId: string,
-  role: string,
+async function getAuthenticatedCustomerOrganizationId(
   customerId: string | null
 ): Promise<string> {
-  if (
-    role ===
-    'CUSTOMER'
-  ) {
-    if (!customerId) {
-      throw new ForbiddenError(
-        'CUSTOMER user has no associated Customer identity'
-      );
-    }
-
-    const customerOrganization =
-      await prisma.customerOrganization.findFirst({
-        where: {
-          customerId,
-          status:
-            'ACTIVE',
-        },
-
-        orderBy: {
-          createdAt:
-            'asc',
-        },
-
-        select: {
-          organizationId:
-            true,
-        },
-      });
-
-    if (
-      !customerOrganization
-    ) {
-      throw new ForbiddenError(
-        'Customer is not associated with an active organization'
-      );
-    }
-
-    return (
-      customerOrganization.organizationId
+  if (!customerId) {
+    throw new ForbiddenError(
+      'CUSTOMER user has no associated Customer identity'
     );
   }
 
-  const membership =
-    await prisma.membership.findFirst({
+  const customerOrganization =
+    await prisma.customerOrganization.findFirst({
       where: {
-        userId,
+        customerId,
+        status:
+          'ACTIVE',
       },
 
       orderBy: {
@@ -275,15 +232,18 @@ async function getAuthenticatedOrganizationId(
       },
     });
 
-  if (!membership) {
+  if (
+    !customerOrganization
+  ) {
     throw new ForbiddenError(
-      'User is not associated with an organization'
+      'Customer is not associated with an active organization'
     );
   }
 
-  return membership.organizationId;
+  return (
+    customerOrganization.organizationId
+  );
 }
-
 /**
  * Valida se uma entidade existente
  * pode ser acessada pela organização.
@@ -896,11 +856,14 @@ export async function pushSyncHandler(
     string;
   try {
     defaultOrganizationId =
-      await getAuthenticatedOrganizationId(
-        authenticatedUserId,
-        authUser.role,
-        authUser.customerId
-      );
+      authUser.role ===
+        'CUSTOMER'
+        ? await getAuthenticatedCustomerOrganizationId(
+            authUser.customerId
+          )
+        : requireOrganizationId(
+            authUser
+          );
   } catch (error) {
     if (
       error instanceof
@@ -2525,11 +2488,9 @@ export async function pullSyncHandler(
     authUser.role ===
       'CUSTOMER'
       ? null
-      : await getAuthenticatedOrganizationId(
-        authUser.sub,
-        authUser.role,
-        authUser.customerId
-      );
+      : requireOrganizationId(
+          authUser
+        );
 
   let authorizedEntityIds:
     Set<string>;
