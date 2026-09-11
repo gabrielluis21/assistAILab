@@ -133,6 +133,14 @@ final class SessionSecurityValidator {
     required StoredCredential credential,
     required DateTime nowUtc,
   }) {
+    final normalizedStatus = user.status.trim().toUpperCase();
+
+    if (normalizedStatus != 'ACTIVE') {
+      throw const SessionValidationException(
+        'User account is not active.',
+      );
+    }
+
     final scope = AuthScopeManager.scopeFromUser(user);
     if (scope == null || scope is InvalidAuthScope) {
       throw SessionValidationException(
