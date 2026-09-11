@@ -1,6 +1,11 @@
 import bcrypt from 'bcrypt';
 
 import {
+  Role,
+  UserStatus,
+} from '@prisma/client';
+
+import {
   prisma,
 } from '../../core/database/prisma.js';
 
@@ -14,6 +19,10 @@ import {
   ForbiddenError,
   ConflictError,
 } from '../../core/utils/errors.js';
+
+import type {
+  AuthenticatedUser,
+} from '../../core/middleware/auth.middleware.js';
 
 const SALT_ROUNDS =
   12;
@@ -214,7 +223,18 @@ export class AuthService {
      * ======================================================
      * ADMIN / TECHNICIAN
      * ======================================================
+     *
+     * AUTH-BE-01 strict issuer coherence:
+     * a professional credential must not carry Customer identity.
      */
+    if (
+      user.customerId !==
+      null
+    ) {
+      throw new ForbiddenError(
+        'Professional user has invalid Customer identity binding'
+      );
+    }
 
     if (
       user.memberships.length ===
@@ -227,6 +247,15 @@ export class AuthService {
 
     const membership =
       user.memberships[0];
+
+    if (
+      membership.role ===
+      Role.CUSTOMER
+    ) {
+      throw new ForbiddenError(
+        'Professional Membership role is invalid'
+      );
+    }
 
     return {
       id:
@@ -255,8 +284,18 @@ export class AuthService {
     };
   }
 
+  /**
+   * Returns the current user without re-selecting an arbitrary effective
+   * Membership.
+   *
+   * The exact security scope has already been validated by authenticate().
+   * memberships[] remains informational and preserves the existing response
+   * contract; role / organizationId are derived only from the JWT-bound
+   * Membership.
+   */
   async getCurrentUser(
-    userId: string
+    authUser:
+      AuthenticatedUser
   ) {
     const user =
       await prisma
@@ -264,10 +303,17 @@ export class AuthService {
         .findUnique({
           where: {
             id:
-              userId,
+              authUser.sub,
           },
 
           include: {
+            customer: {
+              select: {
+                id:
+                  true,
+              },
+            },
+
             memberships: {
               include: {
                 organization:
@@ -282,22 +328,32 @@ export class AuthService {
           },
         });
 
-    if (!user) {
-      throw new UnauthorizedError(
-        'User not found'
+    if (
+      !user ||
+      user.status !==
+        UserStatus.ACTIVE
+    ) {
+      throw new ForbiddenError(
+        'AUTHORITY_REAUTH_REQUIRED'
       );
     }
 
-    /**
-     * CUSTOMER global.
-     */
     if (
-      user.role ===
+      authUser.role ===
       'CUSTOMER'
     ) {
-      if (!user.customerId) {
+      if (
+        user.role !==
+          Role.CUSTOMER ||
+        !user.customerId ||
+        user.customerId !==
+          authUser.customerId ||
+        !user.customer ||
+        user.customer.id !==
+          authUser.customerId
+      ) {
         throw new ForbiddenError(
-          'CUSTOMER user has no associated Customer identity'
+          'AUTHORITY_REAUTH_REQUIRED'
         );
       }
 
@@ -315,7 +371,7 @@ export class AuthService {
           user.phone,
 
         role:
-          'CUSTOMER',
+          Role.CUSTOMER,
 
         status:
           user.status,
@@ -331,20 +387,40 @@ export class AuthService {
       };
     }
 
-    /**
-     * ADMIN / TECHNICIAN.
-     */
+    const organizationId =
+      authUser.organizationId;
+
     if (
-      user.memberships.length ===
-      0
+      !organizationId ||
+      user.role ===
+        Role.CUSTOMER ||
+      user.customerId !==
+        null
     ) {
       throw new ForbiddenError(
-        'User is not associated with an organization'
+        'AUTHORITY_REAUTH_REQUIRED'
       );
     }
 
     const membership =
-      user.memberships[0];
+      user.memberships
+        .find(
+          (
+            item
+          ) =>
+            item.organizationId ===
+            organizationId
+        );
+
+    if (
+      !membership ||
+      membership.role !==
+        authUser.role
+    ) {
+      throw new ForbiddenError(
+        'AUTHORITY_REAUTH_REQUIRED'
+      );
+    }
 
     return {
       id:
@@ -366,13 +442,13 @@ export class AuthService {
         user.status,
 
       customerId:
-        user.customerId,
+        null,
 
-      organizationId:
-        membership.organizationId,
+      organizationId,
 
       memberships:
         user.memberships,
     };
   }
+
 }

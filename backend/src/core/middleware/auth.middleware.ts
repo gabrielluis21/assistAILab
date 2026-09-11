@@ -7,21 +7,15 @@ import {
   ForbiddenError,
 } from '../utils/errors.js';
 
-export interface AuthenticatedUser {
-  sub: string;
-  role: string;
-  name: string;
-  customerId: string | null;
+import {
+  AuthorityReauthenticationRequiredError,
+  InvalidJwtAuthorityShapeError,
+  resolveLiveAuthority,
+  type ValidatedPrincipal,
+} from '../auth/live_authority.service.js';
 
-  /**
-   * ADMIN / TECHNICIAN:
-   * obrigatório e derivado da Membership.
-   *
-   * CUSTOMER:
-   * null, pois a identidade é global.
-   */
-  organizationId: string | null;
-}
+export type AuthenticatedUser =
+  ValidatedPrincipal;
 
 export function getAuthUser(
   request: FastifyRequest
@@ -46,6 +40,14 @@ export function requireOrganizationId(
   return user.organizationId;
 }
 
+/**
+ * AUTH-BE-01 central authority gate.
+ *
+ * request.user is only published to downstream authorization/controllers
+ * after BOTH:
+ *   1. cryptographic JWT verification; and
+ *   2. live authority coherence validation.
+ */
 export async function authenticate(
   request: FastifyRequest,
   reply: FastifyReply
@@ -58,6 +60,44 @@ export async function authenticate(
       .send({
         error: 'Unauthorized',
       });
+  }
+
+  try {
+    const validatedPrincipal =
+      await resolveLiveAuthority(
+        (request as any)
+          .user
+      );
+
+    (request as any)
+      .user =
+      validatedPrincipal;
+  } catch (error) {
+    if (
+      error instanceof
+      InvalidJwtAuthorityShapeError
+    ) {
+      return reply
+        .status(401)
+        .send({
+          error:
+            'Unauthorized',
+        });
+    }
+
+    if (
+      error instanceof
+      AuthorityReauthenticationRequiredError
+    ) {
+      return reply
+        .status(403)
+        .send({
+          error:
+            'AUTHORITY_REAUTH_REQUIRED',
+        });
+    }
+
+    throw error;
   }
 }
 
@@ -78,7 +118,8 @@ export function authorize(
       return reply
         .status(401)
         .send({
-          error: 'Unauthorized',
+          error:
+            'Unauthorized',
         });
     }
 
