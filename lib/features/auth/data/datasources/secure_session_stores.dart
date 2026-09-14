@@ -39,6 +39,19 @@ final class SecureSessionStores {
     );
   }
 
+  factory SecureSessionStores.web({LegacyCredentialPurger? legacyPurger}) {
+    final backend = MemorySecureKeyValueStorage();
+    return SecureSessionStores(
+      credentialStorage: MemoryCredentialStorage.withLegacyPurger(
+        backend,
+        legacyPurger ?? LegacyCredentialPurger(),
+      ),
+      offlineAuthorityStore: MemoryOfflineAuthorityStore(backend),
+      credentialEpochStore: MemoryCredentialEpochStore(backend),
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(backend),
+    );
+  }
+
   final CredentialStorage credentialStorage;
   final OfflineAuthorityStore offlineAuthorityStore;
   final CredentialEpochStore credentialEpochStore;
@@ -46,7 +59,7 @@ final class SecureSessionStores {
 }
 
 SecureSessionStores createSecureSessionStores() =>
-    kIsWeb ? SecureSessionStores.memory() : SecureSessionStores.native();
+    kIsWeb ? SecureSessionStores.web() : SecureSessionStores.native();
 
 final class NativeSecureCredentialStorage implements CredentialStorage {
   NativeSecureCredentialStorage(
@@ -102,6 +115,14 @@ final class MemoryCredentialStorage implements CredentialStorage {
           legacyPurger: _NoOpLegacyPurger(),
         );
 
+  MemoryCredentialStorage.withLegacyPurger(
+    SecureKeyValueStorage storage,
+    LegacyCredentialPurger legacyPurger,
+  ) : _delegate = NativeSecureCredentialStorage(
+          storage,
+          legacyPurger: legacyPurger,
+        );
+
   final NativeSecureCredentialStorage _delegate;
 
   @override
@@ -127,7 +148,8 @@ final class MemoryCredentialStorage implements CredentialStorage {
       );
 
   @override
-  Future<void> purgeLegacyCredentials() async {}
+  Future<void> purgeLegacyCredentials() =>
+      _delegate.purgeLegacyCredentials();
 }
 
 final class NativeSecureOfflineAuthorityStore implements OfflineAuthorityStore {
