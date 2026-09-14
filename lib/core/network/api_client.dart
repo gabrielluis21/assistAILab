@@ -1,33 +1,42 @@
 import 'dart:convert';
 
 import 'package:assistailab/core/config/app_env.dart';
+import 'package:assistailab/core/security/credential_epoch_store.dart';
 import 'package:assistailab/core/security/credential_storage.dart';
-import 'package:assistailab/core/security/hive_credential_storage.dart';
 import 'package:assistailab/core/sync/sync_lease.dart';
 import 'package:http/http.dart' as http;
 
 class ApiClient {
   final String baseUrl;
   final http.Client _client;
-  final CredentialStorage credentialStorage;
+  final CredentialStorage? credentialStorage;
+  final CredentialEpochStore? credentialEpochStore;
 
   ApiClient({
     String? baseUrl,
     http.Client? client,
-    CredentialStorage? credentialStorage,
+    this.credentialStorage,
+    this.credentialEpochStore,
   })  : baseUrl = baseUrl ?? AppEnv.apiBaseUrl,
-        _client = client ?? http.Client(),
-        credentialStorage = credentialStorage ?? HiveCredentialStorage();
+        _client = client ?? http.Client();
 
   Future<String?> _getToken() async {
-    final credential = await credentialStorage.read();
-    if (credential == null) return null;
-
-    final cleanupBinding =
-        await credentialStorage.readCleanupPendingBindingId();
-    if (cleanupBinding == credential.bindingId) return null;
-
-    return credential.accessToken;
+    try {
+      final epochs = credentialEpochStore;
+      final credentials = credentialStorage;
+      if (epochs == null || credentials == null) return null;
+      final epoch = await epochs.read();
+      if (epoch == null || !epoch.isActive) return null;
+      final credential = await credentials.readById(epoch.activeCredentialId!);
+      if (credential == null ||
+          credential.credentialId != epoch.activeCredentialId ||
+          credential.credentialGeneration != epoch.activeCredentialGeneration) {
+        return null;
+      }
+      return credential.accessToken;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Exposes the current auth token for session-bound lease creation at orchestration boundaries.

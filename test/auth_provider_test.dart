@@ -220,13 +220,12 @@ final class _RecordingCredentialStorage implements CredentialStorage {
   _RecordingCredentialStorage([this.value]);
 
   StoredCredential? value;
-  String? cleanupPendingBindingId;
   int readCalls = 0;
 
   @override
-  Future<StoredCredential?> read() async {
+  Future<StoredCredential?> readById(String credentialId) async {
     readCalls++;
-    return value;
+    return value?.credentialId == credentialId ? value : null;
   }
 
   @override
@@ -235,31 +234,21 @@ final class _RecordingCredentialStorage implements CredentialStorage {
   }
 
   @override
-  Future<String?> readCleanupPendingBindingId() async =>
-      cleanupPendingBindingId;
-
-  @override
-  Future<void> markCleanupPending(String bindingId) async {
-    cleanupPendingBindingId = bindingId;
+  Future<void> deleteById(String credentialId) async {
+    if (value?.credentialId == credentialId) value = null;
   }
 
   @override
-  Future<void> delete() async {
-    value = null;
-  }
-
-  @override
-  Future<bool> deleteIfMatches(String bindingId) async {
-    if (value?.bindingId != bindingId) return false;
+  Future<bool> deleteIfMatches({
+    required String credentialId,
+    required int credentialGeneration,
+  }) async {
+    if (value?.credentialId != credentialId ||
+        value?.credentialGeneration != credentialGeneration) {
+      return false;
+    }
     value = null;
     return true;
-  }
-
-  @override
-  Future<void> clearCleanupPending(String bindingId) async {
-    if (cleanupPendingBindingId == bindingId) {
-      cleanupPendingBindingId = null;
-    }
   }
 
   @override

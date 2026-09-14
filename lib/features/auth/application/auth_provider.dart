@@ -6,14 +6,15 @@ import 'package:uuid/uuid.dart';
 
 import '../../../core/database/auth_scoped_database_manager.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/security/credential_epoch.dart';
+import '../../../core/security/credential_epoch_store.dart';
 import '../../../core/security/credential_storage.dart';
-import '../../../core/security/hive_credential_storage.dart';
 import '../data/datasources/auth_remote_datasource.dart';
-import '../data/datasources/hive_offline_authority_store.dart';
 import '../data/datasources/hive_user_profile_cache.dart';
+import '../data/datasources/secure_session_stores.dart';
 import '../data/repositories/auth_repository_impl.dart';
-import '../domain/entities/offline_authority_record.dart';
 import '../domain/entities/auth_scope.dart';
+import '../domain/entities/offline_authority_record.dart';
 import '../domain/entities/session_state.dart';
 import '../domain/entities/user.dart';
 import '../domain/repositories/auth_repository.dart';
@@ -21,8 +22,12 @@ import '../domain/repositories/offline_authority_store.dart';
 import '../domain/repositories/user_profile_cache.dart';
 import '../domain/services/session_security_validator.dart';
 
+final secureSessionStoresProvider = Provider<SecureSessionStores>((ref) {
+  return createSecureSessionStores();
+});
+
 final credentialStorageProvider = Provider<CredentialStorage>((ref) {
-  return HiveCredentialStorage();
+  return ref.watch(secureSessionStoresProvider).credentialStorage;
 });
 
 final userProfileCacheProvider = Provider<UserProfileCache>((ref) {
@@ -30,7 +35,11 @@ final userProfileCacheProvider = Provider<UserProfileCache>((ref) {
 });
 
 final offlineAuthorityStoreProvider = Provider<OfflineAuthorityStore>((ref) {
-  return HiveOfflineAuthorityStore();
+  return ref.watch(secureSessionStoresProvider).offlineAuthorityStore;
+});
+
+final credentialEpochStoreProvider = Provider<CredentialEpochStore>((ref) {
+  return ref.watch(secureSessionStoresProvider).credentialEpochStore;
 });
 
 final sessionSecurityValidatorProvider = Provider<SessionSecurityValidator>(
@@ -40,6 +49,7 @@ final sessionSecurityValidatorProvider = Provider<SessionSecurityValidator>(
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(
     credentialStorage: ref.watch(credentialStorageProvider),
+    credentialEpochStore: ref.watch(credentialEpochStoreProvider),
   );
 });
 
@@ -58,6 +68,7 @@ final authStateProvider = StateNotifierProvider<AuthNotifier, SessionState>(
       credentialStorage: ref.watch(credentialStorageProvider),
       profileCache: ref.watch(userProfileCacheProvider),
       offlineAuthorityStore: ref.watch(offlineAuthorityStoreProvider),
+      credentialEpochStore: ref.watch(credentialEpochStoreProvider),
       securityValidator: ref.watch(sessionSecurityValidatorProvider),
       databaseManager: AuthScopedDatabaseManager.instance,
     );
@@ -95,11 +106,15 @@ final class SessionRequestCredential {
     required this.sessionGeneration,
     required this.accessToken,
     required this.credentialBindingId,
+    required this.credentialId,
+    required this.credentialGeneration,
   });
 
   final int sessionGeneration;
   final String accessToken;
   final String credentialBindingId;
+  final String credentialId;
+  final int credentialGeneration;
 }
 
 final class SessionRequestBlockedException implements Exception {
@@ -134,20 +149,24 @@ class AuthNotifier extends StateNotifier<SessionState> {
     required CredentialStorage credentialStorage,
     required UserProfileCache profileCache,
     required OfflineAuthorityStore offlineAuthorityStore,
+    required CredentialEpochStore credentialEpochStore,
     required SessionSecurityValidator securityValidator,
     required AuthScopedDatabaseManager databaseManager,
     DateTime Function()? nowUtc,
     String Function()? credentialBindingIdFactory,
+    String Function()? credentialIdFactory,
     bool autoBootstrap = true,
   })  : _repository = repository,
         _credentialStorage = credentialStorage,
         _profileCache = profileCache,
         _offlineAuthorityStore = offlineAuthorityStore,
+        _credentialEpochStore = credentialEpochStore,
         _securityValidator = securityValidator,
         _databaseManager = databaseManager,
         _nowUtc = nowUtc ?? (() => DateTime.now().toUtc()),
         _credentialBindingIdFactory =
             credentialBindingIdFactory ?? (() => const Uuid().v4()),
+        _credentialIdFactory = credentialIdFactory ?? (() => const Uuid().v4()),
         super(const SessionBootstrapping(0)) {
     if (autoBootstrap) {
       unawaited(bootstrap());
@@ -158,10 +177,12 @@ class AuthNotifier extends StateNotifier<SessionState> {
   final CredentialStorage _credentialStorage;
   final UserProfileCache _profileCache;
   final OfflineAuthorityStore _offlineAuthorityStore;
+  final CredentialEpochStore _credentialEpochStore;
   final SessionSecurityValidator _securityValidator;
   final AuthScopedDatabaseManager _databaseManager;
   final DateTime Function() _nowUtc;
   final String Function() _credentialBindingIdFactory;
+  final String Function() _credentialIdFactory;
 
   int _currentGeneration = 0;
   Future<void> _persistenceTail = Future<void>.value();
@@ -202,17 +223,33 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
     if (!isGenerationCurrent(generation)) return;
 
-    late _BootstrapSnapshot snapshot;
+    late _ActiveVaultSnapshot snapshot;
     try {
-      final result = await _serializeForGeneration<_BootstrapSnapshot>(
+      final result = await _serializeForGeneration<_ActiveVaultSnapshot?>(
         generation,
-        () async => _BootstrapSnapshot(
-          credential: await _credentialStorage.read(),
-          cleanupPendingBindingId:
-              await _credentialStorage.readCleanupPendingBindingId(),
-        ),
+        _readActiveVaultSnapshot,
       );
-      if (!result.applied || result.value == null) return;
+      if (!result.applied) return;
+      if (result.value == null) {
+        final cleanup = await _serializeForGeneration<_CleanupOutcome>(
+          generation,
+          _cleanupPersistedSession,
+        );
+        if (!cleanup.applied) return;
+        final outcome = cleanup.value ?? const _CleanupOutcome();
+        _publishIfCurrent(
+          generation,
+          SessionUnauthenticated(
+            generation,
+            cleanupPending: outcome.cleanupPending,
+            diagnostic: _joinDiagnostics(
+              legacyCleanupDiagnostic,
+              outcome.diagnostic,
+            ),
+          ),
+        );
+        return;
+      }
       snapshot = result.value!;
     } catch (error, stackTrace) {
       await _failClosedForCurrentGeneration(
@@ -225,39 +262,6 @@ class AuthNotifier extends StateNotifier<SessionState> {
     }
 
     final credential = snapshot.credential;
-    if (credential == null) {
-      _publishIfCurrent(
-        generation,
-        SessionUnauthenticated(
-          generation,
-          diagnostic: legacyCleanupDiagnostic,
-        ),
-      );
-      return;
-    }
-
-    if (snapshot.cleanupPendingBindingId == credential.bindingId) {
-      await _terminateGeneration(
-        generation,
-        operation: SessionOperation.bootstrap,
-        diagnostic: 'Residual credential was blocked by a logout tombstone.',
-      );
-      return;
-    }
-
-    if (snapshot.cleanupPendingBindingId != null) {
-      try {
-        await _serializeForGeneration<void>(
-          generation,
-          () => _credentialStorage.clearCleanupPending(
-            snapshot.cleanupPendingBindingId!,
-          ),
-        );
-      } catch (_) {
-        // A marker for a different, already superseded binding cannot make the
-        // current credential usable or unusable. It can be retried later.
-      }
-    }
 
     try {
       final jwt = JwtPayloadInspection.parse(credential.accessToken);
@@ -295,6 +299,14 @@ class AuthNotifier extends StateNotifier<SessionState> {
         () async {
           await _profileCache.write(user);
           await _offlineAuthorityStore.write(authority);
+          final verified = await _offlineAuthorityStore.readByCredentialId(
+            credential.credentialId,
+          );
+          if (!_sameAuthority(verified, authority)) {
+            throw const SessionVaultException(
+              'Secure authority verification failed.',
+            );
+          }
         },
       );
       if (!commit.applied) return;
@@ -340,7 +352,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
       if (error.isServerUnavailable) {
         await _restoreOfflineLimited(
           generation,
-          credential,
+          snapshot,
           diagnostic: legacyCleanupDiagnostic,
         );
       } else {
@@ -355,7 +367,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
       // offline path below. Cache alone is never sufficient.
       await _restoreOfflineLimited(
         generation,
-        credential,
+        snapshot,
         diagnostic: legacyCleanupDiagnostic,
       );
     }
@@ -366,59 +378,39 @@ class AuthNotifier extends StateNotifier<SessionState> {
       (next) => SessionAuthenticating(next),
     );
 
-    // A new login is a new logical session, even for the same principal. Close
-    // and invalidate the previous DB/credential before contacting the public
-    // login endpoint.
+    // A new login invalidates the in-memory session and DB immediately, while
+    // the previous secure Epoch remains authoritative until replacement commit.
     await _closeDatabaseBestEffort(generation);
-    try {
-      final cleanup = await _serializeForGeneration<_CleanupOutcome>(
-        generation,
-        _cleanupPersistedSession,
-      );
-      if (!cleanup.applied) return false;
-    } catch (error) {
-      debugPrint(
-          'Session pre-login cleanup failed (credential omitted): $error');
-    }
     if (!isGenerationCurrent(generation)) return false;
 
     try {
       final result = await _repository.login(email, password);
       if (!isGenerationCurrent(generation)) return false;
 
-      final credential = StoredCredential(
+      final provisionalCredential = StoredCredential(
         accessToken: result.accessToken,
         bindingId: _credentialBindingIdFactory(),
       );
       final validatedAt = _nowUtc().toUtc();
       final material = _securityValidator.validateOnline(
         user: result.user,
-        credential: credential,
+        credential: provisionalCredential,
         nowUtc: validatedAt,
       );
-      final authority = _securityValidator.createOfflineAuthorityRecord(
-        user: result.user,
-        credential: credential,
-        material: material,
-        validatedAtUtc: validatedAt,
-      );
 
-      final commit = await _serializeForGeneration<void>(
+      final commit = await _serializeForGeneration<_VaultCommit>(
         generation,
-        () async {
-          final oldMarker =
-              await _credentialStorage.readCleanupPendingBindingId();
-          if (oldMarker != null && oldMarker != credential.bindingId) {
-            await _credentialStorage.clearCleanupPending(oldMarker);
-          }
-          await _profileCache.write(result.user);
-          await _offlineAuthorityStore.write(authority);
-          // Credential is the final commit marker. Auxiliary cache records can
-          // never authenticate without it.
-          await _credentialStorage.write(credential);
-        },
+        () => _commitCredentialReplacement(
+          generation: generation,
+          user: result.user,
+          accessToken: result.accessToken,
+          bindingId: provisionalCredential.bindingId,
+          material: material,
+          validatedAtUtc: validatedAt,
+        ),
       );
-      if (!commit.applied) return false;
+      if (!commit.applied || commit.value == null) return false;
+      final credential = commit.value!.credential;
 
       if (!await _openBoundDatabase(
         generation: generation,
@@ -477,6 +469,8 @@ class AuthNotifier extends StateNotifier<SessionState> {
       final storedCredential = StoredCredential(
         accessToken: requestCredential.accessToken,
         bindingId: requestCredential.credentialBindingId,
+        credentialId: requestCredential.credentialId,
+        credentialGeneration: requestCredential.credentialGeneration,
       );
       final material = _securityValidator.validateOnline(
         user: user,
@@ -494,6 +488,14 @@ class AuthNotifier extends StateNotifier<SessionState> {
         () async {
           await _profileCache.write(user);
           await _offlineAuthorityStore.write(authority);
+          final verified = await _offlineAuthorityStore.readByCredentialId(
+            storedCredential.credentialId,
+          );
+          if (!_sameAuthority(verified, authority)) {
+            throw const SessionVaultException(
+              'Secure authority verification failed.',
+            );
+          }
         },
       );
       if (!commit.applied) return false;
@@ -562,19 +564,14 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
     final generation = snapshot.generation;
     final bindingId = snapshot.credentialBindingId;
-    final result = await _serializeForGeneration<_BootstrapSnapshot>(
+    final result = await _serializeForGeneration<_ActiveVaultSnapshot?>(
       generation,
-      () async => _BootstrapSnapshot(
-        credential: await _credentialStorage.read(),
-        cleanupPendingBindingId:
-            await _credentialStorage.readCleanupPendingBindingId(),
-      ),
+      _readActiveVaultSnapshot,
     );
     final credential = result.value?.credential;
     if (!result.applied ||
         credential == null ||
         credential.bindingId != bindingId ||
-        result.value!.cleanupPendingBindingId == bindingId ||
         !isGenerationCurrent(generation)) {
       throw const SessionRequestBlockedException(
         'Session credential is missing, tombstoned, or superseded.',
@@ -585,6 +582,8 @@ class AuthNotifier extends StateNotifier<SessionState> {
       sessionGeneration: generation,
       accessToken: credential.accessToken,
       credentialBindingId: credential.bindingId,
+      credentialId: credential.credentialId,
+      credentialGeneration: credential.credentialGeneration,
     );
   }
 
@@ -689,7 +688,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
   Future<void> _restoreOfflineLimited(
     int generation,
-    StoredCredential credential, {
+    _ActiveVaultSnapshot vault, {
     String? diagnostic,
   }) async {
     if (!isGenerationCurrent(generation)) return;
@@ -699,7 +698,9 @@ class AuthNotifier extends StateNotifier<SessionState> {
         generation,
         () async => _OfflineSnapshot(
           user: await _profileCache.read(),
-          authority: await _offlineAuthorityStore.read(),
+          authority: await _offlineAuthorityStore.readByCredentialId(
+            vault.credential.credentialId,
+          ),
         ),
       );
       if (!cached.applied || cached.value == null) return;
@@ -717,8 +718,9 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
       final offline = _securityValidator.validateOffline(
         cachedUser: user,
-        credential: credential,
+        credential: vault.credential,
         authority: authority,
+        epoch: vault.epoch,
         nowUtc: _nowUtc().toUtc(),
       );
       if (!await _openBoundDatabase(
@@ -734,7 +736,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
           generation: generation,
           user: user,
           scope: offline.material.scope,
-          credentialBindingId: credential.bindingId,
+          credentialBindingId: vault.credential.bindingId,
           onlineValidatedAtUtc: authority.validatedAtUtc,
           jwtExpiresAtUtc: offline.material.jwtExpiresAtUtc,
           offlineAuthorityExpiresAtUtc: offline.authorityExpiresAtUtc,
@@ -827,63 +829,207 @@ class AuthNotifier extends StateNotifier<SessionState> {
     }
   }
 
+  Future<_ActiveVaultSnapshot?> _readActiveVaultSnapshot() async {
+    final epoch = await _credentialEpochStore.read();
+    if (epoch == null || !epoch.isActive) return null;
+
+    final credentialId = epoch.activeCredentialId!;
+    final credential = await _credentialStorage.readById(credentialId);
+    if (credential == null ||
+        credential.credentialId != credentialId ||
+        credential.credentialGeneration != epoch.activeCredentialGeneration) {
+      throw const SessionVaultException(
+        'ACTIVE Epoch does not resolve to its exact credential.',
+      );
+    }
+    return _ActiveVaultSnapshot(epoch: epoch, credential: credential);
+  }
+
+  Future<_VaultCommit> _commitCredentialReplacement({
+    required int generation,
+    required User user,
+    required String accessToken,
+    required String bindingId,
+    required ValidatedSessionMaterial material,
+    required DateTime validatedAtUtc,
+  }) async {
+    final previousEpoch = await _credentialEpochStore.read();
+    final nextGeneration = (previousEpoch?.activeCredentialGeneration ?? 0) + 1;
+    final credential = StoredCredential(
+      accessToken: accessToken,
+      bindingId: bindingId,
+      credentialId: _credentialIdFactory(),
+      credentialGeneration: nextGeneration,
+    );
+    final authority = _securityValidator.createOfflineAuthorityRecord(
+      user: user,
+      credential: credential,
+      material: material,
+      validatedAtUtc: validatedAtUtc,
+    );
+    var epochCommitted = false;
+    try {
+      await _credentialStorage.write(credential);
+      await _offlineAuthorityStore.write(authority);
+
+      final verifiedCredential =
+          await _credentialStorage.readById(credential.credentialId);
+      final verifiedAuthority = await _offlineAuthorityStore.readByCredentialId(
+        credential.credentialId,
+      );
+      if (!_sameCredential(verifiedCredential, credential) ||
+          !_sameAuthority(verifiedAuthority, authority)) {
+        throw const SessionVaultException(
+          'Pending credential or authority read-back verification failed.',
+        );
+      }
+
+      await _profileCache.write(user);
+      if (!isGenerationCurrent(generation)) {
+        throw const SessionVaultException(
+          'Credential replacement was superseded before Epoch commit.',
+        );
+      }
+
+      final nextEpoch = CredentialEpoch(
+        activeCredentialId: credential.credentialId,
+        activeCredentialGeneration: credential.credentialGeneration,
+        vaultState: VaultState.active,
+      );
+      await _credentialEpochStore.write(nextEpoch);
+      final verifiedEpoch = await _credentialEpochStore.read();
+      if (!_sameEpoch(verifiedEpoch, nextEpoch)) {
+        throw const SessionVaultException(
+          'ACTIVE Epoch read-back verification failed.',
+        );
+      }
+      epochCommitted = true;
+    } catch (_) {
+      if (!epochCommitted) {
+        await _deletePendingReplacementBestEffort(credential);
+      }
+      rethrow;
+    }
+
+    final previousId = previousEpoch?.activeCredentialId;
+    if (previousId != null && previousId != credential.credentialId) {
+      try {
+        await _offlineAuthorityStore.deleteByCredentialId(previousId);
+      } catch (_) {
+        // The old authority is non-authoritative after Epoch commit.
+      }
+      try {
+        await _credentialStorage.deleteIfMatches(
+          credentialId: previousId,
+          credentialGeneration: previousEpoch!.activeCredentialGeneration,
+        );
+      } catch (_) {
+        // The old credential is non-authoritative after Epoch commit.
+      }
+    }
+
+    return _VaultCommit(credential: credential);
+  }
+
+  Future<void> _deletePendingReplacementBestEffort(
+    StoredCredential credential,
+  ) async {
+    try {
+      await _offlineAuthorityStore.deleteByCredentialId(
+        credential.credentialId,
+      );
+    } catch (_) {
+      // A partial record cannot authenticate without its ACTIVE Epoch.
+    }
+    try {
+      await _credentialStorage.deleteIfMatches(
+        credentialId: credential.credentialId,
+        credentialGeneration: credential.credentialGeneration,
+      );
+    } catch (_) {
+      // A partial record cannot authenticate without its ACTIVE Epoch.
+    }
+  }
+
   Future<_CleanupOutcome> _cleanupPersistedSession() async {
     final diagnostics = <String>[];
     var cleanupPending = false;
-    StoredCredential? credential;
+    CredentialEpoch? epoch;
 
     try {
-      credential = await _credentialStorage.read();
+      epoch = await _credentialEpochStore.read();
     } catch (error) {
-      diagnostics.add('Credential read failed during cleanup: $error');
+      cleanupPending = true;
+      diagnostics.add('Credential Epoch read failed during cleanup: $error');
+    }
+
+    final credentialId = epoch?.activeCredentialId;
+    final credentialGeneration = epoch?.activeCredentialGeneration;
+    if (epoch != null && epoch.vaultState == VaultState.active) {
       try {
-        await _credentialStorage.delete();
-      } catch (deleteError) {
+        epoch = CredentialEpoch(
+          activeCredentialId: credentialId,
+          activeCredentialGeneration: credentialGeneration!,
+          vaultState: VaultState.revoked,
+        );
+        await _credentialEpochStore.write(epoch);
+      } catch (error) {
         cleanupPending = true;
-        diagnostics.add('Malformed credential deletion failed: $deleteError');
+        diagnostics.add('Credential Epoch revocation failed: $error');
       }
     }
 
-    if (credential != null) {
-      var markerWritten = false;
+    if (credentialId != null && epoch?.vaultState != VaultState.active) {
       try {
-        await _credentialStorage.markCleanupPending(credential.bindingId);
-        markerWritten = true;
+        await _offlineAuthorityStore.deleteByCredentialId(credentialId);
       } catch (error) {
-        diagnostics.add('Cleanup tombstone write failed: $error');
+        cleanupPending = true;
+        diagnostics.add('Offline authority cleanup failed: $error');
       }
-
       try {
-        await _credentialStorage.deleteIfMatches(credential.bindingId);
-        if (markerWritten) {
-          await _credentialStorage.clearCleanupPending(credential.bindingId);
+        final credential = await _credentialStorage.readById(credentialId);
+        if (credential != null) {
+          final deleted = await _credentialStorage.deleteIfMatches(
+            credentialId: credentialId,
+            credentialGeneration: credentialGeneration!,
+          );
+          if (!deleted) {
+            cleanupPending = true;
+            diagnostics.add('Credential cleanup could not verify its target.');
+          }
         }
       } catch (error) {
         cleanupPending = true;
-        diagnostics.add('Credential deletion failed: $error');
-      }
-    } else {
-      try {
-        final oldMarker =
-            await _credentialStorage.readCleanupPendingBindingId();
-        if (oldMarker != null) {
-          await _credentialStorage.clearCleanupPending(oldMarker);
-        }
-      } catch (error) {
-        cleanupPending = true;
-        diagnostics.add('Cleanup tombstone clearing failed: $error');
+        diagnostics.add('Credential cleanup failed: $error');
       }
     }
 
     try {
-      await _offlineAuthorityStore.delete();
+      await _credentialStorage.purgeLegacyCredentials();
     } catch (error) {
-      diagnostics.add('Offline authority cleanup failed: $error');
+      diagnostics.add('Legacy authentication cleanup failed: $error');
     }
     try {
       await _profileCache.delete();
     } catch (error) {
       diagnostics.add('User profile cache cleanup failed: $error');
+    }
+
+    if (cleanupPending &&
+        epoch != null &&
+        epoch.vaultState != VaultState.empty &&
+        epoch.vaultState != VaultState.active) {
+      try {
+        await _credentialEpochStore.write(
+          CredentialEpoch(
+            activeCredentialId: credentialId,
+            activeCredentialGeneration: credentialGeneration!,
+            vaultState: VaultState.cleanupPending,
+          ),
+        );
+      } catch (error) {
+        diagnostics.add('CLEANUP_PENDING Epoch write failed: $error');
+      }
     }
 
     return _CleanupOutcome(
@@ -949,14 +1095,20 @@ final class _GenerationCommit<T> {
   final T? value;
 }
 
-final class _BootstrapSnapshot {
-  const _BootstrapSnapshot({
+final class _ActiveVaultSnapshot {
+  const _ActiveVaultSnapshot({
+    required this.epoch,
     required this.credential,
-    required this.cleanupPendingBindingId,
   });
 
-  final StoredCredential? credential;
-  final String? cleanupPendingBindingId;
+  final CredentialEpoch epoch;
+  final StoredCredential credential;
+}
+
+final class _VaultCommit {
+  const _VaultCommit({required this.credential});
+
+  final StoredCredential credential;
 }
 
 final class _OfflineSnapshot {
@@ -978,3 +1130,42 @@ final class _CleanupOutcome {
   final bool cleanupPending;
   final String? diagnostic;
 }
+
+final class SessionVaultException implements Exception {
+  const SessionVaultException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'SessionVaultException: $message';
+}
+
+bool _sameCredential(StoredCredential? left, StoredCredential right) =>
+    left != null &&
+    left.schemaVersion == right.schemaVersion &&
+    left.accessToken == right.accessToken &&
+    left.bindingId == right.bindingId &&
+    left.credentialId == right.credentialId &&
+    left.credentialGeneration == right.credentialGeneration;
+
+bool _sameAuthority(
+  OfflineAuthorityRecord? left,
+  OfflineAuthorityRecord right,
+) =>
+    left != null &&
+    left.schemaVersion == right.schemaVersion &&
+    left.principalId == right.principalId &&
+    left.scopeKey == right.scopeKey &&
+    left.credentialBindingId == right.credentialBindingId &&
+    left.credentialId == right.credentialId &&
+    left.credentialGeneration == right.credentialGeneration &&
+    left.validatedAtUtc.toUtc() == right.validatedAtUtc.toUtc() &&
+    left.jwtExpiresAtUtc.toUtc() == right.jwtExpiresAtUtc.toUtc() &&
+    left.credentialFingerprint == right.credentialFingerprint;
+
+bool _sameEpoch(CredentialEpoch? left, CredentialEpoch right) =>
+    left != null &&
+    left.schemaVersion == right.schemaVersion &&
+    left.activeCredentialId == right.activeCredentialId &&
+    left.activeCredentialGeneration == right.activeCredentialGeneration &&
+    left.vaultState == right.vaultState;

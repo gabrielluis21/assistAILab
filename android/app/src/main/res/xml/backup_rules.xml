@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="assistailab_session_vault_v1.xml" />
+    <exclude domain="sharedpref" path="FlutterSecureKeyStorage:assistailab_session_vault_v1.xml" />
+    <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:assistailab_session_vault_v1.xml" />
+</full-backup-content>

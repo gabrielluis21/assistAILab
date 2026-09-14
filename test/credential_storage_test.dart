@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/core/security/hive_credential_storage.dart';
+import 'package:assistailab/features/auth/data/datasources/secure_session_stores.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -23,51 +24,58 @@ void main() {
   test('legacy tokens are deleted and never migrated to canonical storage',
       () async {
     final legacyAuth = await Hive.openBox<dynamic>(
-      HiveCredentialStorage.legacyAuthBoxName,
+      LegacyCredentialPurger.legacyAuthBoxName,
     );
     final legacyPreferences = await Hive.openBox<dynamic>(
-      HiveCredentialStorage.legacyPreferencesBoxName,
+      LegacyCredentialPurger.legacyPreferencesBoxName,
     );
-    await legacyAuth.put(HiveCredentialStorage.legacyJwtKey, 'legacy-jwt');
+    await legacyAuth.put(LegacyCredentialPurger.legacyJwtKey, 'legacy-jwt');
     await legacyPreferences.put(
-      HiveCredentialStorage.legacyPreferencesTokenKey,
+      LegacyCredentialPurger.legacyPreferencesTokenKey,
       'legacy-preferences-token',
     );
 
-    final storage = HiveCredentialStorage();
-    await storage.purgeLegacyCredentials();
+    await LegacyCredentialPurger().purge();
 
-    expect(legacyAuth.get(HiveCredentialStorage.legacyJwtKey), isNull);
+    expect(legacyAuth.get(LegacyCredentialPurger.legacyJwtKey), isNull);
     expect(
       legacyPreferences.get(
-        HiveCredentialStorage.legacyPreferencesTokenKey,
+        LegacyCredentialPurger.legacyPreferencesTokenKey,
       ),
       isNull,
     );
-    expect(await storage.read(), isNull);
   });
 
-  test('conditional old cleanup cannot delete a replacement credential',
+  test('credential records coexist and conditional cleanup is id-bound',
       () async {
-    final storage = HiveCredentialStorage();
+    final storage = MemoryCredentialStorage();
     final credentialA = StoredCredential(
       accessToken: 'token-a',
       bindingId: 'binding-a',
+      credentialId: 'credential-a',
+      credentialGeneration: 1,
     );
     final credentialB = StoredCredential(
       accessToken: 'token-b',
       bindingId: 'binding-b',
+      credentialId: 'credential-b',
+      credentialGeneration: 2,
     );
 
     await storage.write(credentialA);
-    await storage.markCleanupPending(credentialA.bindingId);
     await storage.write(credentialB);
 
-    expect(await storage.deleteIfMatches(credentialA.bindingId), isFalse);
-    expect((await storage.read())?.bindingId, credentialB.bindingId);
     expect(
-      await storage.readCleanupPendingBindingId(),
-      credentialA.bindingId,
+      await storage.deleteIfMatches(
+        credentialId: credentialA.credentialId,
+        credentialGeneration: credentialA.credentialGeneration,
+      ),
+      isTrue,
+    );
+    expect(await storage.readById(credentialA.credentialId), isNull);
+    expect(
+      (await storage.readById(credentialB.credentialId))?.bindingId,
+      credentialB.bindingId,
     );
   });
 }
