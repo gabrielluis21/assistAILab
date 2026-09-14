@@ -186,6 +186,8 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
   int _currentGeneration = 0;
   Future<void> _persistenceTail = Future<void>.value();
+  bool _replacementEpochRequiredAfterFailure = false;
+  bool _runtimeRevocationUncommitted = false;
 
   int get currentGeneration => _currentGeneration;
 
@@ -374,6 +376,9 @@ class AuthNotifier extends StateNotifier<SessionState> {
   }
 
   Future<bool> login(String email, String password) async {
+    final wasAuthenticated = state is AuthenticatedSession;
+    final requiresActiveReplacementEpoch =
+        wasAuthenticated || _replacementEpochRequiredAfterFailure;
     final generation = _begin(
       (next) => SessionAuthenticating(next),
     );
@@ -407,6 +412,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
           bindingId: provisionalCredential.bindingId,
           material: material,
           validatedAtUtc: validatedAt,
+          requiresActiveReplacementEpoch: requiresActiveReplacementEpoch,
         ),
       );
       if (!commit.applied || commit.value == null) return false;
@@ -830,6 +836,11 @@ class AuthNotifier extends StateNotifier<SessionState> {
   }
 
   Future<_ActiveVaultSnapshot?> _readActiveVaultSnapshot() async {
+    if (_runtimeRevocationUncommitted) {
+      throw const SessionVaultException(
+        'Runtime logout is awaiting durable Epoch revocation.',
+      );
+    }
     final epoch = await _credentialEpochStore.read();
     if (epoch == null || !epoch.isActive) return null;
 
@@ -852,9 +863,26 @@ class AuthNotifier extends StateNotifier<SessionState> {
     required String bindingId,
     required ValidatedSessionMaterial material,
     required DateTime validatedAtUtc,
+    required bool requiresActiveReplacementEpoch,
   }) async {
-    final previousEpoch = await _credentialEpochStore.read();
-    final nextGeneration = (previousEpoch?.activeCredentialGeneration ?? 0) + 1;
+    late final CredentialEpoch? previousEpoch;
+    try {
+      previousEpoch = await _credentialEpochStore.read();
+    } catch (_) {
+      _replacementEpochRequiredAfterFailure = true;
+      rethrow;
+    }
+    if (requiresActiveReplacementEpoch &&
+        (previousEpoch == null || !previousEpoch.isActive)) {
+      _replacementEpochRequiredAfterFailure = true;
+      throw const SessionVaultException(
+        'Authenticated credential replacement requires an ACTIVE Epoch.',
+      );
+    }
+    final isFreshVault =
+        previousEpoch == null || previousEpoch.vaultState == VaultState.empty;
+    final nextGeneration =
+        isFreshVault ? 1 : previousEpoch.activeCredentialGeneration + 1;
     final credential = StoredCredential(
       accessToken: accessToken,
       bindingId: bindingId,
@@ -903,6 +931,8 @@ class AuthNotifier extends StateNotifier<SessionState> {
           'ACTIVE Epoch read-back verification failed.',
         );
       }
+      _replacementEpochRequiredAfterFailure = false;
+      _runtimeRevocationUncommitted = false;
       epochCommitted = true;
     } catch (_) {
       if (!epochCommitted) {
@@ -954,6 +984,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
   Future<_CleanupOutcome> _cleanupPersistedSession() async {
     final diagnostics = <String>[];
     var cleanupPending = false;
+    var durableRevocation = false;
     CredentialEpoch? epoch;
 
     try {
@@ -966,20 +997,29 @@ class AuthNotifier extends StateNotifier<SessionState> {
     final credentialId = epoch?.activeCredentialId;
     final credentialGeneration = epoch?.activeCredentialGeneration;
     if (epoch != null && epoch.vaultState == VaultState.active) {
+      final revokedEpoch = CredentialEpoch(
+        activeCredentialId: credentialId,
+        activeCredentialGeneration: credentialGeneration!,
+        vaultState: VaultState.revoked,
+      );
       try {
-        epoch = CredentialEpoch(
-          activeCredentialId: credentialId,
-          activeCredentialGeneration: credentialGeneration!,
-          vaultState: VaultState.revoked,
-        );
-        await _credentialEpochStore.write(epoch);
+        await _credentialEpochStore.write(revokedEpoch);
+        epoch = revokedEpoch;
+        durableRevocation = true;
+        _runtimeRevocationUncommitted = false;
       } catch (error) {
         cleanupPending = true;
+        _runtimeRevocationUncommitted = true;
         diagnostics.add('Credential Epoch revocation failed: $error');
       }
+    } else if (epoch != null &&
+        (epoch.vaultState == VaultState.revoked ||
+            epoch.vaultState == VaultState.cleanupPending)) {
+      durableRevocation = true;
+      _runtimeRevocationUncommitted = false;
     }
 
-    if (credentialId != null && epoch?.vaultState != VaultState.active) {
+    if (credentialId != null && durableRevocation) {
       try {
         await _offlineAuthorityStore.deleteByCredentialId(credentialId);
       } catch (error) {
@@ -1016,6 +1056,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
     }
 
     if (cleanupPending &&
+        durableRevocation &&
         epoch != null &&
         epoch.vaultState != VaultState.empty &&
         epoch.vaultState != VaultState.active) {

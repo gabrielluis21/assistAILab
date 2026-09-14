@@ -141,20 +141,27 @@ void main() {
       await harness.dispose();
     });
 
-    test('corrupt Epoch is never reset to generation one', () async {
-      final backend = _FaultingSecureStorage();
-      backend.values[NativeSecureCredentialEpochStore.epochKey] = '{corrupt';
-      final harness = _VaultHarness(now, backend: backend)
-        ..repository.loginHandler = (_) async => AuthLoginResult(
-              user: _userA,
-              accessToken: _tokenFor(_userA, now),
-            );
+    test('corrupt Epoch blocks authenticated replacement without reset',
+        () async {
+      final harness = await _loggedInHarness(now);
+      harness.backend.values[NativeSecureCredentialEpochStore.epochKey] =
+          '{corrupt';
+      harness.repository.loginHandler = (_) async => AuthLoginResult(
+            user: _userB,
+            accessToken: _tokenFor(_userB, now),
+          );
 
       expect(
-          await harness.controller.login('a@example.com', 'secret'), isFalse);
+          await harness.controller.login('b@example.com', 'secret'), isFalse);
       expect(
-        backend.values[NativeSecureCredentialEpochStore.epochKey],
+        harness.backend.values[NativeSecureCredentialEpochStore.epochKey],
         '{corrupt',
+      );
+      expect(
+        harness.backend.values.keys,
+        isNot(contains(
+          '${NativeSecureCredentialStorage.keyPrefix}credential-2',
+        )),
       );
       expect(harness.controller.state, isA<SessionFailure>());
       await harness.dispose();
@@ -240,7 +247,7 @@ void main() {
   });
 
   group('login and safe replacement', () {
-    test('normal secure login commits Epoch last and authenticates online',
+    test('fresh empty Vault creates generation one and commits Epoch last',
         () async {
       final harness = _VaultHarness(now)
         ..repository.loginHandler = (_) async => AuthLoginResult(
@@ -267,6 +274,52 @@ void main() {
             .startsWith('write:${NativeSecureOfflineAuthorityStore.keyPrefix}'),
       );
       expect(epochWrite, greaterThan(authorityWrite));
+      await harness.dispose();
+    });
+
+    test('authenticated replacement with missing Epoch fails closed', () async {
+      final harness = await _loggedInHarness(now);
+      final authenticatedGeneration = harness.controller.currentGeneration;
+      final epochA = await harness.stores.credentialEpochStore.read();
+      harness.backend.values.remove(
+        NativeSecureCredentialEpochStore.epochKey,
+      );
+      harness.repository.loginHandler = (_) async => AuthLoginResult(
+            user: _userB,
+            accessToken: _tokenFor(_userB, now),
+          );
+
+      expect(
+          await harness.controller.login('b@example.com', 'secret'), isFalse);
+
+      expect(harness.controller.state, isA<SessionFailure>());
+      expect(
+        harness.controller.currentGeneration,
+        greaterThan(authenticatedGeneration),
+      );
+      expect(await harness.stores.credentialEpochStore.read(), isNull);
+      expect(
+        harness.backend.values.keys,
+        isNot(contains(
+          '${NativeSecureCredentialStorage.keyPrefix}credential-2',
+        )),
+      );
+      expect(
+        await harness.stores.credentialStorage.readById(
+          epochA!.activeCredentialId!,
+        ),
+        isNotNull,
+      );
+
+      expect(
+          await harness.controller.login('b@example.com', 'secret'), isFalse);
+      expect(await harness.stores.credentialEpochStore.read(), isNull);
+      expect(
+        harness.backend.values.keys,
+        isNot(contains(
+          '${NativeSecureCredentialStorage.keyPrefix}credential-2',
+        )),
+      );
       await harness.dispose();
     });
 
@@ -553,6 +606,50 @@ void main() {
         (await harness.stores.credentialEpochStore.read())?.vaultState,
         VaultState.revoked,
       );
+      await harness.dispose();
+    });
+
+    test('failed REVOKED write blocks physical cleanup and logs out runtime',
+        () async {
+      final harness = await _loggedInHarness(now);
+      final authenticatedGeneration = harness.controller.currentGeneration;
+      final epoch = await harness.stores.credentialEpochStore.read();
+      harness.backend
+        ..events.clear()
+        ..failWriteKeys.add(NativeSecureCredentialEpochStore.epochKey);
+
+      final result = await harness.controller.logout();
+
+      expect(result.completed, isTrue);
+      expect(result.cleanupPending, isTrue);
+      expect(harness.controller.state, isA<SessionUnauthenticated>());
+      expect(
+        harness.controller.currentGeneration,
+        greaterThan(authenticatedGeneration),
+      );
+      expect(
+        harness.backend.events,
+        isNot(contains(
+          'delete:${NativeSecureOfflineAuthorityStore.keyPrefix}${epoch!.activeCredentialId}',
+        )),
+      );
+      expect(
+        harness.backend.events,
+        isNot(contains(
+          'delete:${NativeSecureCredentialStorage.keyPrefix}${epoch.activeCredentialId}',
+        )),
+      );
+      expect(
+        jsonDecode(
+          harness.backend.values[NativeSecureCredentialEpochStore.epochKey]!,
+        )['vaultState'],
+        VaultState.active.wireName,
+      );
+
+      harness.repository.getMeHandler = (_) async => _userA;
+      await harness.controller.bootstrap();
+      expect(harness.repository.getMeCalls, 0);
+      expect(harness.controller.state, isNot(isA<AuthenticatedSession>()));
       await harness.dispose();
     });
 
