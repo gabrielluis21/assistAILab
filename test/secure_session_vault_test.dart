@@ -4,6 +4,7 @@ import 'package:assistailab/core/database/auth_scoped_database_manager.dart';
 import 'package:assistailab/core/security/credential_epoch.dart';
 import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/core/security/hive_credential_storage.dart';
+import 'package:assistailab/core/security/revocation_fence.dart';
 import 'package:assistailab/core/security/secure_key_value_storage.dart';
 import 'package:assistailab/features/auth/application/auth_provider.dart';
 import 'package:assistailab/features/auth/data/datasources/secure_session_stores.dart';
@@ -65,13 +66,64 @@ void main() {
       );
     });
 
+    test('revocation fence round-trip uses the secure Vault namespace',
+        () async {
+      final backend = _FaultingSecureStorage();
+      final stores = _storesFor(backend);
+      final fence = RevocationFence(
+        credentialId: 'credential-a',
+        credentialGeneration: 7,
+      );
+
+      await stores.secureVaultMetadataStore.writeRevocationFence(fence);
+
+      expect(
+        (await stores.secureVaultMetadataStore.readRevocationFence())?.toJson(),
+        fence.toJson(),
+      );
+      expect(
+        backend.values.keys,
+        contains(NativeSecureVaultMetadataStore.revocationFenceKey),
+      );
+      expect(
+        await stores.secureVaultMetadataStore.containsSessionArtifacts(),
+        isTrue,
+      );
+
+      await stores.secureVaultMetadataStore.deleteRevocationFence();
+      expect(
+        await stores.secureVaultMetadataStore.readRevocationFence(),
+        isNull,
+      );
+    });
+
+    test('artifact discovery ignores keys outside known Vault families',
+        () async {
+      final backend = _FaultingSecureStorage()
+        ..values['unrelated.application.key'] = 'value';
+      final stores = _storesFor(backend);
+
+      expect(
+        await stores.secureVaultMetadataStore.containsSessionArtifacts(),
+        isFalse,
+      );
+
+      backend.values['${NativeSecureCredentialStorage.keyPrefix}residual'] =
+          'corrupt-but-present';
+      expect(
+        await stores.secureVaultMetadataStore.containsSessionArtifacts(),
+        isTrue,
+      );
+    });
+
     test('malformed records fail closed', () async {
       final backend = _FaultingSecureStorage();
       final stores = _storesFor(backend);
       backend.values
         ..['${NativeSecureCredentialStorage.keyPrefix}bad'] = 'not-json'
         ..['${NativeSecureOfflineAuthorityStore.keyPrefix}bad'] = '[]'
-        ..[NativeSecureCredentialEpochStore.epochKey] = '{';
+        ..[NativeSecureCredentialEpochStore.epochKey] = '{'
+        ..[NativeSecureVaultMetadataStore.revocationFenceKey] = '{';
 
       await expectLater(
         stores.credentialStorage.readById('bad'),
@@ -83,6 +135,10 @@ void main() {
       );
       await expectLater(
         stores.credentialEpochStore.read(),
+        throwsA(isA<FormatException>()),
+      );
+      await expectLater(
+        stores.secureVaultMetadataStore.readRevocationFence(),
         throwsA(isA<FormatException>()),
       );
     });
@@ -108,6 +164,14 @@ void main() {
             jsonEncode(<String, Object?>{
           ...epoch.toJson(),
           'schemaVersion': 999,
+        })
+        ..[NativeSecureVaultMetadataStore.revocationFenceKey] =
+            jsonEncode(<String, Object>{
+          ...RevocationFence(
+            credentialId: 'credential-a',
+            credentialGeneration: 1,
+          ).toJson(),
+          'schemaVersion': 999,
         });
 
       await expectLater(
@@ -120,6 +184,10 @@ void main() {
       );
       await expectLater(
         stores.credentialEpochStore.read(),
+        throwsA(isA<FormatException>()),
+      );
+      await expectLater(
+        stores.secureVaultMetadataStore.readRevocationFence(),
         throwsA(isA<FormatException>()),
       );
     });
@@ -321,6 +389,59 @@ void main() {
         )),
       );
       await harness.dispose();
+    });
+
+    test('missing Epoch with residual artifacts fails across process restart',
+        () async {
+      final backend = _FaultingSecureStorage();
+      final first = await _loggedInHarness(now, backend: backend);
+      final epochA = await first.stores.credentialEpochStore.read();
+      final credentialKeyA =
+          '${NativeSecureCredentialStorage.keyPrefix}${epochA!.activeCredentialId}';
+      final authorityKeyA =
+          '${NativeSecureOfflineAuthorityStore.keyPrefix}${epochA.activeCredentialId}';
+      final credentialA = backend.values[credentialKeyA];
+      final authorityA = backend.values[authorityKeyA];
+      backend.values.remove(NativeSecureCredentialEpochStore.epochKey);
+      await first.dispose();
+
+      final restarted = _VaultHarness(
+        now,
+        backend: backend,
+        initialCredentialSequence: 1,
+      )..repository.loginHandler = (_) async => AuthLoginResult(
+            user: _userB,
+            accessToken: _tokenFor(_userB, now),
+          );
+
+      expect(
+        await restarted.controller.login('b@example.com', 'secret'),
+        isFalse,
+      );
+      expect(restarted.controller.state, isA<SessionFailure>());
+      expect(
+        restarted.controller.state,
+        isNot(isA<AuthenticatedSession>()),
+      );
+      expect(
+        backend.values.keys,
+        isNot(contains(
+          '${NativeSecureCredentialStorage.keyPrefix}credential-2',
+        )),
+      );
+      expect(
+        backend.values.keys,
+        isNot(contains(
+          '${NativeSecureOfflineAuthorityStore.keyPrefix}credential-2',
+        )),
+      );
+      expect(
+        backend.values.keys,
+        isNot(contains(NativeSecureCredentialEpochStore.epochKey)),
+      );
+      expect(backend.values[credentialKeyA], credentialA);
+      expect(backend.values[authorityKeyA], authorityA);
+      await restarted.dispose();
     });
 
     test('partial credential without ACTIVE Epoch never bootstraps', () async {
@@ -590,6 +711,13 @@ void main() {
 
       expect(result.completed, isTrue);
       expect(result.cleanupPending, isFalse);
+      final fenceWrite = harness.backend.events.indexOf(
+        'write:${NativeSecureVaultMetadataStore.revocationFenceKey}',
+      );
+      final fenceReadBack = harness.backend.events.indexOf(
+        'read:${NativeSecureVaultMetadataStore.revocationFenceKey}',
+        fenceWrite + 1,
+      );
       final epochWrite = harness.backend.events.indexOf(
         'write:${NativeSecureCredentialEpochStore.epochKey}',
       );
@@ -599,57 +727,241 @@ void main() {
       final credentialDelete = harness.backend.events.indexOf(
         'delete:${NativeSecureCredentialStorage.keyPrefix}${epoch.activeCredentialId}',
       );
-      expect(epochWrite, greaterThanOrEqualTo(0));
+      final fenceDelete = harness.backend.events.indexOf(
+        'delete:${NativeSecureVaultMetadataStore.revocationFenceKey}',
+      );
+      expect(fenceWrite, greaterThanOrEqualTo(0));
+      expect(fenceReadBack, greaterThan(fenceWrite));
+      expect(epochWrite, greaterThan(fenceReadBack));
       expect(authorityDelete, greaterThan(epochWrite));
       expect(credentialDelete, greaterThan(epochWrite));
+      expect(fenceDelete, greaterThan(credentialDelete));
       expect(
         (await harness.stores.credentialEpochStore.read())?.vaultState,
         VaultState.revoked,
       );
+      expect(
+        await harness.stores.secureVaultMetadataStore.readRevocationFence(),
+        isNull,
+      );
       await harness.dispose();
     });
 
-    test('failed REVOKED write blocks physical cleanup and logs out runtime',
+    test('failed REVOKED write remains fenced across process restart',
         () async {
-      final harness = await _loggedInHarness(now);
-      final authenticatedGeneration = harness.controller.currentGeneration;
-      final epoch = await harness.stores.credentialEpochStore.read();
-      harness.backend
+      final backend = _FaultingSecureStorage();
+      final first = await _loggedInHarness(now, backend: backend);
+      final authenticatedGeneration = first.controller.currentGeneration;
+      final epoch = await first.stores.credentialEpochStore.read();
+      backend
         ..events.clear()
         ..failWriteKeys.add(NativeSecureCredentialEpochStore.epochKey);
 
-      final result = await harness.controller.logout();
+      final result = await first.controller.logout();
 
       expect(result.completed, isTrue);
       expect(result.cleanupPending, isTrue);
-      expect(harness.controller.state, isA<SessionUnauthenticated>());
+      expect(first.controller.state, isA<SessionUnauthenticated>());
       expect(
-        harness.controller.currentGeneration,
+        first.controller.currentGeneration,
         greaterThan(authenticatedGeneration),
       );
+      final fence =
+          await first.stores.secureVaultMetadataStore.readRevocationFence();
+      expect(fence?.credentialId, epoch!.activeCredentialId);
       expect(
-        harness.backend.events,
+        fence?.credentialGeneration,
+        epoch.activeCredentialGeneration,
+      );
+      expect(fence?.state, RevocationFenceState.revokeIntent);
+      expect(
+        backend.events,
         isNot(contains(
-          'delete:${NativeSecureOfflineAuthorityStore.keyPrefix}${epoch!.activeCredentialId}',
+          'delete:${NativeSecureOfflineAuthorityStore.keyPrefix}${epoch.activeCredentialId}',
         )),
       );
       expect(
-        harness.backend.events,
+        backend.events,
         isNot(contains(
           'delete:${NativeSecureCredentialStorage.keyPrefix}${epoch.activeCredentialId}',
         )),
       );
       expect(
         jsonDecode(
-          harness.backend.values[NativeSecureCredentialEpochStore.epochKey]!,
+          backend.values[NativeSecureCredentialEpochStore.epochKey]!,
         )['vaultState'],
         VaultState.active.wireName,
       );
+      await first.dispose();
 
-      harness.repository.getMeHandler = (_) async => _userA;
+      final restarted = _VaultHarness(now, backend: backend)
+        ..repository.getMeHandler = (_) async => _userA;
+      await restarted.controller.bootstrap();
+      expect(restarted.repository.getMeCalls, 0);
+      expect(restarted.manager.currentHandle, isNull);
+      expect(restarted.controller.state, isNot(isA<AuthenticatedSession>()));
+      expect(
+        await restarted.stores.secureVaultMetadataStore.readRevocationFence(),
+        isNotNull,
+      );
+      await restarted.dispose();
+    });
+
+    for (final readBackMismatch in <bool>[false, true]) {
+      test(
+          'fence ${readBackMismatch ? 'read-back mismatch' : 'write failure'} reports incomplete logout without protected deletion',
+          () async {
+        final backend = _FaultingSecureStorage();
+        final harness = await _loggedInHarness(now, backend: backend);
+        final epoch = await harness.stores.credentialEpochStore.read();
+        backend.events.clear();
+        if (readBackMismatch) {
+          backend.corruptAfterWrite[
+              NativeSecureVaultMetadataStore.revocationFenceKey] = jsonEncode(
+            RevocationFence(
+              credentialId: 'other-credential',
+              credentialGeneration: 99,
+            ).toJson(),
+          );
+        } else {
+          backend.failWriteKeys.add(
+            NativeSecureVaultMetadataStore.revocationFenceKey,
+          );
+        }
+
+        final result = await harness.controller.logout();
+
+        expect(result.completed, isFalse);
+        expect(result.cleanupPending, isTrue);
+        expect(harness.controller.state, isA<SessionUnauthenticated>());
+        expect(
+          backend.events,
+          isNot(contains(
+            'delete:${NativeSecureOfflineAuthorityStore.keyPrefix}${epoch!.activeCredentialId}',
+          )),
+        );
+        expect(
+          backend.events,
+          isNot(contains(
+            'delete:${NativeSecureCredentialStorage.keyPrefix}${epoch.activeCredentialId}',
+          )),
+        );
+        expect(
+          jsonDecode(
+            backend.values[NativeSecureCredentialEpochStore.epochKey]!,
+          )['vaultState'],
+          VaultState.active.wireName,
+        );
+        await harness.dispose();
+      });
+    }
+
+    test('restart with REVOKED Epoch and matching fence completes recovery',
+        () async {
+      final backend = _FaultingSecureStorage();
+      final harness = _VaultHarness(now, backend: backend);
+      await harness.seedActive(_userA);
+      final active = await harness.stores.credentialEpochStore.read();
+      await harness.stores.credentialEpochStore.write(
+        CredentialEpoch(
+          activeCredentialId: active!.activeCredentialId,
+          activeCredentialGeneration: active.activeCredentialGeneration,
+          vaultState: VaultState.revoked,
+        ),
+      );
+      await harness.stores.secureVaultMetadataStore.writeRevocationFence(
+        RevocationFence(
+          credentialId: active.activeCredentialId!,
+          credentialGeneration: active.activeCredentialGeneration,
+        ),
+      );
+
       await harness.controller.bootstrap();
+
       expect(harness.repository.getMeCalls, 0);
-      expect(harness.controller.state, isNot(isA<AuthenticatedSession>()));
+      expect(harness.controller.state, isA<SessionUnauthenticated>());
+      expect(
+        await harness.stores.secureVaultMetadataStore.readRevocationFence(),
+        isNull,
+      );
+      expect(
+        await harness.stores.credentialStorage.readById(
+          active.activeCredentialId!,
+        ),
+        isNull,
+      );
+      await harness.dispose();
+    });
+
+    for (final unsupported in <bool>[false, true]) {
+      test(
+          '${unsupported ? 'unsupported' : 'malformed'} fence fails bootstrap closed',
+          () async {
+        final backend = _FaultingSecureStorage();
+        final harness = _VaultHarness(now, backend: backend);
+        await harness.seedActive(_userA);
+        backend.values[NativeSecureVaultMetadataStore.revocationFenceKey] =
+            unsupported
+                ? jsonEncode(<String, Object>{
+                    ...RevocationFence(
+                      credentialId: 'credential-a',
+                      credentialGeneration: 1,
+                    ).toJson(),
+                    'schemaVersion': 999,
+                  })
+                : '{';
+        harness.repository.getMeHandler = (_) async => _userA;
+
+        await harness.controller.bootstrap();
+
+        expect(harness.repository.getMeCalls, 0);
+        expect(harness.manager.currentHandle, isNull);
+        expect(harness.controller.state, isA<SessionFailure>());
+        expect(
+          backend.values.keys,
+          contains(NativeSecureVaultMetadataStore.revocationFenceKey),
+        );
+        await harness.dispose();
+      });
+    }
+
+    test('stale fence does not revoke a distinct newer ACTIVE credential',
+        () async {
+      final backend = _FaultingSecureStorage();
+      final harness = _VaultHarness(now, backend: backend);
+      final credentialA = _credential(_userA, now);
+      final credentialB = _credential(
+        _userB,
+        now,
+        credentialId: 'credential-b',
+        generation: 2,
+      );
+      await harness.stores.credentialStorage.write(credentialA);
+      await harness.stores.offlineAuthorityStore.write(
+        _authority(_userA, credentialA, now),
+      );
+      await harness.stores.credentialStorage.write(credentialB);
+      await harness.stores.offlineAuthorityStore.write(
+        _authority(_userB, credentialB, now),
+      );
+      await harness.stores.credentialEpochStore.write(_epoch(credentialB));
+      await harness.stores.secureVaultMetadataStore.writeRevocationFence(
+        RevocationFence(
+          credentialId: credentialA.credentialId,
+          credentialGeneration: credentialA.credentialGeneration,
+        ),
+      );
+      harness.profile.value = _userB;
+      harness.repository.getMeHandler = (_) async => _userB;
+
+      await harness.controller.bootstrap();
+
+      expect(harness.repository.getMeCalls, 1);
+      expect(harness.controller.state, isA<AuthenticatedOnline>());
+      expect(
+        await harness.stores.secureVaultMetadataStore.readRevocationFence(),
+        isNotNull,
+      );
       await harness.dispose();
     });
 
@@ -695,12 +1007,22 @@ void main() {
         _authority(_userA, credential, now),
       );
       await first.credentialEpochStore.write(_epoch(credential));
+      await first.secureVaultMetadataStore.writeRevocationFence(
+        RevocationFence(
+          credentialId: credential.credentialId,
+          credentialGeneration: credential.credentialGeneration,
+        ),
+      );
 
       expect(
         await first.credentialStorage.readById(credential.credentialId),
         isNotNull,
       );
       expect(await first.credentialEpochStore.read(), isNotNull);
+      expect(
+        await first.secureVaultMetadataStore.readRevocationFence(),
+        isNotNull,
+      );
 
       final nextAppSession = SecureSessionStores.memory();
       expect(await nextAppSession.credentialEpochStore.read(), isNull);
@@ -708,6 +1030,10 @@ void main() {
         await nextAppSession.credentialStorage.readById(
           credential.credentialId,
         ),
+        isNull,
+      );
+      expect(
+        await nextAppSession.secureVaultMetadataStore.readRevocationFence(),
         isNull,
       );
     });
@@ -722,6 +1048,7 @@ SecureSessionStores _storesFor(_FaultingSecureStorage backend) =>
       ),
       offlineAuthorityStore: NativeSecureOfflineAuthorityStore(backend),
       credentialEpochStore: NativeSecureCredentialEpochStore(backend),
+      secureVaultMetadataStore: NativeSecureVaultMetadataStore(backend),
     );
 
 StoredCredential _credential(
@@ -868,6 +1195,15 @@ final class _FaultingSecureStorage implements SecureKeyValueStorage {
   }
 
   @override
+  Future<Set<String>> readKeys() async {
+    events.add('readKeys');
+    if (unavailable) {
+      throw const SecureStorageUnavailableException('read');
+    }
+    return values.keys.toSet();
+  }
+
+  @override
   Future<void> write(String key, String value) async {
     events.add('write:$key');
     if (unavailable || failWriteKeys.contains(key)) {
@@ -895,8 +1231,11 @@ final class _NoOpLegacyPurger extends LegacyCredentialPurger {
 }
 
 final class _VaultHarness {
-  _VaultHarness(DateTime now, {_FaultingSecureStorage? backend})
-      : backend = backend ?? _FaultingSecureStorage(),
+  _VaultHarness(
+    DateTime now, {
+    _FaultingSecureStorage? backend,
+    int initialCredentialSequence = 0,
+  })  : backend = backend ?? _FaultingSecureStorage(),
         profile = _MemoryProfileCache(),
         repository = _ControlledRepository(),
         manager = AuthScopedDatabaseManager.forTesting(
@@ -904,13 +1243,14 @@ final class _VaultHarness {
         ) {
     stores = _storesFor(this.backend);
     var bindingSequence = 0;
-    var credentialSequence = 0;
+    var credentialSequence = initialCredentialSequence;
     controller = AuthNotifier(
       repository: repository,
       credentialStorage: stores.credentialStorage,
       profileCache: profile,
       offlineAuthorityStore: stores.offlineAuthorityStore,
       credentialEpochStore: stores.credentialEpochStore,
+      secureVaultMetadataStore: stores.secureVaultMetadataStore,
       securityValidator: const SessionSecurityValidator(),
       databaseManager: manager,
       nowUtc: () => now,

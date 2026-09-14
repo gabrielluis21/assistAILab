@@ -6,6 +6,7 @@ import 'package:assistailab/core/security/credential_epoch.dart';
 import 'package:assistailab/core/security/credential_epoch_store.dart';
 import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/features/auth/application/auth_provider.dart';
+import 'package:assistailab/features/auth/data/datasources/secure_session_stores.dart';
 import 'package:assistailab/features/auth/domain/entities/offline_authority_record.dart';
 import 'package:assistailab/features/auth/domain/entities/session_state.dart';
 import 'package:assistailab/features/auth/domain/entities/user.dart';
@@ -466,6 +467,7 @@ final class _Harness {
       profileCache: this.profile,
       offlineAuthorityStore: this.authority,
       credentialEpochStore: this.epoch,
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(),
       securityValidator: validator,
       databaseManager: manager,
       nowUtc: () => now,

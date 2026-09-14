@@ -171,6 +171,7 @@ final class _SessionHarness {
       profileCache: _MemoryProfileCache(),
       offlineAuthorityStore: _MemoryAuthorityStore(),
       credentialEpochStore: MemoryCredentialEpochStore(),
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(),
       securityValidator: const SessionSecurityValidator(),
       databaseManager: manager,
       nowUtc: () => now,

@@ -6,6 +6,7 @@ import '../../../../core/security/credential_storage.dart';
 import '../../../../core/security/credential_epoch.dart';
 import '../../../../core/security/credential_epoch_store.dart';
 import '../../../../core/security/hive_credential_storage.dart';
+import '../../../../core/security/revocation_fence.dart';
 import '../../../../core/security/secure_key_value_storage.dart';
 import '../../domain/entities/offline_authority_record.dart';
 import '../../domain/repositories/offline_authority_store.dart';
@@ -15,6 +16,7 @@ final class SecureSessionStores {
     required this.credentialStorage,
     required this.offlineAuthorityStore,
     required this.credentialEpochStore,
+    required this.secureVaultMetadataStore,
   });
 
   factory SecureSessionStores.native({SecureKeyValueStorage? storage}) {
@@ -23,6 +25,7 @@ final class SecureSessionStores {
       credentialStorage: NativeSecureCredentialStorage(backend),
       offlineAuthorityStore: NativeSecureOfflineAuthorityStore(backend),
       credentialEpochStore: NativeSecureCredentialEpochStore(backend),
+      secureVaultMetadataStore: NativeSecureVaultMetadataStore(backend),
     );
   }
 
@@ -32,12 +35,14 @@ final class SecureSessionStores {
       credentialStorage: MemoryCredentialStorage(backend),
       offlineAuthorityStore: MemoryOfflineAuthorityStore(backend),
       credentialEpochStore: MemoryCredentialEpochStore(backend),
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(backend),
     );
   }
 
   final CredentialStorage credentialStorage;
   final OfflineAuthorityStore offlineAuthorityStore;
   final CredentialEpochStore credentialEpochStore;
+  final SecureVaultMetadataStore secureVaultMetadataStore;
 }
 
 SecureSessionStores createSecureSessionStores() =>
@@ -204,6 +209,67 @@ final class MemoryCredentialEpochStore implements CredentialEpochStore {
 
   @override
   Future<void> write(CredentialEpoch epoch) => _delegate.write(epoch);
+}
+
+final class NativeSecureVaultMetadataStore implements SecureVaultMetadataStore {
+  NativeSecureVaultMetadataStore(this._storage);
+
+  static const String revocationFenceKey =
+      'assistailab.session_vault.revocation_fence.v1';
+
+  final SecureKeyValueStorage _storage;
+
+  @override
+  Future<RevocationFence?> readRevocationFence() async {
+    final raw = await _storage.read(revocationFenceKey);
+    if (raw == null) return null;
+    return RevocationFence.fromJson(_decodeObject(raw, 'revocation fence'));
+  }
+
+  @override
+  Future<void> writeRevocationFence(RevocationFence fence) => _storage.write(
+        revocationFenceKey,
+        jsonEncode(fence.toJson()),
+      );
+
+  @override
+  Future<void> deleteRevocationFence() => _storage.delete(revocationFenceKey);
+
+  @override
+  Future<bool> containsSessionArtifacts() async {
+    final keys = await _storage.readKeys();
+    return keys.any(
+      (key) =>
+          key == NativeSecureCredentialEpochStore.epochKey ||
+          key == revocationFenceKey ||
+          key.startsWith(NativeSecureCredentialStorage.keyPrefix) ||
+          key.startsWith(NativeSecureOfflineAuthorityStore.keyPrefix),
+    );
+  }
+}
+
+final class MemorySecureVaultMetadataStore implements SecureVaultMetadataStore {
+  MemorySecureVaultMetadataStore([SecureKeyValueStorage? storage])
+      : _delegate = NativeSecureVaultMetadataStore(
+          storage ?? MemorySecureKeyValueStorage(),
+        );
+
+  final NativeSecureVaultMetadataStore _delegate;
+
+  @override
+  Future<RevocationFence?> readRevocationFence() =>
+      _delegate.readRevocationFence();
+
+  @override
+  Future<void> writeRevocationFence(RevocationFence fence) =>
+      _delegate.writeRevocationFence(fence);
+
+  @override
+  Future<void> deleteRevocationFence() => _delegate.deleteRevocationFence();
+
+  @override
+  Future<bool> containsSessionArtifacts() =>
+      _delegate.containsSessionArtifacts();
 }
 
 Map<Object?, Object?> _decodeObject(String raw, String recordName) {

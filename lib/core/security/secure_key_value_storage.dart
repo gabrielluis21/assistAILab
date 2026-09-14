@@ -3,6 +3,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 abstract interface class SecureKeyValueStorage {
   Future<String?> read(String key);
 
+  Future<Set<String>> readKeys();
+
   Future<void> write(String key, String value);
 
   Future<void> delete(String key);
@@ -47,6 +49,15 @@ final class NativeSecureKeyValueStorage implements SecureKeyValueStorage {
   }
 
   @override
+  Future<Set<String>> readKeys() async {
+    try {
+      return (await _storage.readAll()).keys.toSet();
+    } catch (_) {
+      throw const SecureStorageUnavailableException('read');
+    }
+  }
+
+  @override
   Future<void> write(String key, String value) async {
     try {
       await _storage.write(key: key, value: value);
@@ -70,6 +81,9 @@ final class MemorySecureKeyValueStorage implements SecureKeyValueStorage {
 
   @override
   Future<String?> read(String key) async => _values[key];
+
+  @override
+  Future<Set<String>> readKeys() async => _values.keys.toSet();
 
   @override
   Future<void> write(String key, String value) async {

@@ -9,6 +9,7 @@ import '../../../core/network/api_client.dart';
 import '../../../core/security/credential_epoch.dart';
 import '../../../core/security/credential_epoch_store.dart';
 import '../../../core/security/credential_storage.dart';
+import '../../../core/security/revocation_fence.dart';
 import '../data/datasources/auth_remote_datasource.dart';
 import '../data/datasources/hive_user_profile_cache.dart';
 import '../data/datasources/secure_session_stores.dart';
@@ -42,6 +43,10 @@ final credentialEpochStoreProvider = Provider<CredentialEpochStore>((ref) {
   return ref.watch(secureSessionStoresProvider).credentialEpochStore;
 });
 
+final secureVaultMetadataStoreProvider = Provider<SecureVaultMetadataStore>(
+  (ref) => ref.watch(secureSessionStoresProvider).secureVaultMetadataStore,
+);
+
 final sessionSecurityValidatorProvider = Provider<SessionSecurityValidator>(
   (ref) => const SessionSecurityValidator(),
 );
@@ -69,6 +74,7 @@ final authStateProvider = StateNotifierProvider<AuthNotifier, SessionState>(
       profileCache: ref.watch(userProfileCacheProvider),
       offlineAuthorityStore: ref.watch(offlineAuthorityStoreProvider),
       credentialEpochStore: ref.watch(credentialEpochStoreProvider),
+      secureVaultMetadataStore: ref.watch(secureVaultMetadataStoreProvider),
       securityValidator: ref.watch(sessionSecurityValidatorProvider),
       databaseManager: AuthScopedDatabaseManager.instance,
     );
@@ -150,6 +156,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
     required UserProfileCache profileCache,
     required OfflineAuthorityStore offlineAuthorityStore,
     required CredentialEpochStore credentialEpochStore,
+    required SecureVaultMetadataStore secureVaultMetadataStore,
     required SessionSecurityValidator securityValidator,
     required AuthScopedDatabaseManager databaseManager,
     DateTime Function()? nowUtc,
@@ -161,6 +168,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
         _profileCache = profileCache,
         _offlineAuthorityStore = offlineAuthorityStore,
         _credentialEpochStore = credentialEpochStore,
+        _secureVaultMetadataStore = secureVaultMetadataStore,
         _securityValidator = securityValidator,
         _databaseManager = databaseManager,
         _nowUtc = nowUtc ?? (() => DateTime.now().toUtc()),
@@ -178,6 +186,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
   final UserProfileCache _profileCache;
   final OfflineAuthorityStore _offlineAuthorityStore;
   final CredentialEpochStore _credentialEpochStore;
+  final SecureVaultMetadataStore _secureVaultMetadataStore;
   final SessionSecurityValidator _securityValidator;
   final AuthScopedDatabaseManager _databaseManager;
   final DateTime Function() _nowUtc;
@@ -186,8 +195,6 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
   int _currentGeneration = 0;
   Future<void> _persistenceTail = Future<void>.value();
-  bool _replacementEpochRequiredAfterFailure = false;
-  bool _runtimeRevocationUncommitted = false;
 
   int get currentGeneration => _currentGeneration;
 
@@ -377,8 +384,6 @@ class AuthNotifier extends StateNotifier<SessionState> {
 
   Future<bool> login(String email, String password) async {
     final wasAuthenticated = state is AuthenticatedSession;
-    final requiresActiveReplacementEpoch =
-        wasAuthenticated || _replacementEpochRequiredAfterFailure;
     final generation = _begin(
       (next) => SessionAuthenticating(next),
     );
@@ -412,7 +417,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
           bindingId: provisionalCredential.bindingId,
           material: material,
           validatedAtUtc: validatedAt,
-          requiresActiveReplacementEpoch: requiresActiveReplacementEpoch,
+          requiresActiveReplacementEpoch: wasAuthenticated,
         ),
       );
       if (!commit.applied || commit.value == null) return false;
@@ -641,6 +646,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
         applied: isGenerationCurrent(generation),
         value: _CleanupOutcome(
           cleanupPending: true,
+          durableLogoutIncomplete: true,
           diagnostic: 'Credential cleanup failed: $error',
         ),
       );
@@ -664,7 +670,7 @@ class AuthNotifier extends StateNotifier<SessionState> {
       diagnostic: diagnostic,
     );
     return LogoutResult(
-      completed: true,
+      completed: !outcome.durableLogoutIncomplete,
       cleanupPending: outcome.cleanupPending,
       diagnostic: diagnostic,
     );
@@ -836,12 +842,42 @@ class AuthNotifier extends StateNotifier<SessionState> {
   }
 
   Future<_ActiveVaultSnapshot?> _readActiveVaultSnapshot() async {
-    if (_runtimeRevocationUncommitted) {
-      throw const SessionVaultException(
-        'Runtime logout is awaiting durable Epoch revocation.',
-      );
-    }
+    final fence = await _secureVaultMetadataStore.readRevocationFence();
     final epoch = await _credentialEpochStore.read();
+
+    if (fence != null) {
+      if (_fenceMatchesEpoch(fence, epoch)) {
+        if (epoch!.isActive) {
+          throw const SessionVaultException(
+            'ACTIVE Epoch is blocked by a durable revocation fence.',
+          );
+        }
+        return null;
+      }
+
+      if (epoch == null || !epoch.isActive) {
+        final credential =
+            await _credentialStorage.readById(fence.credentialId);
+        final authority = await _offlineAuthorityStore.readByCredentialId(
+          fence.credentialId,
+        );
+        if (credential == null && authority == null) {
+          await _secureVaultMetadataStore.deleteRevocationFence();
+          if (await _secureVaultMetadataStore.readRevocationFence() != null) {
+            throw const SessionVaultException(
+              'Revocation fence deletion could not be verified.',
+            );
+          }
+        } else {
+          throw const SessionVaultException(
+            'Revocation fence references residual protected artifacts.',
+          );
+        }
+      }
+      // A fence for an older credential cannot revoke a distinct newer ACTIVE
+      // Epoch. It remains durable until recovery can prove its target is gone.
+    }
+
     if (epoch == null || !epoch.isActive) return null;
 
     final credentialId = epoch.activeCredentialId!;
@@ -865,18 +901,17 @@ class AuthNotifier extends StateNotifier<SessionState> {
     required DateTime validatedAtUtc,
     required bool requiresActiveReplacementEpoch,
   }) async {
-    late final CredentialEpoch? previousEpoch;
-    try {
-      previousEpoch = await _credentialEpochStore.read();
-    } catch (_) {
-      _replacementEpochRequiredAfterFailure = true;
-      rethrow;
-    }
+    final previousEpoch = await _credentialEpochStore.read();
     if (requiresActiveReplacementEpoch &&
         (previousEpoch == null || !previousEpoch.isActive)) {
-      _replacementEpochRequiredAfterFailure = true;
       throw const SessionVaultException(
         'Authenticated credential replacement requires an ACTIVE Epoch.',
+      );
+    }
+    if (previousEpoch == null &&
+        await _secureVaultMetadataStore.containsSessionArtifacts()) {
+      throw const SessionVaultException(
+        'Missing Epoch with residual secure Vault artifacts.',
       );
     }
     final isFreshVault =
@@ -931,8 +966,6 @@ class AuthNotifier extends StateNotifier<SessionState> {
           'ACTIVE Epoch read-back verification failed.',
         );
       }
-      _replacementEpochRequiredAfterFailure = false;
-      _runtimeRevocationUncommitted = false;
       epochCommitted = true;
     } catch (_) {
       if (!epochCommitted) {
@@ -984,63 +1017,128 @@ class AuthNotifier extends StateNotifier<SessionState> {
   Future<_CleanupOutcome> _cleanupPersistedSession() async {
     final diagnostics = <String>[];
     var cleanupPending = false;
-    var durableRevocation = false;
+    var durableLogoutIncomplete = false;
+    var protectedCleanupAllowed = false;
+    RevocationFence? fence;
     CredentialEpoch? epoch;
 
     try {
-      epoch = await _credentialEpochStore.read();
+      fence = await _secureVaultMetadataStore.readRevocationFence();
     } catch (error) {
       cleanupPending = true;
-      diagnostics.add('Credential Epoch read failed during cleanup: $error');
+      durableLogoutIncomplete = true;
+      diagnostics.add('Revocation fence read failed during cleanup: $error');
     }
 
-    final credentialId = epoch?.activeCredentialId;
-    final credentialGeneration = epoch?.activeCredentialGeneration;
-    if (epoch != null && epoch.vaultState == VaultState.active) {
-      final revokedEpoch = CredentialEpoch(
-        activeCredentialId: credentialId,
-        activeCredentialGeneration: credentialGeneration!,
-        vaultState: VaultState.revoked,
+    if (!durableLogoutIncomplete) {
+      try {
+        epoch = await _credentialEpochStore.read();
+      } catch (error) {
+        cleanupPending = true;
+        durableLogoutIncomplete = true;
+        diagnostics.add('Credential Epoch read failed during cleanup: $error');
+      }
+    }
+
+    if (!durableLogoutIncomplete && epoch?.isActive == true) {
+      final expectedFence = RevocationFence(
+        credentialId: epoch!.activeCredentialId!,
+        credentialGeneration: epoch.activeCredentialGeneration,
       );
       try {
-        await _credentialEpochStore.write(revokedEpoch);
-        epoch = revokedEpoch;
-        durableRevocation = true;
-        _runtimeRevocationUncommitted = false;
-      } catch (error) {
-        cleanupPending = true;
-        _runtimeRevocationUncommitted = true;
-        diagnostics.add('Credential Epoch revocation failed: $error');
-      }
-    } else if (epoch != null &&
-        (epoch.vaultState == VaultState.revoked ||
-            epoch.vaultState == VaultState.cleanupPending)) {
-      durableRevocation = true;
-      _runtimeRevocationUncommitted = false;
-    }
-
-    if (credentialId != null && durableRevocation) {
-      try {
-        await _offlineAuthorityStore.deleteByCredentialId(credentialId);
-      } catch (error) {
-        cleanupPending = true;
-        diagnostics.add('Offline authority cleanup failed: $error');
-      }
-      try {
-        final credential = await _credentialStorage.readById(credentialId);
-        if (credential != null) {
-          final deleted = await _credentialStorage.deleteIfMatches(
-            credentialId: credentialId,
-            credentialGeneration: credentialGeneration!,
-          );
-          if (!deleted) {
-            cleanupPending = true;
-            diagnostics.add('Credential cleanup could not verify its target.');
+        if (!_sameFence(fence, expectedFence)) {
+          await _secureVaultMetadataStore.writeRevocationFence(expectedFence);
+          fence = await _secureVaultMetadataStore.readRevocationFence();
+          if (!_sameFence(fence, expectedFence)) {
+            throw const SessionVaultException(
+              'Revocation fence read-back verification failed.',
+            );
           }
         }
       } catch (error) {
         cleanupPending = true;
-        diagnostics.add('Credential cleanup failed: $error');
+        durableLogoutIncomplete = true;
+        diagnostics.add('Revocation fence commit failed: $error');
+      }
+    }
+
+    if (!durableLogoutIncomplete && epoch?.isActive == true) {
+      final revokedEpoch = CredentialEpoch(
+        activeCredentialId: epoch!.activeCredentialId,
+        activeCredentialGeneration: epoch.activeCredentialGeneration,
+        vaultState: VaultState.revoked,
+      );
+      try {
+        await _credentialEpochStore.write(revokedEpoch);
+        final verifiedEpoch = await _credentialEpochStore.read();
+        if (!_sameEpoch(verifiedEpoch, revokedEpoch)) {
+          throw const SessionVaultException(
+            'REVOKED Epoch read-back verification failed.',
+          );
+        }
+        epoch = verifiedEpoch;
+        protectedCleanupAllowed = true;
+      } catch (error) {
+        cleanupPending = true;
+        diagnostics.add('Credential Epoch revocation failed: $error');
+      }
+    } else if (!durableLogoutIncomplete && (epoch == null || !epoch.isActive)) {
+      protectedCleanupAllowed = true;
+    }
+
+    final cleanupTargets = <_CredentialReference>[];
+    void addCleanupTarget(String? credentialId, int? credentialGeneration) {
+      if (credentialId == null || credentialGeneration == null) return;
+      if (cleanupTargets.any(
+        (target) =>
+            target.credentialId == credentialId &&
+            target.credentialGeneration == credentialGeneration,
+      )) {
+        return;
+      }
+      cleanupTargets.add(
+        _CredentialReference(
+          credentialId: credentialId,
+          credentialGeneration: credentialGeneration,
+        ),
+      );
+    }
+
+    addCleanupTarget(
+      epoch?.activeCredentialId,
+      epoch?.activeCredentialGeneration,
+    );
+    addCleanupTarget(fence?.credentialId, fence?.credentialGeneration);
+
+    if (protectedCleanupAllowed) {
+      for (final target in cleanupTargets) {
+        try {
+          await _offlineAuthorityStore.deleteByCredentialId(
+            target.credentialId,
+          );
+        } catch (error) {
+          cleanupPending = true;
+          diagnostics.add('Offline authority cleanup failed: $error');
+        }
+        try {
+          final credential =
+              await _credentialStorage.readById(target.credentialId);
+          if (credential != null) {
+            final deleted = await _credentialStorage.deleteIfMatches(
+              credentialId: target.credentialId,
+              credentialGeneration: target.credentialGeneration,
+            );
+            if (!deleted) {
+              cleanupPending = true;
+              diagnostics.add(
+                'Credential cleanup could not verify its target.',
+              );
+            }
+          }
+        } catch (error) {
+          cleanupPending = true;
+          diagnostics.add('Credential cleanup failed: $error');
+        }
       }
     }
 
@@ -1056,15 +1154,15 @@ class AuthNotifier extends StateNotifier<SessionState> {
     }
 
     if (cleanupPending &&
-        durableRevocation &&
+        protectedCleanupAllowed &&
         epoch != null &&
         epoch.vaultState != VaultState.empty &&
         epoch.vaultState != VaultState.active) {
       try {
         await _credentialEpochStore.write(
           CredentialEpoch(
-            activeCredentialId: credentialId,
-            activeCredentialGeneration: credentialGeneration!,
+            activeCredentialId: epoch.activeCredentialId,
+            activeCredentialGeneration: epoch.activeCredentialGeneration,
             vaultState: VaultState.cleanupPending,
           ),
         );
@@ -1073,8 +1171,41 @@ class AuthNotifier extends StateNotifier<SessionState> {
       }
     }
 
+    if (fence != null && protectedCleanupAllowed) {
+      var safeToClearFence = epoch != null && !epoch.isActive;
+      if (epoch == null) {
+        try {
+          final fencedCredential =
+              await _credentialStorage.readById(fence.credentialId);
+          final fencedAuthority =
+              await _offlineAuthorityStore.readByCredentialId(
+            fence.credentialId,
+          );
+          safeToClearFence =
+              fencedCredential == null && fencedAuthority == null;
+        } catch (error) {
+          cleanupPending = true;
+          diagnostics.add('Revocation fence recovery check failed: $error');
+        }
+      }
+      if (safeToClearFence) {
+        try {
+          await _secureVaultMetadataStore.deleteRevocationFence();
+          if (await _secureVaultMetadataStore.readRevocationFence() != null) {
+            throw const SessionVaultException(
+              'Revocation fence deletion could not be verified.',
+            );
+          }
+        } catch (error) {
+          cleanupPending = true;
+          diagnostics.add('Revocation fence cleanup failed: $error');
+        }
+      }
+    }
+
     return _CleanupOutcome(
       cleanupPending: cleanupPending,
+      durableLogoutIncomplete: durableLogoutIncomplete,
       diagnostic: diagnostics.isEmpty ? null : diagnostics.join(' | '),
     );
   }
@@ -1165,11 +1296,23 @@ final class _OfflineSnapshot {
 final class _CleanupOutcome {
   const _CleanupOutcome({
     this.cleanupPending = false,
+    this.durableLogoutIncomplete = false,
     this.diagnostic,
   });
 
   final bool cleanupPending;
+  final bool durableLogoutIncomplete;
   final String? diagnostic;
+}
+
+final class _CredentialReference {
+  const _CredentialReference({
+    required this.credentialId,
+    required this.credentialGeneration,
+  });
+
+  final String credentialId;
+  final int credentialGeneration;
 }
 
 final class SessionVaultException implements Exception {
@@ -1210,3 +1353,18 @@ bool _sameEpoch(CredentialEpoch? left, CredentialEpoch right) =>
     left.activeCredentialId == right.activeCredentialId &&
     left.activeCredentialGeneration == right.activeCredentialGeneration &&
     left.vaultState == right.vaultState;
+
+bool _sameFence(RevocationFence? left, RevocationFence right) =>
+    left != null &&
+    left.schemaVersion == right.schemaVersion &&
+    left.credentialId == right.credentialId &&
+    left.credentialGeneration == right.credentialGeneration &&
+    left.state == right.state;
+
+bool _fenceMatchesEpoch(
+  RevocationFence fence,
+  CredentialEpoch? epoch,
+) =>
+    epoch != null &&
+    fence.credentialId == epoch.activeCredentialId &&
+    fence.credentialGeneration == epoch.activeCredentialGeneration;
