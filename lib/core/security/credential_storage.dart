@@ -1,13 +1,12 @@
-/// A credential persisted for the current installation.
-///
-/// [bindingId] identifies this particular credential installation. It is not
-/// the session generation and deliberately allows a future credential to be
-/// rotated without changing the authenticated principal or AuthScope.
+/// A versioned credential record stored under its immutable [credentialId].
 final class StoredCredential {
   StoredCredential({
     required this.accessToken,
     required this.bindingId,
-  }) {
+    String? credentialId,
+    this.credentialGeneration = 1,
+    this.schemaVersion = currentSchemaVersion,
+  }) : credentialId = credentialId ?? bindingId {
     if (accessToken.trim().isEmpty || accessToken != accessToken.trim()) {
       throw ArgumentError.value(
         accessToken,
@@ -22,59 +21,89 @@ final class StoredCredential {
         'Credential binding id must not be empty.',
       );
     }
+    if (this.credentialId.trim().isEmpty) {
+      throw ArgumentError.value(
+        this.credentialId,
+        'credentialId',
+        'Credential id must not be empty.',
+      );
+    }
+    if (credentialGeneration <= 0) {
+      throw ArgumentError.value(
+        credentialGeneration,
+        'credentialGeneration',
+        'Credential generation must be positive.',
+      );
+    }
   }
 
+  static const int currentSchemaVersion = 1;
+
+  final int schemaVersion;
   final String accessToken;
   final String bindingId;
+  final String credentialId;
+  final int credentialGeneration;
 
   Map<String, Object> toJson() => <String, Object>{
+        'schemaVersion': schemaVersion,
         'accessToken': accessToken,
         'bindingId': bindingId,
+        'credentialId': credentialId,
+        'credentialGeneration': credentialGeneration,
       };
 
   static StoredCredential fromJson(Map<Object?, Object?> json) {
+    final schemaVersion = json['schemaVersion'];
     final accessToken = json['accessToken'];
     final bindingId = json['bindingId'];
-    if (accessToken is! String || bindingId is! String) {
+    final credentialId = json['credentialId'];
+    final credentialGeneration = json['credentialGeneration'];
+    if (schemaVersion is! int ||
+        accessToken is! String ||
+        bindingId is! String ||
+        credentialId is! String ||
+        credentialGeneration is! int) {
       throw const CredentialStorageFormatException(
         'Stored credential has an invalid shape.',
       );
     }
-    return StoredCredential(
-      accessToken: accessToken,
-      bindingId: bindingId,
-    );
+    if (schemaVersion != currentSchemaVersion) {
+      throw CredentialStorageFormatException(
+        'Unsupported credential schema version: $schemaVersion.',
+      );
+    }
+    try {
+      return StoredCredential(
+        schemaVersion: schemaVersion,
+        accessToken: accessToken,
+        bindingId: bindingId,
+        credentialId: credentialId,
+        credentialGeneration: credentialGeneration,
+      );
+    } on ArgumentError {
+      throw const CredentialStorageFormatException(
+        'Stored credential contains invalid values.',
+      );
+    }
   }
 }
 
-/// Stores authentication secret material only.
-///
-/// User/profile data and authorization metadata intentionally live behind
-/// separate abstractions. The cleanup marker is a durable logical tombstone:
-/// a matching residual credential must never be restored after logout.
+/// Stores credential records by immutable credential id.
 abstract interface class CredentialStorage {
-  Future<StoredCredential?> read();
+  Future<StoredCredential?> readById(String credentialId);
 
   Future<void> write(StoredCredential credential);
 
-  Future<String?> readCleanupPendingBindingId();
+  Future<void> deleteById(String credentialId);
 
-  Future<void> markCleanupPending(String bindingId);
+  /// Deletes only the exact id/generation pair, protecting a replacement.
+  Future<bool> deleteIfMatches({
+    required String credentialId,
+    required int credentialGeneration,
+  });
 
-  /// Unconditionally deletes malformed/unowned canonical credential material.
-  /// Session orchestration must invoke this only inside its generation commit
-  /// gate so it cannot race a newer write.
-  Future<void> delete();
-
-  /// Deletes the credential only when it still belongs to [bindingId].
-  ///
-  /// This conditional delete prevents cleanup from an old session from
-  /// deleting a newer credential.
-  Future<bool> deleteIfMatches(String bindingId);
-
-  Future<void> clearCleanupPending(String bindingId);
-
-  /// Deletes known pre-FE-01C credential keys without promoting their values.
+  /// Deletes known pre-vault values without reading or promoting them.
   Future<void> purgeLegacyCredentials();
 }
 

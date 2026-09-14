@@ -26,6 +26,7 @@ dependencies:
   pdf: ^3.11.3
   printing: ^5.14.2
   crypto: ^3.0.3
+  flutter_secure_storage: 10.3.2
 
 dev_dependencies:
   flutter_test:

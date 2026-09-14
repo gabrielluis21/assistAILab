@@ -7,6 +7,7 @@ import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/core/sync/sync_lease.dart';
 import 'package:assistailab/features/auth/application/auth_provider.dart';
 import 'package:assistailab/features/auth/application/session_api_client.dart';
+import 'package:assistailab/features/auth/data/datasources/secure_session_stores.dart';
 import 'package:assistailab/features/auth/domain/entities/offline_authority_record.dart';
 import 'package:assistailab/features/auth/domain/entities/user.dart';
 import 'package:assistailab/features/auth/domain/repositories/auth_repository.dart';
@@ -169,10 +170,13 @@ final class _SessionHarness {
       credentialStorage: _MemoryCredentialStorage(),
       profileCache: _MemoryProfileCache(),
       offlineAuthorityStore: _MemoryAuthorityStore(),
+      credentialEpochStore: MemoryCredentialEpochStore(),
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(),
       securityValidator: const SessionSecurityValidator(),
       databaseManager: manager,
       nowUtc: () => now,
       credentialBindingIdFactory: () => 'binding-1',
+      credentialIdFactory: () => 'credential-1',
       autoBootstrap: false,
     );
     expect(await auth.login(user.email, 'secret'), isTrue);
@@ -223,10 +227,10 @@ final class _LoginRepository implements AuthRepository {
 
 final class _MemoryCredentialStorage implements CredentialStorage {
   StoredCredential? value;
-  String? cleanupPendingBindingId;
 
   @override
-  Future<StoredCredential?> read() async => value;
+  Future<StoredCredential?> readById(String credentialId) async =>
+      value?.credentialId == credentialId ? value : null;
 
   @override
   Future<void> write(StoredCredential credential) async {
@@ -234,31 +238,21 @@ final class _MemoryCredentialStorage implements CredentialStorage {
   }
 
   @override
-  Future<String?> readCleanupPendingBindingId() async =>
-      cleanupPendingBindingId;
-
-  @override
-  Future<void> markCleanupPending(String bindingId) async {
-    cleanupPendingBindingId = bindingId;
+  Future<void> deleteById(String credentialId) async {
+    if (value?.credentialId == credentialId) value = null;
   }
 
   @override
-  Future<void> delete() async {
-    value = null;
-  }
-
-  @override
-  Future<bool> deleteIfMatches(String bindingId) async {
-    if (value?.bindingId != bindingId) return false;
+  Future<bool> deleteIfMatches({
+    required String credentialId,
+    required int credentialGeneration,
+  }) async {
+    if (value?.credentialId != credentialId ||
+        value?.credentialGeneration != credentialGeneration) {
+      return false;
+    }
     value = null;
     return true;
-  }
-
-  @override
-  Future<void> clearCleanupPending(String bindingId) async {
-    if (cleanupPendingBindingId == bindingId) {
-      cleanupPendingBindingId = null;
-    }
   }
 
   @override
@@ -286,7 +280,9 @@ final class _MemoryAuthorityStore implements OfflineAuthorityStore {
   OfflineAuthorityRecord? value;
 
   @override
-  Future<OfflineAuthorityRecord?> read() async => value;
+  Future<OfflineAuthorityRecord?> readByCredentialId(
+          String credentialId) async =>
+      value?.credentialId == credentialId ? value : null;
 
   @override
   Future<void> write(OfflineAuthorityRecord record) async {
@@ -294,8 +290,8 @@ final class _MemoryAuthorityStore implements OfflineAuthorityStore {
   }
 
   @override
-  Future<void> delete() async {
-    value = null;
+  Future<void> deleteByCredentialId(String credentialId) async {
+    if (value?.credentialId == credentialId) value = null;
   }
 }
 

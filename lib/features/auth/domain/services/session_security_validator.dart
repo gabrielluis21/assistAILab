@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 import '../../../../core/security/credential_storage.dart';
+import '../../../../core/security/credential_epoch.dart';
 import '../entities/auth_scope.dart';
 import '../entities/offline_authority_record.dart';
 import '../entities/user.dart';
@@ -66,6 +67,8 @@ final class SessionSecurityValidator {
       scopeKey: material.scope.canonicalKey,
       validatedAtUtc: validatedAtUtc.toUtc(),
       credentialBindingId: credential.bindingId,
+      credentialId: credential.credentialId,
+      credentialGeneration: credential.credentialGeneration,
       credentialFingerprint: material.credentialFingerprint,
       jwtExpiresAtUtc: material.jwtExpiresAtUtc,
     );
@@ -75,9 +78,20 @@ final class SessionSecurityValidator {
     required User cachedUser,
     required StoredCredential credential,
     required OfflineAuthorityRecord authority,
+    required CredentialEpoch epoch,
     required DateTime nowUtc,
   }) {
     final now = nowUtc.toUtc();
+    if (!epoch.isActive ||
+        epoch.activeCredentialId != credential.credentialId ||
+        epoch.activeCredentialGeneration != credential.credentialGeneration ||
+        authority.credentialId != credential.credentialId ||
+        authority.credentialGeneration != credential.credentialGeneration ||
+        authority.credentialBindingId != credential.bindingId) {
+      throw const SessionValidationException(
+        'Secure credential Epoch, authority and credential are incoherent.',
+      );
+    }
     if (authority.schemaVersion !=
         OfflineAuthorityRecord.currentSchemaVersion) {
       throw const SessionValidationException(
@@ -104,7 +118,6 @@ final class SessionSecurityValidator {
     }
     if (authority.principalId != cachedUser.id ||
         authority.scopeKey != material.scope.canonicalKey ||
-        authority.credentialBindingId != credential.bindingId ||
         authority.credentialFingerprint != material.credentialFingerprint ||
         !_sameInstant(
           authority.jwtExpiresAtUtc,
@@ -133,6 +146,14 @@ final class SessionSecurityValidator {
     required StoredCredential credential,
     required DateTime nowUtc,
   }) {
+    final normalizedStatus = user.status.trim().toUpperCase();
+
+    if (normalizedStatus != 'ACTIVE') {
+      throw const SessionValidationException(
+        'User account is not active.',
+      );
+    }
+
     final scope = AuthScopeManager.scopeFromUser(user);
     if (scope == null || scope is InvalidAuthScope) {
       throw SessionValidationException(

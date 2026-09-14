@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:assistailab/core/database/auth_scoped_database_manager.dart';
+import 'package:assistailab/core/security/credential_epoch.dart';
+import 'package:assistailab/core/security/credential_epoch_store.dart';
 import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/features/auth/application/auth_provider.dart';
+import 'package:assistailab/features/auth/data/datasources/secure_session_stores.dart';
 import 'package:assistailab/features/auth/domain/entities/offline_authority_record.dart';
 import 'package:assistailab/features/auth/domain/entities/session_state.dart';
 import 'package:assistailab/features/auth/domain/entities/user.dart';
@@ -228,7 +231,7 @@ void main() {
       await harness.controller.bootstrap();
 
       expect(harness.controller.state, isNot(isA<AuthenticatedSession>()));
-      expect(harness.credentials.value, isNull);
+      expect(harness.credentials.value, isNotNull);
       await harness.dispose();
     });
 
@@ -306,14 +309,14 @@ void main() {
         harness.controller.currentGeneration,
         greaterThan(invalidatedGeneration),
       );
-      expect(harness.credentials.cleanupPendingBindingId,
-          harness.credentials.value!.bindingId);
+      expect(harness.epoch.value?.vaultState, VaultState.cleanupPending);
 
       final restart = _Harness(
         now,
         credentials: harness.credentials,
         profile: harness.profile,
         authority: harness.authority,
+        epoch: harness.epoch,
       );
       await restart.controller.bootstrap();
       expect(restart.controller.state, isA<SessionUnauthenticated>());
@@ -448,9 +451,11 @@ final class _Harness {
     _MemoryCredentialStorage? credentials,
     _MemoryProfileCache? profile,
     _MemoryAuthorityStore? authority,
+    _MemoryEpochStore? epoch,
   })  : credentials = credentials ?? _MemoryCredentialStorage(),
         profile = profile ?? _MemoryProfileCache(),
         authority = authority ?? _MemoryAuthorityStore(),
+        epoch = epoch ?? _MemoryEpochStore(),
         repository = _ControlledAuthRepository(),
         manager = AuthScopedDatabaseManager.forTesting(
           opener: (_) async => _FakeDatabase(),
@@ -461,10 +466,13 @@ final class _Harness {
       credentialStorage: this.credentials,
       profileCache: this.profile,
       offlineAuthorityStore: this.authority,
+      credentialEpochStore: this.epoch,
+      secureVaultMetadataStore: MemorySecureVaultMetadataStore(),
       securityValidator: validator,
       databaseManager: manager,
       nowUtc: () => now,
       credentialBindingIdFactory: () => 'binding-${++bindingSequence}',
+      credentialIdFactory: () => 'credential-$bindingSequence',
       autoBootstrap: false,
     );
   }
@@ -473,6 +481,7 @@ final class _Harness {
   final _MemoryCredentialStorage credentials;
   final _MemoryProfileCache profile;
   final _MemoryAuthorityStore authority;
+  final _MemoryEpochStore epoch;
   final _ControlledAuthRepository repository;
   final AuthScopedDatabaseManager manager;
   final SessionSecurityValidator validator = const SessionSecurityValidator();
@@ -486,6 +495,8 @@ final class _Harness {
     final credential = StoredCredential(
       accessToken: token,
       bindingId: 'binding-seed',
+      credentialId: 'credential-seed',
+      credentialGeneration: 1,
     );
     final timestamp = validatedAt ?? now.subtract(const Duration(hours: 1));
     final material = validator.validateOnline(
@@ -500,6 +511,11 @@ final class _Harness {
       credential: credential,
       material: material,
       validatedAtUtc: timestamp,
+    );
+    epoch.value = CredentialEpoch(
+      activeCredentialId: credential.credentialId,
+      activeCredentialGeneration: credential.credentialGeneration,
+      vaultState: VaultState.active,
     );
   }
 
@@ -539,7 +555,6 @@ final class _ControlledAuthRepository implements AuthRepository {
 
 final class _MemoryCredentialStorage implements CredentialStorage {
   StoredCredential? value;
-  String? cleanupPendingBindingId;
   bool failDelete = false;
   bool legacyJwtPresent = false;
   bool legacyPreferencesTokenPresent = false;
@@ -547,7 +562,8 @@ final class _MemoryCredentialStorage implements CredentialStorage {
   Completer<void>? deleteRelease;
 
   @override
-  Future<StoredCredential?> read() async => value;
+  Future<StoredCredential?> readById(String credentialId) async =>
+      value?.credentialId == credentialId ? value : null;
 
   @override
   Future<void> write(StoredCredential credential) async {
@@ -555,37 +571,27 @@ final class _MemoryCredentialStorage implements CredentialStorage {
   }
 
   @override
-  Future<String?> readCleanupPendingBindingId() async =>
-      cleanupPendingBindingId;
-
-  @override
-  Future<void> markCleanupPending(String bindingId) async {
-    cleanupPendingBindingId = bindingId;
-  }
-
-  @override
-  Future<void> delete() async {
+  Future<void> deleteById(String credentialId) async {
     if (failDelete) throw StateError('delete failed');
-    value = null;
+    if (value?.credentialId == credentialId) value = null;
   }
 
   @override
-  Future<bool> deleteIfMatches(String bindingId) async {
+  Future<bool> deleteIfMatches({
+    required String credentialId,
+    required int credentialGeneration,
+  }) async {
     if (deleteEntered != null && !deleteEntered!.isCompleted) {
       deleteEntered!.complete();
     }
     if (deleteRelease != null) await deleteRelease!.future;
     if (failDelete) throw StateError('delete failed');
-    if (value?.bindingId != bindingId) return false;
+    if (value?.credentialId != credentialId ||
+        value?.credentialGeneration != credentialGeneration) {
+      return false;
+    }
     value = null;
     return true;
-  }
-
-  @override
-  Future<void> clearCleanupPending(String bindingId) async {
-    if (cleanupPendingBindingId == bindingId) {
-      cleanupPendingBindingId = null;
-    }
   }
 
   @override
@@ -616,7 +622,9 @@ final class _MemoryAuthorityStore implements OfflineAuthorityStore {
   OfflineAuthorityRecord? value;
 
   @override
-  Future<OfflineAuthorityRecord?> read() async => value;
+  Future<OfflineAuthorityRecord?> readByCredentialId(
+          String credentialId) async =>
+      value?.credentialId == credentialId ? value : null;
 
   @override
   Future<void> write(OfflineAuthorityRecord record) async {
@@ -624,8 +632,20 @@ final class _MemoryAuthorityStore implements OfflineAuthorityStore {
   }
 
   @override
-  Future<void> delete() async {
-    value = null;
+  Future<void> deleteByCredentialId(String credentialId) async {
+    if (value?.credentialId == credentialId) value = null;
+  }
+}
+
+final class _MemoryEpochStore implements CredentialEpochStore {
+  CredentialEpoch? value;
+
+  @override
+  Future<CredentialEpoch?> read() async => value;
+
+  @override
+  Future<void> write(CredentialEpoch epoch) async {
+    value = epoch;
   }
 }
 
