@@ -1,7 +1,10 @@
+import '../../core/domain/unsupported_domain_value_exception.dart';
+
 enum ServiceOrderStatusEnum {
   draft,
   diagnostico,
   aguardandoAprovacao,
+  aguardandoReaprovacao,
   emExecucao,
   pronto,
   entregue,
@@ -17,6 +20,8 @@ extension ServiceOrderStatusExtension on ServiceOrderStatusEnum {
         return 'DIAGNOSTICO';
       case ServiceOrderStatusEnum.aguardandoAprovacao:
         return 'AGUARDANDO_APROVACAO';
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return 'AGUARDANDO_REAPROVACAO';
       case ServiceOrderStatusEnum.emExecucao:
         return 'EM_EXECUCAO';
       case ServiceOrderStatusEnum.pronto:
@@ -28,14 +33,37 @@ extension ServiceOrderStatusExtension on ServiceOrderStatusEnum {
     }
   }
 
-  static ServiceOrderStatusEnum fromDbString(String value) {
-    switch (value.toUpperCase()) {
+  String get label {
+    switch (this) {
+      case ServiceOrderStatusEnum.draft:
+        return 'Rascunho';
+      case ServiceOrderStatusEnum.diagnostico:
+        return 'Em diagnóstico';
+      case ServiceOrderStatusEnum.aguardandoAprovacao:
+        return 'Aguardando aprovação';
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return 'Aguardando reaprovação';
+      case ServiceOrderStatusEnum.emExecucao:
+        return 'Em execução';
+      case ServiceOrderStatusEnum.pronto:
+        return 'Pronto';
+      case ServiceOrderStatusEnum.entregue:
+        return 'Entregue';
+      case ServiceOrderStatusEnum.cancelado:
+        return 'Cancelado';
+    }
+  }
+
+  static ServiceOrderStatusEnum fromDbString(Object? value) {
+    switch (value) {
       case 'DRAFT':
         return ServiceOrderStatusEnum.draft;
       case 'DIAGNOSTICO':
         return ServiceOrderStatusEnum.diagnostico;
       case 'AGUARDANDO_APROVACAO':
         return ServiceOrderStatusEnum.aguardandoAprovacao;
+      case 'AGUARDANDO_REAPROVACAO':
+        return ServiceOrderStatusEnum.aguardandoReaprovacao;
       case 'EM_EXECUCAO':
         return ServiceOrderStatusEnum.emExecucao;
       case 'PRONTO':
@@ -43,8 +71,12 @@ extension ServiceOrderStatusExtension on ServiceOrderStatusEnum {
       case 'ENTREGUE':
         return ServiceOrderStatusEnum.entregue;
       case 'CANCELADO':
-      default:
         return ServiceOrderStatusEnum.cancelado;
+      default:
+        throw UnsupportedDomainValueException(
+          field: 'ServiceOrder.status',
+          receivedValue: value,
+        );
     }
   }
 }

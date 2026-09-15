@@ -375,10 +375,14 @@ class _ServiceOrderCard extends ConsumerWidget {
 
   Color _statusBorderColor(ServiceOrderStatusEnum status) {
     switch (status) {
+      case ServiceOrderStatusEnum.draft:
+        return const Color(0xFF334155);
       case ServiceOrderStatusEnum.diagnostico:
         return const Color(0xFFF59E0B);
       case ServiceOrderStatusEnum.aguardandoAprovacao:
         return const Color(0xFF818CF8);
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return const Color(0xFFA78BFA);
       case ServiceOrderStatusEnum.emExecucao:
         return const Color(0xFF3B82F6);
       case ServiceOrderStatusEnum.pronto:
@@ -387,8 +391,6 @@ class _ServiceOrderCard extends ConsumerWidget {
         return const Color(0xFF4ADE80);
       case ServiceOrderStatusEnum.cancelado:
         return const Color(0xFFEF4444);
-      default:
-        return const Color(0xFF334155);
     }
   }
 }
@@ -400,6 +402,11 @@ class _StatusBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (bg, fg, label) = switch (status) {
+      ServiceOrderStatusEnum.draft => (
+          Colors.grey.shade800,
+          Colors.white,
+          'DRAFT',
+        ),
       ServiceOrderStatusEnum.diagnostico => (
           const Color(0xFFFEF3C7),
           const Color(0xFFD97706),
@@ -409,6 +416,11 @@ class _StatusBadge extends StatelessWidget {
           const Color(0xFFEDE9FE),
           const Color(0xFF7C3AED),
           'AG. APROVAÇÃO'
+        ),
+      ServiceOrderStatusEnum.aguardandoReaprovacao => (
+          const Color(0xFFF3E8FF),
+          const Color(0xFF7E22CE),
+          'AG. REAPROVAÇÃO'
         ),
       ServiceOrderStatusEnum.emExecucao => (
           const Color(0xFFDBEAFE),
@@ -430,7 +442,6 @@ class _StatusBadge extends StatelessWidget {
           const Color(0xFFDC2626),
           'CANCELADO'
         ),
-      _ => (Colors.grey.shade800, Colors.white, 'DRAFT'),
     };
 
     return Container(

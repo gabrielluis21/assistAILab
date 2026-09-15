@@ -45,7 +45,9 @@ class CustomerDashboardPage extends ConsumerWidget {
                   .where(
                     (order) =>
                         order.status ==
-                        ServiceOrderStatusEnum.aguardandoAprovacao,
+                            ServiceOrderStatusEnum.aguardandoAprovacao ||
+                        order.status ==
+                            ServiceOrderStatusEnum.aguardandoReaprovacao,
                   )
                   .length;
 

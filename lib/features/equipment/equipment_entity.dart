@@ -1,10 +1,61 @@
+import '../../core/domain/unsupported_domain_value_exception.dart';
+
+enum EquipmentOwnerType {
+  customer('CUSTOMER'),
+  organization('ORGANIZATION');
+
+  const EquipmentOwnerType(this.wireValue);
+
+  final String wireValue;
+
+  static EquipmentOwnerType fromDbValue(Object? value) {
+    switch (value) {
+      case 'CUSTOMER':
+        return EquipmentOwnerType.customer;
+      case 'ORGANIZATION':
+        return EquipmentOwnerType.organization;
+      default:
+        throw UnsupportedDomainValueException(
+          field: 'Equipment.ownerType',
+          receivedValue: value,
+        );
+    }
+  }
+}
+
+enum EquipmentOrganizationPurpose {
+  resale('RESALE'),
+  partsDonor('PARTS_DONOR'),
+  internalUse('INTERNAL_USE');
+
+  const EquipmentOrganizationPurpose(this.wireValue);
+
+  final String wireValue;
+
+  static EquipmentOrganizationPurpose? fromNullableDbValue(Object? value) {
+    if (value == null) return null;
+    switch (value) {
+      case 'RESALE':
+        return EquipmentOrganizationPurpose.resale;
+      case 'PARTS_DONOR':
+        return EquipmentOrganizationPurpose.partsDonor;
+      case 'INTERNAL_USE':
+        return EquipmentOrganizationPurpose.internalUse;
+      default:
+        throw UnsupportedDomainValueException(
+          field: 'Equipment.organizationPurpose',
+          receivedValue: value,
+        );
+    }
+  }
+}
+
 class EquipmentEntity {
   final String id;
   final String? customerId;
   final String? organizationId;
-  final String ownerType; // 'CUSTOMER' | 'ORGANIZATION'
-  final String?
-      organizationPurpose; // 'RESALE' | 'PARTS_DONOR' | 'INTERNAL_USE' | null
+  final EquipmentOwnerType ownerType;
+  final EquipmentOrganizationPurpose? organizationPurpose;
   final String type;
   final String brand;
   final String model;
@@ -16,7 +67,7 @@ class EquipmentEntity {
     required this.id,
     this.customerId,
     this.organizationId,
-    this.ownerType = 'CUSTOMER',
+    this.ownerType = EquipmentOwnerType.customer,
     this.organizationPurpose,
     required this.type,
     required this.brand,
@@ -31,8 +82,8 @@ class EquipmentEntity {
       'id': id,
       'customer_id': customerId,
       'organization_id': organizationId,
-      'owner_type': ownerType,
-      'organization_purpose': organizationPurpose,
+      'owner_type': ownerType.wireValue,
+      'organization_purpose': organizationPurpose?.wireValue,
       'type': type,
       'brand': brand,
       'model': model,
@@ -48,10 +99,12 @@ class EquipmentEntity {
       customerId: (map['customer_id'] ?? map['customerId']) as String?,
       organizationId:
           (map['organization_id'] ?? map['organizationId']) as String?,
-      ownerType:
-          (map['owner_type'] ?? map['ownerType'] ?? 'CUSTOMER') as String,
-      organizationPurpose: (map['organization_purpose'] ??
-          map['organizationPurpose']) as String?,
+      ownerType: EquipmentOwnerType.fromDbValue(
+        map['owner_type'] ?? map['ownerType'],
+      ),
+      organizationPurpose: EquipmentOrganizationPurpose.fromNullableDbValue(
+        map['organization_purpose'] ?? map['organizationPurpose'],
+      ),
       type: map['type'] as String,
       brand: map['brand'] as String,
       model: map['model'] as String,

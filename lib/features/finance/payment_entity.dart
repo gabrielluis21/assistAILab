@@ -1,3 +1,5 @@
+import '../../core/domain/unsupported_domain_value_exception.dart';
+
 enum PaymentMethod {
   dinheiro,
   cartaoCredito,
@@ -42,8 +44,8 @@ extension PaymentMethodExtension on PaymentMethod {
     }
   }
 
-  static PaymentMethod fromDbString(String value) {
-    switch (value.toUpperCase()) {
+  static PaymentMethod fromDbString(Object? value) {
+    switch (value) {
       case 'CARTAO_CREDITO':
         return PaymentMethod.cartaoCredito;
       case 'CARTAO_DEBITO':
@@ -55,8 +57,12 @@ extension PaymentMethodExtension on PaymentMethod {
       case 'BOLETO':
         return PaymentMethod.boleto;
       case 'DINHEIRO':
-      default:
         return PaymentMethod.dinheiro;
+      default:
+        throw UnsupportedDomainValueException(
+          field: 'Payment.method',
+          receivedValue: value,
+        );
     }
   }
 }
@@ -90,8 +96,8 @@ extension PaymentStatusExtension on PaymentStatus {
     }
   }
 
-  static PaymentStatus fromDbString(String value) {
-    switch (value.toUpperCase()) {
+  static PaymentStatus fromDbString(Object? value) {
+    switch (value) {
       case 'CONFIRMED':
         return PaymentStatus.confirmed;
       case 'CANCELLED':
@@ -99,8 +105,12 @@ extension PaymentStatusExtension on PaymentStatus {
       case 'REFUNDED':
         return PaymentStatus.refunded;
       case 'PENDING':
-      default:
         return PaymentStatus.pending;
+      default:
+        throw UnsupportedDomainValueException(
+          field: 'Payment.status',
+          receivedValue: value,
+        );
     }
   }
 }
@@ -177,8 +187,8 @@ class PaymentEntity {
       serviceOrderId: map['service_order_id'] as String,
       customerId: map['customer_id'] as String,
       amount: (map['amount'] as num).toDouble(),
-      method: PaymentMethodExtension.fromDbString(map['method'] as String),
-      status: PaymentStatusExtension.fromDbString(map['status'] as String),
+      method: PaymentMethodExtension.fromDbString(map['method']),
+      status: PaymentStatusExtension.fromDbString(map['status']),
       notes: map['notes'] as String?,
       paidAt: map['paid_at'] as String?,
       createdAt: map['created_at'] as String,

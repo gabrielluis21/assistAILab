@@ -34,6 +34,7 @@ final Map<ServiceOrderStatusEnum, List<ServiceOrderStatusEnum>>
     ServiceOrderStatusEnum.emExecucao,
     ServiceOrderStatusEnum.cancelado,
   ],
+  ServiceOrderStatusEnum.aguardandoReaprovacao: <ServiceOrderStatusEnum>[],
   ServiceOrderStatusEnum.emExecucao: [
     ServiceOrderStatusEnum.pronto,
     ServiceOrderStatusEnum.cancelado,

@@ -5,6 +5,9 @@ import 'package:sqflite/sqflite.dart';
 import '../network/api_client.dart';
 import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
+import '../../features/equipment/equipment_entity.dart';
+import '../../features/finance/payment_entity.dart';
+import '../../features/service_orders/service_order_entity.dart';
 import 'sync_lease.dart';
 
 /// HTTP response failure returned by a Sync endpoint.
@@ -369,10 +372,13 @@ class SyncEngine {
                   'customer_id': data['customer_id'] ?? data['customerId'],
                   'organization_id':
                       data['organization_id'] ?? data['organizationId'],
-                  'owner_type':
-                      data['owner_type'] ?? data['ownerType'] ?? 'CUSTOMER',
-                  'organization_purpose': data['organization_purpose'] ??
-                      data['organizationPurpose'],
+                  'owner_type': EquipmentOwnerType.fromDbValue(
+                    data['owner_type'] ?? data['ownerType'],
+                  ).wireValue,
+                  'organization_purpose':
+                      EquipmentOrganizationPurpose.fromNullableDbValue(
+                    data['organization_purpose'] ?? data['organizationPurpose'],
+                  )?.wireValue,
                   'type': data['type'] ?? '',
                   'brand': data['brand'] ?? '',
                   'model': data['model'] ?? '',
@@ -404,7 +410,9 @@ class SyncEngine {
                       data['equipment_id'] ?? data['equipmentId'] ?? '',
                   'technician_id':
                       data['technician_id'] ?? data['technicianId'],
-                  'status': data['status'] ?? 'DIAGNOSTICO',
+                  'status': ServiceOrderStatusExtension.fromDbString(
+                    data['status'],
+                  ).toDbString(),
                   'problem_description': data['problem_description'] ??
                       data['problemDescription'] ??
                       '',
@@ -478,8 +486,12 @@ class SyncEngine {
                   'customer_id':
                       data['customer_id'] ?? data['customerId'] ?? '',
                   'amount': data['amount'] ?? 0.0,
-                  'method': data['method'] ?? 'MONEY',
-                  'status': data['status'] ?? 'PENDING',
+                  'method': PaymentMethodExtension.fromDbString(
+                    data['method'],
+                  ).toDbString(),
+                  'status': PaymentStatusExtension.fromDbString(
+                    data['status'],
+                  ).toDbString(),
                   'notes': data['notes'],
                   'paid_at': data['paid_at'] ?? data['paidAt'],
                   'created_at': data['created_at'] ??

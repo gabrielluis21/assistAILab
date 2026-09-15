@@ -337,6 +337,12 @@ _StatusInfo _statusInfo(
         Colors.orange,
       );
 
+    case ServiceOrderStatusEnum.aguardandoReaprovacao:
+      return _StatusInfo(
+        ServiceOrderStatusEnum.aguardandoReaprovacao.label,
+        Colors.deepOrange,
+      );
+
     case ServiceOrderStatusEnum.emExecucao:
       return const _StatusInfo(
         'Em execução',
