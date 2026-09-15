@@ -1,4 +1,3 @@
-import { recordServiceOrderSyncChange } from '../../core/sync/sync_change_log.service.js';
 import { Prisma, ServiceOrderStatus } from '@prisma/client';
 import { z } from 'zod';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../core/utils/errors.js';
@@ -11,9 +10,14 @@ import type { NormalizedEntry } from './sync.schema.js';
 
 export function assertGenericEquipmentSyncPayload(payload: Record<string, any>): void {
   const owner = payload.owner_type ?? payload.ownerType;
-  if ((owner && owner !== 'CUSTOMER') || payload.organization_id || payload.organizationId ||
-      payload.organization_purpose || payload.organizationPurpose) {
+  if (owner && owner !== 'CUSTOMER') {
     throw new ForbiddenError('Equipment ownership cannot be transferred through generic Sync');
+  }
+  if (payload.organization_id || payload.organizationId) {
+    throw new ForbiddenError('organizationId cannot be assigned to Equipment through generic Sync');
+  }
+  if (payload.organization_purpose || payload.organizationPurpose) {
+    throw new ForbiddenError('organizationPurpose cannot be assigned through generic Sync');
   }
 }
 function assertOperation(entry: NormalizedEntry, exists: boolean): void {
@@ -73,8 +77,6 @@ async function mutateItem(tx: Prisma.TransactionClient, principal: SyncPrincipal
     else await tx.serviceOrderItem.create({ data: { ...data, id: entry.entityId, serviceOrderId: order.id } });
   }
   await recalculate(tx, order.id);
-  const canonical = await tx.serviceOrder.findUniqueOrThrow({ where: { id: order.id } });
-  await recordServiceOrderSyncChange(canonical, 'UPDATE', tx);
 }
 async function mutateOrder(tx: Prisma.TransactionClient, principal: SyncPrincipal, entry: NormalizedEntry): Promise<void> {
   assertStaff(principal);
@@ -100,13 +102,10 @@ async function mutateOrder(tx: Prisma.TransactionClient, principal: SyncPrincipa
     if (!isValidStatusTransition(existing.status, status)) throw new ConflictError('SYNC_STATUS_TRANSITION_INVALID');
     // Assertions never overwrite a published or unpublished aggregate.
     const derivedTotal = aggregateTotalMinor(existing.items.map(item => ({ quantity: item.quantity, unitPriceMinor: decimalToMinorUnits(item.unitPrice, DECIMAL_10_2_MAX_MINOR) })));
-    // Legacy orders without items may carry a pre-FE-02B total; preserve it as
-    // historical read-only evidence while preventing client overwrite.
-    const total = existing.financeCoreVersion === null && existing.items.length === 0
-      ? decimalToMinorUnits(existing.totalAmount, DECIMAL_10_2_MAX_MINOR) : derivedTotal;
+    const total = derivedTotal;
     if (entry.assertions.totalAmountMinor !== undefined && entry.assertions.totalAmountMinor !== total) throw new ConflictError('SYNC_MONEY_ASSERTION_MISMATCH');
     if (existing.currentQuoteRevisionId && decimalToMinorUnits(existing.totalAmount, DECIMAL_10_2_MAX_MINOR) !== total) throw new ConflictError('SYNC_V2_REFRESH_REQUIRED');
-    if (!existing.currentQuoteRevisionId && existing.financeCoreVersion === 2) await recalculate(tx, existing.id);
+    if (!existing.currentQuoteRevisionId) await recalculate(tx, existing.id);
     await tx.serviceOrder.update({ where: { id: existing.id }, data: {
       status, ...(p.diagnosis !== undefined ? { diagnosis: p.diagnosis } : {}), ...(p.solution !== undefined ? { solution: p.solution } : {}),
     } });
@@ -114,8 +113,6 @@ async function mutateOrder(tx: Prisma.TransactionClient, principal: SyncPrincipa
       await tx.serviceOrderStatusHistory.create({ data: { serviceOrderId: existing.id, previousStatus: existing.status, newStatus: status, changedById: principal.sub } });
       await relationships.registerStatusTransition({ serviceOrderId: existing.id, organizationId, customerId: existing.customerId, previousStatus: existing.status, newStatus: status }, tx);
     }
-    const canonical = await tx.serviceOrder.findUniqueOrThrow({ where: { id: existing.id } });
-    await recordServiceOrderSyncChange(canonical, 'UPDATE', tx);
     return;
   }
   if (p.status !== undefined && p.status !== 'DIAGNOSTICO') throw new ConflictError('SYNC_INITIAL_STATUS_SERVER_OWNED');
@@ -134,7 +131,6 @@ async function mutateOrder(tx: Prisma.TransactionClient, principal: SyncPrincipa
     totalAmount: minorUnitsToDecimal(0),
   } });
   await relationships.registerCreated({ serviceOrderId: order.id, organizationId, customerId: order.customerId, status: order.status }, tx);
-  await recordServiceOrderSyncChange(order, 'CREATE', tx);
 }
 
 const customerFields = z.object({ name: z.string().min(1).max(500), document: z.string().max(100).nullable().optional(),

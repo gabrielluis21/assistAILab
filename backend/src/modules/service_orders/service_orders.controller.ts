@@ -34,10 +34,6 @@ import {
 } from '../customer_relationship/service_order_customer_relationship.service.js';
 
 import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
-
-import {
   ALLOWED_TRANSITIONS,
   isFinanceCommandOnlyStatusTransition,
   isValidStatusTransition,
@@ -673,12 +669,6 @@ export async function createServiceOrderHandler(
             );
 
           
-          await recordServiceOrderSyncChange(
-            createdOrder,
-            OperationType.CREATE,
-            tx
-          );
-
           return createdOrder;
         }
       );
@@ -876,12 +866,6 @@ export async function updateServiceOrderStatusHandler(
             );
 
           
-          await recordServiceOrderSyncChange(
-            updated,
-            OperationType.UPDATE,
-            tx
-          );
-
           return updated;
         }
       );

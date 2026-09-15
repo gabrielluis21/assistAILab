@@ -27,10 +27,6 @@ import {
 } from '../../core/idempotency/idempotency.service.js';
 
 import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
-
-import {
   ConflictError,
 } from '../../core/utils/errors.js';
 
@@ -1239,12 +1235,6 @@ export class CommercialQuoteRevisionService {
                     order.id,
                 },
               });
-
-          await recordServiceOrderSyncChange(
-            updatedOrder,
-            OperationType.UPDATE,
-            tx
-          );
 
           const responseBody = {
             order: {

@@ -20,10 +20,6 @@ import {
 } from '../../core/idempotency/idempotency.service.js';
 
 import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
-
-import {
   ConflictError,
   NotFoundError,
 } from '../../core/utils/errors.js';
@@ -659,11 +655,6 @@ export class CustomerQuoteDecisionFinanceService {
                   },
                 });
 
-            await recordServiceOrderSyncChange(
-              updatedOrder,
-              OperationType.UPDATE,
-              tx
-            );
           }
 
           await tx

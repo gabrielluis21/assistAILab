@@ -70,8 +70,24 @@ async function appendChange(tx: Prisma.TransactionClient, model: ObservedModel, 
 /** Only the explicit transaction boundary observes projection writes. Reads and
  * non-projected delegates retain Prisma semantics. Metadata comes from DB rows,
  * never from a Sync payload. Batch deletions retain each original audience. */
-function observeProjectionWrites(tx: Prisma.TransactionClient): Prisma.TransactionClient {
+type PendingServiceOrderChange = {
+  initialRow?: any;
+  recipients: SyncAudience;
+};
+
+function mergeAudience(current: SyncAudience, next: SyncAudience): SyncAudience {
+  return {
+    organizationIds: [...new Set([...current.organizationIds, ...next.organizationIds])],
+    customerIds: [...new Set([...current.customerIds, ...next.customerIds])],
+  };
+}
+
+function observeProjectionWrites(tx: Prisma.TransactionClient): {
+  client: Prisma.TransactionClient;
+  flushServiceOrderChanges: () => Promise<void>;
+} {
   const delegates = new Map<string, object>();
+  const pendingServiceOrders = new Map<string, PendingServiceOrderChange>();
   const wrapped = new Proxy(tx, {
     get(target, key, receiver) {
       if (typeof key !== 'string' || !(key in models)) return Reflect.get(target, key, receiver);
@@ -90,12 +106,28 @@ function observeProjectionWrites(tx: Prisma.TransactionClient): Prisma.Transacti
           const beforeAudience = new Map<string, SyncAudience>();
           for (const row of previous) beforeAudience.set(row.id, await audience(tx, model, row));
           const result = await source[method](args);
-          // ServiceOrder has an explicit canonical serializer at each domain
-          // command boundary. Avoid a metadata-only duplicate here.
-          if (model === 'serviceOrder' && method !== 'delete' && method !== 'deleteMany') return result;
           const after = method === 'delete' || method === 'deleteMany' ? [] :
             method === 'updateMany' ? await delegate.findMany({ where: { id: { in: previous.map((r: any) => r.id) } } }) :
             [await delegate.findUniqueOrThrow({ where: { id: result.id ?? previous[0]?.id ?? args.data?.id ?? args.create?.id } })];
+          if (model === 'serviceOrder') {
+            for (const row of previous) {
+              const current = pendingServiceOrders.get(row.id);
+              const recipients = beforeAudience.get(row.id)!;
+              pendingServiceOrders.set(row.id, {
+                initialRow: current ? current.initialRow : row,
+                recipients: current ? mergeAudience(current.recipients, recipients) : recipients,
+              });
+            }
+            for (const row of after) {
+              const current = pendingServiceOrders.get(row.id);
+              const nextAudience = await audience(tx, model, row);
+              pendingServiceOrders.set(row.id, {
+                initialRow: current?.initialRow,
+                recipients: current ? mergeAudience(current.recipients, nextAudience) : nextAudience,
+              });
+            }
+            return result;
+          }
           for (const row of after) {
             const nextAudience = await audience(tx, model, row);
             const priorAudience = beforeAudience.get(row.id);
@@ -116,14 +148,30 @@ function observeProjectionWrites(tx: Prisma.TransactionClient): Prisma.Transacti
     },
   });
   managedTransactions.add(wrapped);
-  return wrapped;
+  return {
+    client: wrapped,
+    flushServiceOrderChanges: async () => {
+      for (const [id, pending] of pendingServiceOrders) {
+        const finalRow = await tx.serviceOrder.findUnique({ where: { id } });
+        if (finalRow) {
+          const recipients = mergeAudience(pending.recipients, await audience(tx, 'serviceOrder', finalRow));
+          await appendChange(tx, 'serviceOrder', finalRow, pending.initialRow ? 'UPDATE' : 'CREATE', recipients);
+        } else if (pending.initialRow) {
+          await appendChange(tx, 'serviceOrder', pending.initialRow, 'DELETE', pending.recipients);
+        }
+      }
+    },
+  };
 }
 
 type Options = { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel };
 export function syncTransaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, options: Options = {}): Promise<T> {
   return prisma.$transaction(async tx => {
     await lockSyncProjection(tx);
-    return work(observeProjectionWrites(tx));
+    const observed = observeProjectionWrites(tx);
+    const result = await work(observed.client);
+    await observed.flushServiceOrderChanges();
+    return result;
   }, { maxWait: 10_000, timeout: 30_000, ...options, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 }
 

@@ -68,6 +68,22 @@ test('FE-02B MySQL authority, bootstrap and concurrency gate', { timeout: 120000
       const changed = await send({ ...itemEntry, entityId: randomUUID() });
       assert.equal(changed.json().results[0].error, 'IDEMPOTENCY_KEY_REUSE');
     });
+    await t.test('v1 generic order mutation repairs legacy derived money, including empty orders', async () => {
+      const empty = await prisma.serviceOrder.create({ data: { organizationId: org.id, customerId: customer.id, equipmentId: equipment.id,
+        financeCoreVersion: null, status: 'DIAGNOSTICO', problemDescription: 'Legacy empty', totalAmount: '9.99' } });
+      const emptyResponse = await send(outbox({ solution: 'Repair empty aggregate' }, 'SERVICE_ORDER', 'UPDATE', empty.id));
+      assert.equal(emptyResponse.json().results[0].status, 'SYNCED', emptyResponse.body);
+      assert.equal((await prisma.serviceOrder.findUniqueOrThrow({ where: { id: empty.id } })).totalAmount.toString(), '0');
+
+      const populated = await prisma.serviceOrder.create({ data: { organizationId: org.id, customerId: customer.id, equipmentId: equipment.id,
+        financeCoreVersion: null, status: 'DIAGNOSTICO', problemDescription: 'Legacy populated', totalAmount: '99.99' } });
+      const legacyItem = await prisma.serviceOrderItem.create({ data: { serviceOrderId: populated.id, description: 'Legacy line',
+        quantity: 3, unitPrice: '1.25', totalPrice: '0.01' } });
+      const populatedResponse = await send(outbox({ solution: 'Repair populated aggregate' }, 'SERVICE_ORDER', 'UPDATE', populated.id));
+      assert.equal(populatedResponse.json().results[0].status, 'SYNCED', populatedResponse.body);
+      assert.equal((await prisma.serviceOrder.findUniqueOrThrow({ where: { id: populated.id } })).totalAmount.toString(), '3.75');
+      assert.equal((await prisma.serviceOrderItem.findUniqueOrThrow({ where: { id: legacyItem.id } })).totalPrice.toString(), '3.75');
+    });
     let snapshot = await captureBootstrap(principal);
     let proof = issueBootstrapProof(principal, snapshot.revision);
     await t.test('bootstrap pages form one snapshot and activate only after the final page', async () => {
@@ -136,6 +152,62 @@ test('FE-02B MySQL authority, bootstrap and concurrency gate', { timeout: 120000
       assert.ok(next.events.length > 0);
       assert.equal((next.record!.data as any).solution, 'After H');
       assert.equal((next.record!.data as any).projectionRevision, next.revision);
+    });
+    await t.test('ServiceOrder observer covers every mutation method and coalesces the final canonical row', async () => {
+      const created = await syncTransaction(tx => tx.serviceOrder.create({ data: { organizationId: org.id, customerId: customer.id,
+        equipmentId: equipment.id, status: 'DIAGNOSTICO', problemDescription: 'Observed create' } }));
+      let events = await prisma.syncChangeLog.findMany({ where: { entityId: created.id }, orderBy: { id: 'asc' } });
+      assert.equal(events.length, 1);
+      assert.equal(events[0].operationType, 'CREATE');
+
+      await syncTransaction(async tx => {
+        await tx.serviceOrder.update({ where: { id: created.id }, data: { diagnosis: 'First intermediate value' } });
+        await tx.serviceOrder.update({ where: { id: created.id }, data: { diagnosis: 'Canonical diagnosis', solution: 'Canonical solution' } });
+      });
+      events = await prisma.syncChangeLog.findMany({ where: { entityId: created.id }, orderBy: { id: 'asc' } });
+      assert.equal(events.length, 2);
+      assert.equal(events[1].operationType, 'UPDATE');
+      assert.equal((events[1].data as any).diagnosis, 'Canonical diagnosis');
+      assert.equal((events[1].data as any).solution, 'Canonical solution');
+
+      await syncTransaction(tx => tx.serviceOrder.updateMany({ where: { id: created.id }, data: { solution: 'Observed updateMany' } }));
+      await syncTransaction(tx => tx.serviceOrder.upsert({ where: { id: created.id }, update: { solution: 'Observed upsert update' },
+        create: { id: created.id, organizationId: org.id, customerId: customer.id, equipmentId: equipment.id,
+          status: 'DIAGNOSTICO', problemDescription: 'Unreachable create' } }));
+      events = await prisma.syncChangeLog.findMany({ where: { entityId: created.id }, orderBy: { id: 'asc' } });
+      assert.equal(events.length, 4);
+      assert.deepEqual(events.slice(2).map(event => event.operationType), ['UPDATE', 'UPDATE']);
+
+      const upsertedId = randomUUID();
+      await syncTransaction(tx => tx.serviceOrder.upsert({ where: { id: upsertedId }, update: { solution: 'Unreachable update' },
+        create: { id: upsertedId, organizationId: org.id, customerId: customer.id, equipmentId: equipment.id,
+          status: 'DIAGNOSTICO', problemDescription: 'Observed upsert create' } }));
+      assert.equal((await prisma.syncChangeLog.findFirstOrThrow({ where: { entityId: upsertedId } })).operationType, 'CREATE');
+
+      await syncTransaction(tx => tx.serviceOrder.delete({ where: { id: upsertedId } }));
+      events = await prisma.syncChangeLog.findMany({ where: { entityId: upsertedId }, orderBy: { id: 'asc' } });
+      assert.deepEqual(events.map(event => event.operationType), ['CREATE', 'DELETE']);
+
+      const deletedMany = await Promise.all([1, 2].map(index => prisma.serviceOrder.create({ data: { organizationId: org.id,
+        customerId: customer.id, equipmentId: equipment.id, status: 'DIAGNOSTICO', problemDescription: `Observed deleteMany ${index}` } })));
+      await syncTransaction(tx => tx.serviceOrder.deleteMany({ where: { id: { in: deletedMany.map(value => value.id) } } }));
+      for (const deleted of deletedMany) {
+        const change = await prisma.syncChangeLog.findFirstOrThrow({ where: { entityId: deleted.id } });
+        assert.equal(change.operationType, 'DELETE');
+      }
+    });
+    await t.test('legacy not-approved updateMany path publishes exactly one canonical event', async () => {
+      const legacy = await prisma.serviceOrder.create({ data: { organizationId: org.id, customerId: customer.id, equipmentId: equipment.id,
+        financeCoreVersion: null, status: 'AGUARDANDO_APROVACAO', problemDescription: 'Legacy cancellation' } });
+      const before = await prisma.syncChangeLog.count({ where: { entityId: legacy.id } });
+      const response = await app.inject({ method: 'POST', url: `/api/v1/service-orders/${legacy.id}/not-approved`, headers,
+        payload: { reason: 'Customer declined legacy quote' } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal((await prisma.serviceOrder.findUniqueOrThrow({ where: { id: legacy.id } })).status, 'CANCELADO');
+      const events = await prisma.syncChangeLog.findMany({ where: { entityId: legacy.id }, orderBy: { id: 'asc' } });
+      assert.equal(events.length, before + 1);
+      assert.equal(events.at(-1)!.operationType, 'UPDATE');
+      assert.equal((events.at(-1)!.data as any).status, 'CANCELADO');
     });
     await t.test('stale lease completion rolls back the mutation and every ChangeLog event', async () => {
       const identity = { operationId: randomUUID(), actorUserId: actor.id, organizationId: org.id, command: 'SYNC_V2_SERVICE_ORDER_UPDATE', endpoint: '/api/v1/sync/push', requestHash: 'lease-race' };
