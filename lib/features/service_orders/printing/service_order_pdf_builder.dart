@@ -599,6 +599,9 @@ abstract final class ServiceOrderPdfBuilder {
       case ServiceOrderStatusEnum.aguardandoAprovacao:
         return 'Aguardando aprovação';
 
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return ServiceOrderStatusEnum.aguardandoReaprovacao.label;
+
       case ServiceOrderStatusEnum.emExecucao:
         return 'Em execução';
 

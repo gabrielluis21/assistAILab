@@ -619,6 +619,8 @@ class _RecentOrderTile extends StatelessWidget {
         return const Color(0xFF38BDF8);
       case ServiceOrderStatusEnum.aguardandoAprovacao:
         return const Color(0xFFF59E0B);
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return const Color(0xFFA855F7);
       case ServiceOrderStatusEnum.emExecucao:
         return const Color(0xFF8B5CF6);
       case ServiceOrderStatusEnum.pronto:
@@ -638,6 +640,8 @@ class _RecentOrderTile extends StatelessWidget {
         return 'Diagnóstico';
       case ServiceOrderStatusEnum.aguardandoAprovacao:
         return 'Aguard. Aprovação';
+      case ServiceOrderStatusEnum.aguardandoReaprovacao:
+        return 'Aguard. Reaprovação';
       case ServiceOrderStatusEnum.emExecucao:
         return 'Em Execução';
       case ServiceOrderStatusEnum.pronto:

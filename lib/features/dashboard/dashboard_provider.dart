@@ -54,7 +54,8 @@ final dashboardMetricsProvider = FutureProvider<DashboardMetrics>((ref) async {
       .where((o) =>
           o.status == ServiceOrderStatusEnum.draft ||
           o.status == ServiceOrderStatusEnum.diagnostico ||
-          o.status == ServiceOrderStatusEnum.aguardandoAprovacao)
+          o.status == ServiceOrderStatusEnum.aguardandoAprovacao ||
+          o.status == ServiceOrderStatusEnum.aguardandoReaprovacao)
       .length;
 
   final ordersInExecution =
