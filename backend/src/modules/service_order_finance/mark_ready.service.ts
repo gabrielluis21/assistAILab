@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FinancialAuditOrigin,
   OperationType,
@@ -151,8 +152,7 @@ export class MarkReadyFinanceService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {

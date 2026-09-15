@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import bcrypt from 'bcrypt';
 
 import {
@@ -275,8 +276,7 @@ export class CustomerOnboardingService {
          * Se qualquer etapa falhar,
          * o grant volta a ACTIVE pelo rollback.
          */
-        return prisma
-            .$transaction(
+        return syncTransaction(
                 async (tx) => {
                     /**
                      * Reserva o token atomicamente.

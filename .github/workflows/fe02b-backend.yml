@@ -1,0 +1,42 @@
+name: FE-02B Backend Authority Gate
+on:
+  pull_request:
+    paths: ['backend/**', '.github/workflows/fe02b-backend.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mysql-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: fe02b-disposable-test
+          MYSQL_DATABASE: assistailab_fe02b_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pfe02b-disposable-test"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: mysql://root:fe02b-disposable-test@127.0.0.1:3306/assistailab_fe02b_test
+      JWT_SECRET: fe02b-disposable-ci-secret
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.20.0'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm install --global npm@11.19.0
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx prisma migrate deploy
+      - run: npm run build
+      - name: Backend regression and FE-02B MySQL gates
+        run: node --test --test-concurrency=1 'dist/**/*.test.js'

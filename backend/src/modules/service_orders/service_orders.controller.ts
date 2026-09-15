@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 ﻿import {
   FastifyRequest,
   FastifyReply,
@@ -550,8 +551,7 @@ export async function createServiceOrderHandler(
    */
 
   const order =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           let equipmentId =
             existingEquipmentId;
@@ -790,8 +790,7 @@ export async function updateServiceOrderStatusHandler(
   }
 
   const updatedOrder =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           /**
            * Optimistic locking.
@@ -1011,8 +1010,7 @@ export async function markServiceOrderNotApprovedHandler(
   }
 
   const updatedOrder =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           const result =
             await tx

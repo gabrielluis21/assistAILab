@@ -1,3 +1,4 @@
+import { decimalMoneyText } from '../money/money.js';
 import {
   OperationType,
   Prisma,
@@ -73,9 +74,7 @@ export function toServiceOrderSyncSnapshot(
       order.solution,
 
     totalAmount:
-      Number(
-        order.totalAmount
-      ),
+      decimalMoneyText(order.totalAmount),
 
     createdAt:
       order.createdAt

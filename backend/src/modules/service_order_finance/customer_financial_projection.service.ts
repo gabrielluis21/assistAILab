@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   PaymentStatus,
   Prisma,
@@ -52,8 +53,7 @@ export class CustomerFinancialProjectionService {
      * database snapshot while Payment confirmation/reschedule/cancel
      * may be committing concurrently.
      */
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {

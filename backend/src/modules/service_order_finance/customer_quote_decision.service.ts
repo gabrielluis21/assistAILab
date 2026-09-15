@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FinancialAuditOrigin,
   OperationType,
@@ -193,8 +194,7 @@ export class CustomerQuoteDecisionFinanceService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (tx) => {
           const complete =
             async (

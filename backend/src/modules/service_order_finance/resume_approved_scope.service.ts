@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FinancialAuditOrigin,
   MediaEntityType,
@@ -120,7 +121,7 @@ export class ResumeApprovedScopeService {
       );
     }
 
-    return prisma.$transaction(
+    return syncTransaction(
       async (tx) => {
         const complete =
           async (

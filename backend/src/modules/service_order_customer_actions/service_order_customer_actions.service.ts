@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   CustomerEventType,
   EquipmentOwnerType,
@@ -79,8 +80,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       CustomerCancelReturnInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -398,8 +398,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       MarkReturnedInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -624,8 +623,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       QuoteDecisionInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {

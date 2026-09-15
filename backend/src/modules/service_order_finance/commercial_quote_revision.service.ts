@@ -1,3 +1,6 @@
+import { approvedQuoteAuthorityFromRevision } from './mark_ready.rules.js';
+import { syncTransaction } from '../../core/database/sync_transaction.js';
+import { decimalMoneyText, DECIMAL_10_2_MAX_MINOR } from '../../core/money/money.js';
 import {
   FinancialAuditOrigin,
   OperationType,
@@ -98,7 +101,7 @@ function prismaMoneyToMinor(
     Prisma.Decimal
 ): bigint {
   return decimalTextToMinor(
-    value.toFixed(2)
+    decimalMoneyText(value, DECIMAL_10_2_MAX_MINOR)
   );
 }
 
@@ -171,133 +174,8 @@ function semanticLineFromPlanned(
   };
 }
 
-function semanticScopeFromApprovedRevision(
-  revision: {
-    diagnosisSnapshot:
-      string |
-      null;
-
-    totalAmount:
-      Prisma.Decimal;
-
-    serviceItemsSnapshot:
-      Prisma.JsonValue;
-  }
-): CommercialSemanticScope {
-  if (
-    !Array.isArray(
-      revision
-        .serviceItemsSnapshot
-    )
-  ) {
-    throw new ConflictError(
-      'APPROVED_QUOTE_SNAPSHOT_INVALID'
-    );
-  }
-
-  const items:
-    CommercialSemanticLine[] =
-      revision
-        .serviceItemsSnapshot
-        .map(
-          (
-            raw
-          ) => {
-            if (
-              !raw ||
-              typeof raw !==
-                'object' ||
-              Array.isArray(
-                raw
-              )
-            ) {
-              throw new ConflictError(
-                'APPROVED_QUOTE_SNAPSHOT_INVALID'
-              );
-            }
-
-            const record =
-              raw as
-                Record<
-                  string,
-                  unknown
-                >;
-
-            if (
-              (
-                record.partId !==
-                  null &&
-                typeof record.partId !==
-                  'string'
-              ) ||
-              typeof record.description !==
-                'string' ||
-              typeof record.quantity !==
-                'number' ||
-              typeof record.unitPrice !==
-                'string' ||
-              typeof record.totalPrice !==
-                'string'
-            ) {
-              throw new ConflictError(
-                'APPROVED_QUOTE_SNAPSHOT_INVALID'
-              );
-            }
-
-            const unitMinor =
-              decimalTextToMinor(
-                record
-                  .unitPrice
-              );
-
-            const totalMinor =
-              decimalTextToMinor(
-                record
-                  .totalPrice
-              );
-
-            return {
-              partId:
-                record.partId as
-                  string |
-                  null,
-
-              description:
-                record
-                  .description,
-
-              quantity:
-                record
-                  .quantity,
-
-              unitPriceMinor:
-                Number(
-                  unitMinor
-                ),
-
-              totalPriceMinor:
-                Number(
-                  totalMinor
-                ),
-            };
-          }
-        );
-
-  return {
-    diagnosis:
-      revision
-        .diagnosisSnapshot,
-
-    totalAmountMinor:
-      Number(
-        prismaMoneyToMinor(
-          revision
-            .totalAmount
-        )
-      ),
-
-    items,
-  };
+function semanticScopeFromApprovedRevision(revision: Parameters<typeof approvedQuoteAuthorityFromRevision>[0]): CommercialSemanticScope {
+  return approvedQuoteAuthorityFromRevision(revision).commercialScope;
 }
 
 export class CommercialQuoteRevisionService {
@@ -414,8 +292,7 @@ export class CommercialQuoteRevisionService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (tx) => {
           const complete =
             async (
@@ -749,67 +626,13 @@ export class CommercialQuoteRevisionService {
             }
           }
 
-          const requestedPartIds =
-            Array.from(
-              new Set(
-                input.items
-                  .map(
-                    (
-                      item
-                    ) =>
-                      item.partId ??
-                      null
-                  )
-                  .filter(
-                    (
-                      value
-                    ): value is string =>
-                      typeof value ===
-                      'string'
-                  )
-              )
-            );
-
-          const parts =
-            requestedPartIds.length >
-              0
-              ? await tx
-                  .part
-                  .findMany({
-                    where: {
-                      id: {
-                        in:
-                          requestedPartIds,
-                      },
-                    },
-                  })
-              : [];
-
-          if (
-            parts.length !==
-            requestedPartIds.length
-          ) {
-            return complete(
-              409,
-              {
-                error:
-                  'QUOTE_PART_NOT_FOUND',
-              } as
-                Prisma.InputJsonValue
-            );
+          const existingPartByItem = new Map(order.items.map(item => [item.id, item.partId]));
+          for (const item of input.items) {
+            const previousPartId = item.id ? existingPartByItem.get(item.id) ?? null : null;
+            if (item.partId !== undefined && item.partId !== previousPartId) {
+              return complete(409, { error: 'PART_TENANCY_REQUIRED' });
+            }
           }
-
-          const partById =
-            new Map(
-              parts.map(
-                (
-                  part
-                ) => [
-                  part.id,
-                  part,
-                ]
-              )
-            );
 
           const plannedItems:
             PlannedItem[] =
@@ -831,8 +654,7 @@ export class CommercialQuoteRevisionService {
                   ),
 
                 partId:
-                  item.partId ??
-                  null,
+                  item.partId === undefined ? (item.id ? existingPartByItem.get(item.id) ?? null : null) : item.partId,
 
                 description:
                   item.description,
@@ -1071,52 +893,8 @@ export class CommercialQuoteRevisionService {
                 })
               );
 
-          const partsSnapshot =
-            requestedPartIds
-              .map(
-                (
-                  partId
-                ) => {
-                  const part =
-                    partById
-                      .get(
-                        partId
-                      );
-
-                  if (!part) {
-                    throw new Error(
-                      'Resolved part disappeared inside transaction'
-                    );
-                  }
-
-                  return {
-                    id:
-                      part.id,
-
-                    name:
-                      part.name,
-
-                    sku:
-                      part.sku,
-
-                    price:
-                      part.price
-                        .toFixed(
-                          2
-                        ),
-                  };
-                }
-              )
-              .sort(
-                (
-                  left,
-                  right
-                ) =>
-                  left.id
-                    .localeCompare(
-                      right.id
-                    )
-              );
+          // Historical item.partId is evidence only; Part has no tenant authority.
+          const partsSnapshot: Prisma.InputJsonObject[] = [];
 
           const totalAmount =
             moneyMinorToDecimalText(
@@ -1125,7 +903,7 @@ export class CommercialQuoteRevisionService {
 
           const quoteSnapshot = {
             snapshotVersion:
-              1,
+              2,
 
             serviceOrderId:
               order.id,
