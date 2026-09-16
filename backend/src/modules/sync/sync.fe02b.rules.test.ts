@@ -11,6 +11,7 @@ import { isGenericFinanceSyncPushBlocked, isGenericSyncPullTypeAllowed } from '.
 import { computeCanonicalHash } from '../../core/idempotency/canonical_json.js';
 import { approvedQuoteAuthorityFromRevision } from '../service_order_finance/mark_ready.rules.js';
 import { syncMac } from '../../core/sync/sync_integrity.js';
+import { assertCustomerOrderPrivacy } from './sync.customer-projection.test-helpers.js';
 
 process.env.JWT_SECRET = 'fe02b-unit-only-secret';
 const principal = { sub: randomUUID(), role: 'ADMIN' as const, organizationId: randomUUID(), customerId: null, name: 'Staff' };
@@ -168,6 +169,36 @@ test('canonical DTO has full items, no major money or finance version and CUSTOM
     assert.notEqual(computeCanonicalHash({ ...staff, ...change }), computeCanonicalHash(staff));
   }
   assert.throws(() => serializeStaffOrder({ ...order, totalAmount: new Prisma.Decimal('1.00') }, '10'));
+});
+test('CUSTOMER serializer allowlists commercial values while staff retains internal authority fields', () => {
+  const order = fixture();
+  order.items[0].partId = randomUUID();
+  const revision = quote(order, 2);
+  Object.assign(order, { currentQuoteRevision: revision, currentQuoteRevisionId: revision.id,
+    lastApprovedQuoteRevision: revision, lastApprovedQuoteRevisionId: revision.id });
+  const customer = serializeCustomerOrder(order, '9007199254740993');
+  assertCustomerOrderPrivacy(customer);
+  assert.deepEqual(customer.items, [{ description: 'Labor', quantity: 2, unitPriceMinor: 1234, totalPriceMinor: 2468 }]);
+  assert.equal(customer.diagnosis, order.diagnosis);
+  assert.equal(customer.totalAmountMinor, 2468);
+  assert.equal(customer.projectionRevision, '9007199254740993');
+  const staff = serializeStaffOrder(order, '9007199254740993');
+  assert.equal(staff.organizationId, order.organizationId);
+  assert.equal(staff.customerId, order.customerId);
+  assert.equal(staff.items[0].id, order.items[0].id);
+  assert.equal(staff.items[0].partId, order.items[0].partId);
+  assert.equal(staff.materializedQuoteRevisionId, revision.id);
+});
+test('CUSTOMER serializer still rejects corrupt hidden authority and inexact money', () => {
+  const order = fixture();
+  const revision = quote(order, 2);
+  Object.assign(order, { currentQuoteRevision: revision, currentQuoteRevisionId: revision.id });
+  assert.throws(() => serializeCustomerOrder({ ...order, totalAmount: new Prisma.Decimal('0.01') }, '1'));
+  assert.throws(() => serializeCustomerOrder({ ...order, items: [{ ...order.items[0], totalPrice: new Prisma.Decimal('0.01') }] }, '1'));
+  assert.throws(() => serializeCustomerOrder({ ...order, currentQuoteRevisionId: randomUUID() }, '1'));
+  assert.throws(() => serializeCustomerOrder({ ...order, currentQuoteRevision: { ...revision, quoteHash: 'forged' } }, '1'));
+  assert.throws(() => serializeCustomerOrder({ ...order, currentQuoteRevision: { ...revision, customerId: randomUUID() } }, '1'));
+  assert.throws(() => serializeCustomerOrder({ ...order, diagnosis: 'Not the materialized scope' }, '1'));
 });
 test('historical JSON cannot forge tombstone audience or replay metadata on another event', () => {
   const data = { syncMetadataVersion: 2, audience: { organizationIds: [principal.organizationId], customerIds: [] }, parentId: parentId, relationshipChange: false };

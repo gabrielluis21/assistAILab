@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { normalizeSyncEntry, pushSyncSchema } from '../modules/sync/sync.schema.js';
 import { assertDemoDatabase, demoId, demoScenarios, seedDemoScenario, type DemoTransport } from './demo_seed.plan.js';
+import { demoCustomerOrderSchema } from './demo_seed.js';
 
 function recorder() {
   const calls: unknown[] = [];
@@ -62,6 +63,20 @@ test('demo stops after a rejected application command instead of fabricating lat
   assert.equal(commands, 1);
 });
 
+test('demo CUSTOMER verification rejects internal root fields and item references', () => {
+  const data = { contractVersion: 2, projectionRevision: '42', id: demoId('order'), friendlyId: 1,
+    equipmentId: demoId('equipment'), status: 'DIAGNOSTICO', problemDescription: 'Problem', solution: null,
+    diagnosis: 'Diagnosis', createdAt: '2026-09-16T00:00:00Z', updatedAt: '2026-09-16T00:00:00Z', totalAmountMinor: 2468,
+    items: [{ description: 'Labor', quantity: 2, unitPriceMinor: 1234, totalPriceMinor: 2468 }] };
+  assert.doesNotThrow(() => demoCustomerOrderSchema.parse(data));
+  for (const key of ['organizationId', 'customerId', 'technicianId', 'financeCoreVersion', 'currentQuoteRevisionId',
+    'lastApprovedQuoteRevisionId', 'materializedQuoteRevisionId', 'commercialScopeSource', 'quoteHash', 'quoteSnapshot', 'financialAuditEvents']) {
+    assert.throws(() => demoCustomerOrderSchema.parse({ ...data, [key]: 'private' }));
+  }
+  for (const key of ['id', 'serviceOrderId', 'partId', 'createdAt']) {
+    assert.throws(() => demoCustomerOrderSchema.parse({ ...data, items: [{ ...data.items[0], [key]: 'private' }] }));
+  }
+});
 test('demo seed only targets its separate demonstration database', () => {
   const env = { NODE_ENV: 'development', DATABASE_URL: 'mysql://localhost/assistailab_fe02b_demo', JWT_SECRET: 'demo-test-only' };
   assert.doesNotThrow(() => assertDemoDatabase(env));

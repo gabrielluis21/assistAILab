@@ -78,11 +78,18 @@ export function serializeStaffOrder(order: OrderAggregate, projectionRevision: s
 /** CUSTOMER has an explicit projection: no professional/Finance Core fields,
  * raw QuoteRevision, catalog expansion, payment or audit joins. */
 export function serializeCustomerOrder(order: OrderAggregate, projectionRevision: string) {
+  // Validate the full internal aggregate before minimizing the wire DTO. Do not
+  // spread it: quote pointers, tenant/owner IDs and item references are private.
+  const commercial = commercialProjection(order);
   return { contractVersion: 2, projectionRevision,
-    id: order.id, friendlyId: order.friendlyId, organizationId: order.organizationId, customerId: order.customerId,
+    id: order.id, friendlyId: order.friendlyId,
     equipmentId: order.equipmentId, status: order.status, problemDescription: order.problemDescription,
     solution: order.solution, createdAt: order.createdAt.toISOString(), updatedAt: order.updatedAt.toISOString(),
-    ...commercialProjection(order),
+    diagnosis: commercial.diagnosis, totalAmountMinor: commercial.totalAmountMinor,
+    items: commercial.items.map(item => ({
+      description: item.description, quantity: item.quantity,
+      unitPriceMinor: item.unitPriceMinor, totalPriceMinor: item.totalPriceMinor,
+    })),
   };
 }
 

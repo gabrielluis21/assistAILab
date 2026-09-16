@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { buildApp } from '../app.js';
 import { prisma } from '../core/database/prisma.js';
 import { syncTransaction } from '../core/database/sync_transaction.js';
-import { aggregateTotalMinor } from '../core/money/money.js';
+import { aggregateTotalMinor, serviceOrderMoneyMinorSchema, quantitySchema } from '../core/money/money.js';
 import { assertDemoDatabase, demoId, demoScenarios, seedDemoScenario } from './demo_seed.plan.js';
 
 const accounts = [
@@ -19,6 +19,18 @@ const bootstrapPage = z.object({
   continuationToken: z.string().nullable().optional(), bootstrapProof: z.string().nullable().optional(),
   records: z.array(z.object({ entityType: z.string(), entityId: z.string(), data: z.record(z.unknown()) })),
 });
+
+// Demo verification is intentionally an exact allowlist, independent of the
+// serializer: adding internal fields must fail the demo's privacy check.
+export const demoCustomerOrderSchema = z.object({
+  contractVersion: z.literal(2), projectionRevision: z.string().regex(/^(0|[1-9][0-9]*)$/),
+  id: z.string().uuid(), friendlyId: z.number().int(), equipmentId: z.string().uuid(),
+  status: z.string(), problemDescription: z.string(), solution: z.string().nullable(),
+  createdAt: z.string(), updatedAt: z.string(), diagnosis: z.string().nullable(),
+  totalAmountMinor: serviceOrderMoneyMinorSchema,
+  items: z.array(z.object({ description: z.string(), quantity: quantitySchema,
+    unitPriceMinor: serviceOrderMoneyMinorSchema, totalPriceMinor: serviceOrderMoneyMinorSchema }).strict()),
+}).strict();
 
 /** Provisions identities only. All commercial mutations below use real routes. */
 async function seedIdentities(password: string): Promise<void> {
@@ -116,11 +128,13 @@ export async function runDemoSeed() {
       const id = demoId(`order:${scenario.key}`);
       const path = `/api/v1/service-orders/${id}/projection`;
       const projection = await request(`admin-${scenario.tenant}`, 'GET', path);
-      const customerProjection = await request(scenario.customer, 'GET', path);
+      const customerProjection = demoCustomerOrderSchema.parse(await request(scenario.customer, 'GET', path));
       assert.equal(projection.contractVersion, 2);
       assert.match(projection.projectionRevision, /^(0|[1-9][0-9]*)$/);
       assert.equal(projection.totalAmountMinor, aggregateTotalMinor(projection.items));
-      assert.deepEqual(customerProjection.items, projection.items);
+      assert.deepEqual(customerProjection.items, projection.items.map((item: any) => ({
+        description: item.description, quantity: item.quantity, unitPriceMinor: item.unitPriceMinor, totalPriceMinor: item.totalPriceMinor,
+      })));
       assert.equal(customerProjection.totalAmountMinor, projection.totalAmountMinor);
       assert.ok(!Object.hasOwn(customerProjection, 'technicianId'));
       assert.ok(!Object.hasOwn(customerProjection, 'financeCoreVersion'));
@@ -134,9 +148,17 @@ export async function runDemoSeed() {
     for (const account of accounts) {
       const snapshot = await bootstrap(account.key);
       assert.ok(snapshot.records.every(record => record.entityType !== 'PART'));
+      const ownedOrderIds = account.customer ? new Set((await prisma.serviceOrder.findMany({
+        where: { customerId: demoId(`customer:${account.customer}`) }, select: { id: true },
+      })).map(order => order.id)) : null;
       for (const record of snapshot.records.filter(record => record.entityType === 'SERVICE_ORDER')) {
         if (account.tenant) assert.equal(record.data.organizationId, demoId(`organization:${account.tenant}`));
-        else assert.equal(record.data.customerId, demoId(`customer:${account.customer}`));
+        else {
+          const customerProjection = demoCustomerOrderSchema.parse(record.data);
+          assert.equal(customerProjection.id, record.entityId);
+          assert.ok(ownedOrderIds!.has(record.entityId), 'CUSTOMER bootstrap contains another owner\'s order');
+          assert.equal(customerProjection.totalAmountMinor, aggregateTotalMinor(customerProjection.items));
+        }
       }
     }
     return { accounts: accounts.map(({ email, role, name }) => ({ email, role, name })), orders: result };

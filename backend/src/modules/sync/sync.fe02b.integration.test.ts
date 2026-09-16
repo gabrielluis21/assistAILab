@@ -11,6 +11,7 @@ import { ServiceOrderFinanceService } from '../service_order_finance/service_ord
 import { CustomerQuoteDecisionFinanceService } from '../service_order_finance/customer_quote_decision.service.js';
 import { CommercialQuoteRevisionService } from '../service_order_finance/commercial_quote_revision.service.js';
 import { ResumeApprovedScopeService } from '../service_order_finance/resume_approved_scope.service.js';
+import { assertCustomerOrderPrivacy } from './sync.customer-projection.test-helpers.js';
 
 // Run only against a disposable database populated with EXISTING migrations.
 // These tests intentionally retain immutable financial history until DB disposal.
@@ -269,6 +270,84 @@ test('FE-02B MySQL authority, bootstrap and concurrency gate', { timeout: 120000
       assert.equal(restored.json().totalAmountMinor, 2000);
       const forbidden = await revise.publishCommercialRevision(org.id, actor.id, randomUUID(), order.id, { ...revisionInput, items: [{ ...revisionInput.items[0], partId: randomUUID() }] });
       assert.equal((forbidden.body as any).error, 'PART_TENANCY_REQUIRED');
+    });
+    await t.test('CUSTOMER privacy across projection, bootstrap and incremental rehydration', async t => {
+      const customerHeaders = { authorization: `Bearer ${app.jwt.sign({ sub: customerUser.id, name: customerUser.name,
+        role: 'CUSTOMER', organizationId: null, customerId: customer.id })}` };
+      const stranger = await prisma.customer.create({ data: { name: 'Other customer' } });
+      const strangerUser = await prisma.user.create({ data: { name: 'Other customer', email: `${randomUUID()}@test.invalid`,
+        passwordHash: 'unused', role: 'CUSTOMER', status: 'ACTIVE', customerId: stranger.id } });
+      const strangerHeaders = { authorization: `Bearer ${app.jwt.sign({ sub: strangerUser.id, name: strangerUser.name,
+        role: 'CUSTOMER', organizationId: null, customerId: stranger.id })}` };
+      const otherStaff = await prisma.user.create({ data: { name: 'Other staff', email: `${randomUUID()}@test.invalid`, passwordHash: 'unused', role: 'ADMIN', status: 'ACTIVE' } });
+      await prisma.membership.create({ data: { userId: otherStaff.id, organizationId: otherOrg.id, role: 'ADMIN' } });
+      const otherHeaders = { authorization: `Bearer ${app.jwt.sign({ sub: otherStaff.id, name: otherStaff.name, role: 'ADMIN', organizationId: otherOrg.id, customerId: null })}` };
+      const strangerEquipment = await prisma.equipment.create({ data: { customerId: stranger.id, type: 'Computer', brand: 'Other', model: 'Other' } });
+      const foreignOrder = await syncTransaction(tx => tx.serviceOrder.create({ data: { organizationId: otherOrg.id, customerId: stranger.id,
+        equipmentId: strangerEquipment.id, status: 'DIAGNOSTICO', problemDescription: 'PRIVATE_OTHER_CUSTOMER', totalAmount: '0.00' } }));
+      const checkValues = (data: any) => {
+        assertCustomerOrderPrivacy(data);
+        assert.equal(data.id, order.id);
+        assert.equal(data.totalAmountMinor, 2000);
+        assert.deepEqual(data.items.map((item: any) => [item.description, item.quantity, item.unitPriceMinor, item.totalPriceMinor]), [['Labor', 2, 1000, 2000]]);
+      };
+      let customerProof: string;
+      let customerCursor: string;
+      await t.test('projection endpoint hides internals and keeps ownership/staff boundaries', async () => {
+        const response = await app.inject({ method: 'GET', url: `/api/v1/service-orders/${order.id}/projection`, headers: customerHeaders });
+        assert.equal(response.statusCode, 200, response.body);
+        checkValues(response.json());
+        for (const deniedHeaders of [strangerHeaders, otherHeaders]) {
+          assert.equal((await app.inject({ method: 'GET', url: `/api/v1/service-orders/${order.id}/projection`, headers: deniedHeaders })).statusCode, 404);
+        }
+        assert.equal((await app.inject({ method: 'GET', url: `/api/v1/service-orders/${foreignOrder.id}/projection`, headers: customerHeaders })).statusCode, 404);
+        const staff = await app.inject({ method: 'GET', url: `/api/v1/service-orders/${order.id}/projection`, headers });
+        assert.equal(staff.statusCode, 200, staff.body);
+        assert.equal(staff.json().organizationId, org.id);
+        assert.ok(staff.json().items[0].partId);
+        assert.ok(staff.json().currentQuoteRevisionId);
+        assert.ok(staff.json().materializedQuoteRevisionId);
+      });
+      await t.test('paginated bootstrap emits only sanitized owned OS aggregates', async () => {
+        let continuationToken: string | undefined;
+        const records: any[] = [];
+        do {
+          const response = await app.inject({ method: 'POST', url: '/api/v1/sync/bootstrap', headers: customerHeaders,
+            payload: { contractVersion: 2, limit: 1, ...(continuationToken ? { continuationToken } : {}) } });
+          assert.equal(response.statusCode, 200, response.body);
+          const page = response.json(); records.push(...page.records);
+          if (page.complete) { customerProof = page.bootstrapProof; customerCursor = page.bootstrapCursor; break; }
+          assert.ok(page.continuationToken); continuationToken = page.continuationToken;
+        } while (true);
+        const orders = records.filter(r => r.entityType === 'SERVICE_ORDER');
+        for (const record of orders) assertCustomerOrderPrivacy(record.data);
+        checkValues(orders.find(r => r.entityId === order.id).data);
+        assert.equal(orders.some(r => r.entityId === foreignOrder.id), false);
+      });
+      await t.test('incremental pull rehydrates sanitized current state and skips another customer', async () => {
+        await syncTransaction(async tx => {
+          await tx.serviceOrder.update({ where: { id: foreignOrder.id }, data: { solution: 'PRIVATE_OTHER_CUSTOMER_UPDATE' } });
+          await tx.serviceOrder.update({ where: { id: order.id }, data: { solution: 'Customer-visible progress' } });
+        });
+        let cursor = customerCursor!;
+        const changes: any[] = [];
+        for (let pageIndex = 0; pageIndex < 20; pageIndex++) {
+          const response = await app.inject({ method: 'GET', url: `/api/v1/sync/changes?contractVersion=2&cursor=${cursor}&limit=1`,
+            headers: { ...customerHeaders, 'x-sync-bootstrap-proof': customerProof! } });
+          assert.equal(response.statusCode, 200, response.body);
+          const body = response.json(); changes.push(...body.changes);
+          if (body.nextCursor === cursor) break;
+          cursor = body.nextCursor;
+        }
+        assert.ok(BigInt(cursor) > BigInt(customerCursor!));
+        assert.equal(changes.some(c => c.entityId === foreignOrder.id), false);
+        assert.equal(JSON.stringify(changes).includes('PRIVATE_OTHER_CUSTOMER'), false);
+        const changed = changes.find(c => c.entityType === 'SERVICE_ORDER' && c.entityId === order.id);
+        assert.ok(changed, 'The authorized update must be delivered');
+        checkValues(changed.data);
+        assert.equal(changed.data.solution, 'Customer-visible progress');
+        assert.ok(BigInt(changed.data.projectionRevision) > BigInt(customerCursor!));
+      });
     });
     await t.test('type/tenant collisions cannot leak; authorized corrupt history blocks cursor', async () => {
       snapshot = await captureBootstrap(principal);
