@@ -12,9 +12,9 @@ export const isSyncTransaction = (db: object): boolean => managedTransactions.ha
 
 export async function lockSyncProjection(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$executeRaw`INSERT INTO sync_change_logs
-    (cursor, entityType, entityId, operationType, data, createdAt)
-    VALUES (${BARRIER_CURSOR}, '__SYNC_BARRIER__', '__SYNC_BARRIER__', 'UPDATE', '{}', NOW(3)) ON DUPLICATE KEY UPDATE cursor = ${BARRIER_CURSOR}`;
-  await tx.$queryRaw`SELECT id FROM sync_change_logs WHERE cursor = ${BARRIER_CURSOR} FOR UPDATE`;
+    (\`cursor\`, entityType, entityId, operationType, data, createdAt)
+    VALUES (${BARRIER_CURSOR}, '__SYNC_BARRIER__', '__SYNC_BARRIER__', 'UPDATE', '{}', NOW(3)) ON DUPLICATE KEY UPDATE \`cursor\` = ${BARRIER_CURSOR}`;
+  await tx.$queryRaw`SELECT id FROM sync_change_logs WHERE \`cursor\` = ${BARRIER_CURSOR} FOR UPDATE`;
 }
 
 export async function projectionHighWater(tx: Prisma.TransactionClient): Promise<string> {

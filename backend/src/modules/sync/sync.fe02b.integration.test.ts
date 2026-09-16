@@ -98,7 +98,7 @@ test('FE-02B MySQL authority, bootstrap and concurrency gate', { timeout: 120000
         page = response.json(); records.push(...page.records);
       }
       proof = page.bootstrapProof;
-      const canonical = records.find((r: any) => r.entityType === 'SERVICE_ORDER').data;
+      const canonical = records.find((r: any) => r.entityType === 'SERVICE_ORDER' && r.entityId === order.id).data;
       assert.equal(canonical.totalAmountMinor, 2468);
       assert.equal(canonical.items.length, 1);
       assert.equal(canonical.projectionRevision, page.bootstrapCursor);
