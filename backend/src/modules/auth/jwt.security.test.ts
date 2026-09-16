@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
     createHmac,
+    randomUUID,
 } from 'node:crypto';
 
 import type {
@@ -39,7 +40,7 @@ const TEST_ROUTE =
 
 const basePayload = {
     sub:
-        '00000000-0000-0000-0000-000000000001',
+        randomUUID(),
 
     role:
         'ADMIN',
@@ -51,8 +52,10 @@ const basePayload = {
         null,
 
     organizationId:
-        '00000000-0000-0000-0000-000000000002',
+        randomUUID(),
 };
+
+const fixtureEmail = `sec-dep-01-jwt-${basePayload.sub}@assistailab.test`;
 
 function encodeJson(
     value: Record<string, unknown>
@@ -185,35 +188,6 @@ describe(
                 process.env.JWT_SECRET =
                     JWT_SECRET;
 
-                await prisma.membership.deleteMany({
-                    where: {
-                        userId:
-                            basePayload.sub,
-                    },
-                });
-
-                await prisma.user.deleteMany({
-                    where: {
-                        OR: [
-                            {
-                                id:
-                                    basePayload.sub,
-                            },
-                            {
-                                email:
-                                    'sec-dep-01-jwt-test@assistailab.test',
-                            },
-                        ],
-                    },
-                });
-
-                await prisma.organization.deleteMany({
-                    where: {
-                        id:
-                            basePayload.organizationId,
-                    },
-                });
-
                 await prisma.organization.create({
                     data: {
                         id:
@@ -233,7 +207,7 @@ describe(
                             basePayload.name,
 
                         email:
-                            'sec-dep-01-jwt-test@assistailab.test',
+                            fixtureEmail,
 
                         passwordHash:
                             'not-used',
@@ -293,7 +267,7 @@ describe(
 
         after(
             async () => {
-                await app.close();
+                await app?.close();
 
                 await prisma.membership.deleteMany({
                     where: {
