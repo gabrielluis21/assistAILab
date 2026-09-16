@@ -1,3 +1,5 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
+import { aggregateTotalMinor, decimalToMinorUnits, decimalMoneyText, lineTotalMinor, minorUnitsToDecimal, DECIMAL_10_2_MAX_MINOR } from '../../core/money/money.js';
 import {
   FinancialAuditOrigin,
   OperationType,
@@ -17,10 +19,6 @@ import {
 import {
   IdempotencyService,
 } from '../../core/idempotency/idempotency.service.js';
-
-import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
 
 import {
   ConflictError,
@@ -96,7 +94,7 @@ function handleReservationState(
 function moneyText(
   value: Prisma.Decimal
 ): string {
-  return value.toFixed(2);
+  return decimalMoneyText(value, DECIMAL_10_2_MAX_MINOR);
 }
 
 export class ServiceOrderFinanceService {
@@ -159,7 +157,7 @@ export class ServiceOrderFinanceService {
       );
     }
 
-    return prisma.$transaction(
+    return syncTransaction(
       async (tx) => {
         const complete =
           async (
@@ -244,10 +242,7 @@ export class ServiceOrderFinanceService {
                     },
                   ],
 
-                  include: {
-                    part:
-                      true,
-                  },
+
                 },
               },
             });
@@ -338,87 +333,32 @@ export class ServiceOrderFinanceService {
           );
         }
 
-        const serviceItems =
-          order.items.map(
-            (item) => ({
-              id:
-                item.id,
-              partId:
-                item.partId,
-              description:
-                item.description,
-              quantity:
-                item.quantity,
-              unitPrice:
-                moneyText(
-                  item.unitPrice
-                ),
-              totalPrice:
-                moneyText(
-                  item.totalPrice
-                ),
-            })
-          );
-
-        const partMap =
-          new Map<
-            string,
-            {
-              id: string;
-              name: string;
-              sku: string;
-              price: string;
-            }
-          >();
-
-        for (
-          const item of
-          order.items
-        ) {
-          if (
-            item.part
-          ) {
-            partMap.set(
-              item.part.id,
-              {
-                id:
-                  item.part.id,
-                name:
-                  item.part.name,
-                sku:
-                  item.part.sku,
-                price:
-                  moneyText(
-                    item.part.price
-                  ),
-              }
-            );
-          }
+        // Rebuild authority from persisted quantity/unit price under the OS lock.
+        let canonicalTotal: number;
+        let serviceItems: Array<{ id: string; partId: string | null; description: string; quantity: number; unitPrice: string; totalPrice: string }>;
+        try {
+          const lines = order.items.map(item => ({ ...item, unitPriceMinor: decimalToMinorUnits(item.unitPrice, DECIMAL_10_2_MAX_MINOR) }));
+          canonicalTotal = aggregateTotalMinor(lines);
+          if (canonicalTotal <= 0) throw new RangeError('QUOTE_TOTAL_MUST_BE_POSITIVE');
+          serviceItems = lines.map(item => ({
+            id: item.id, partId: item.partId, description: item.description, quantity: item.quantity,
+            unitPrice: moneyText(item.unitPrice),
+            totalPrice: moneyText(minorUnitsToDecimal(lineTotalMinor(item.quantity, item.unitPriceMinor))),
+          }));
+        } catch {
+          return complete(409, { error: 'QUOTE_MONEY_INVALID' });
         }
-
-        const parts =
-          Array.from(
-            partMap.values()
-          )
-            .sort(
-              (
-                left,
-                right
-              ) =>
-                left.id
-                  .localeCompare(
-                    right.id
-                  )
-            );
-
-        const totalAmount =
-          moneyText(
-            order.totalAmount
-          );
+        for (const item of serviceItems) {
+          await tx.serviceOrderItem.update({ where: { id: item.id }, data: { totalPrice: new Prisma.Decimal(item.totalPrice) } });
+        }
+        order.totalAmount = minorUnitsToDecimal(canonicalTotal, DECIMAL_10_2_MAX_MINOR);
+        await tx.serviceOrder.update({ where: { id: order.id }, data: { totalAmount: order.totalAmount } });
+        const parts: Prisma.InputJsonObject[] = [];
+        const totalAmount = moneyText(order.totalAmount);
 
         const quoteSnapshot = {
           snapshotVersion:
-            1,
+            2,
           serviceOrderId:
             order.id,
           organizationId:
@@ -596,12 +536,6 @@ export class ServiceOrderFinanceService {
                   order.id,
               },
             });
-
-        await recordServiceOrderSyncChange(
-          updatedOrder,
-          OperationType.UPDATE,
-          tx
-        );
 
         const body = {
           order: {

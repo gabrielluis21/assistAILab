@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client';
 export type IdempotencyIdentity = {
   operationId: string;
   actorUserId: string;
-  organizationId: string;
+  organizationId: string | null;
   deviceId?: string | null;
   command: string;
   endpoint: string;

@@ -994,7 +994,7 @@ describe(
      * ADMIN/TECH precisam receber mudanças de Part.
      */
     test(
-      'ADMIN Sync Pull includes global PART changes',
+      'ADMIN Sync Pull blocks global PART changes until SEC-PART-TENANCY-01',
       async () => {
         const runId =
           randomUUID();
@@ -1224,7 +1224,7 @@ describe(
             receivedIds.has(
               partId
             ),
-            true
+            false
           );
         } finally {
           await prisma.syncChangeLog.deleteMany({
@@ -1840,7 +1840,7 @@ test(
             operationId,
           },
         }),
-        0
+        1
       );
 
       const retry =
@@ -1977,7 +1977,7 @@ test(
  * ============================================================
  */
 test(
-  'CUSTOMER Sync Push resolves target Organization and still blocks FIN-F02 approval edge',
+  'CUSTOMER Generic Sync cannot acquire commercial write authority across organizations',
   async () => {
     const runId =
       randomUUID();
@@ -2248,7 +2248,7 @@ test(
         String(
           response.json().results[0].error
         ),
-        /FINANCE_COMMAND_REQUIRED/
+        /SYNC_COMMERCIAL_STAFF_REQUIRED/
       );
 
       const unchanged =
@@ -2542,6 +2542,8 @@ test(
           status:
             ServiceOrderStatus.PRONTO,
 
+          diagnosis: 'Finished',
+
           problemDescription:
             'Must produce domain effects',
         },
@@ -2620,7 +2622,7 @@ test(
                     'Delivered',
 
                   totalAmount:
-                    150,
+                    0,
                 },
 
                 createdAt:

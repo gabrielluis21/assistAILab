@@ -1,3 +1,4 @@
+import { checkedMinor, DECIMAL_10_2_MAX_MINOR, MAX_QUANTITY } from '../../core/money/money.js';
 import { Prisma } from '@prisma/client';
 
 import {
@@ -60,7 +61,7 @@ export function parseApprovedQuoteSnapshotForResume(
     raw as Record<string, unknown>;
 
   if (
-    snapshot.snapshotVersion !== 1 ||
+    (snapshot.snapshotVersion !== 1 && snapshot.snapshotVersion !== 2) ||
     snapshot.serviceOrderId !== revision.serviceOrderId ||
     snapshot.organizationId !== revision.organizationId ||
     snapshot.customerId !== revision.customerId
@@ -92,6 +93,7 @@ export function parseApprovedQuoteSnapshotForResume(
       snapshot.totalAmount
     );
 
+  checkedMinor(totalMinor, DECIMAL_10_2_MAX_MINOR);
   if (totalMinor <= 0n) {
     throw new RangeError(
       'APPROVED_QUOTE_TOTAL_INVALID'
@@ -107,6 +109,9 @@ export function parseApprovedQuoteSnapshotForResume(
     );
   }
 
+  if (snapshot.snapshotVersion === 2 && (!Array.isArray(snapshot.parts) || snapshot.parts.length !== 0)) {
+    throw new RangeError('QUOTE_V2_GLOBAL_PART_AUTHORITY_FORBIDDEN');
+  }
   const items: ApprovedScopeRestoreItem[] = [];
   let aggregateMinor = 0n;
 
@@ -132,7 +137,7 @@ export function parseApprovedQuoteSnapshotForResume(
       ) ||
       typeof item.description !== 'string' ||
       !Number.isSafeInteger(item.quantity) ||
-      (item.quantity as number) < 1 ||
+      (item.quantity as number) < 1 || (item.quantity as number) > MAX_QUANTITY ||
       typeof item.unitPrice !== 'string' ||
       typeof item.totalPrice !== 'string'
     ) {
@@ -154,7 +159,7 @@ export function parseApprovedQuoteSnapshotForResume(
     const calculatedLineMinor =
       calculateCommercialLineTotalMinor(
         item.quantity as number,
-        Number(unitMinor)
+        checkedMinor(unitMinor, DECIMAL_10_2_MAX_MINOR)
       );
 
     if (

@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   EquipmentOwnerType,
 } from '@prisma/client';
@@ -330,7 +331,13 @@ export class EquipmentService {
     data:
       CreateEquipmentInput
   ) {
-    return prisma
+    return syncTransaction(async tx => {
+    const current = await tx.equipment.findUnique({ where: { id: data.id } });
+    if (current && (current.ownerType !== 'CUSTOMER' || current.customerId !== data.customerId)) {
+      throw new NotFoundError('Equipment not found');
+    }
+
+    return tx
       .equipment
       .upsert({
         where: {
@@ -381,6 +388,7 @@ export class EquipmentService {
             new Date(),
         },
       });
+    });
   }
 
   /**
@@ -394,8 +402,9 @@ export class EquipmentService {
     data:
       UpdateEquipmentInput
   ) {
+    return syncTransaction(async tx => {
     const existing =
-      await prisma
+      await tx
         .equipment
         .findFirst({
           where: {
@@ -438,7 +447,7 @@ export class EquipmentService {
       );
     }
 
-    return prisma
+    return tx
       .equipment
       .update({
         where: {
@@ -452,6 +461,7 @@ export class EquipmentService {
             new Date(),
         },
       });
+    });
   }
 
   /**
@@ -463,8 +473,9 @@ export class EquipmentService {
     id: string,
     organizationId: string
   ) {
+    return syncTransaction(async tx => {
     const existing =
-      await prisma
+      await tx
         .equipment
         .findFirst({
           where: {
@@ -507,12 +518,13 @@ export class EquipmentService {
       );
     }
 
-    return prisma
+    return tx
       .equipment
       .delete({
         where: {
           id,
         },
       });
+    });
   }
 }

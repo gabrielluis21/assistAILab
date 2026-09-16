@@ -735,7 +735,7 @@ test(
 
     assert.equal(
       response.json().results[0].error,
-      'CONFLICT: FINANCE_COMMAND_REQUIRED'
+      'FINANCE_COMMAND_REQUIRED'
     );
 
     const order =
@@ -792,13 +792,21 @@ test(
       beforeSync
     );
 
-    assert.equal(
-      await prisma.operationIdempotency.count({
+    const recordedFailure =
+      await prisma.operationIdempotency.findUniqueOrThrow({
         where: {
           operationId,
         },
-      }),
-      0
+      });
+
+    assert.equal(
+      recordedFailure.status,
+      'COMPLETED'
+    );
+
+    assert.deepEqual(
+      recordedFailure.responseBody,
+      response.json().results[0]
     );
   }
 );

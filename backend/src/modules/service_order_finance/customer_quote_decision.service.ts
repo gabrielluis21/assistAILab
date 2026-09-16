@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FinancialAuditOrigin,
   OperationType,
@@ -17,10 +18,6 @@ import {
 import {
   IdempotencyService,
 } from '../../core/idempotency/idempotency.service.js';
-
-import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
 
 import {
   ConflictError,
@@ -193,8 +190,7 @@ export class CustomerQuoteDecisionFinanceService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (tx) => {
           const complete =
             async (
@@ -659,11 +655,6 @@ export class CustomerQuoteDecisionFinanceService {
                   },
                 });
 
-            await recordServiceOrderSyncChange(
-              updatedOrder,
-              OperationType.UPDATE,
-              tx
-            );
           }
 
           await tx

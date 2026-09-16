@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FinancialAuditOrigin,
   PaymentStatus,
@@ -580,8 +581,7 @@ export class ReceivablesFinanceService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -1307,8 +1307,7 @@ export class ReceivablesFinanceService {
       );
     }
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {

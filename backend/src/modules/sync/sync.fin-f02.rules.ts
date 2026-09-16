@@ -15,7 +15,6 @@ const GENERIC_SYNC_PULL_NON_FINANCE_ALLOWLIST =
     'EQUIPMENT',
     'SERVICE_ORDER',
     'SERVICE_ORDER_ITEM',
-    'PART',
   ]);
 
 function normalizeEntityType(
@@ -42,7 +41,7 @@ export function isGenericFinanceSyncPushBlocked(
     );
 
   return normalized ===
-    'PAYMENT' ||
+    'PAYMENT' || normalized === 'PART' ||
     ALWAYS_BLOCKED_FIN_F02_GENERIC_SYNC_TYPES
       .has(
         normalized

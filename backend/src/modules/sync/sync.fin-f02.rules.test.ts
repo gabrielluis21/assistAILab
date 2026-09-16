@@ -144,8 +144,7 @@ test(
         'EQUIPMENT',
         'SERVICE_ORDER',
         'SERVICE_ORDER_ITEM',
-        'PART',
-      ]
+        ]
     ) {
       assert.equal(
         isGenericSyncPullTypeAllowed({

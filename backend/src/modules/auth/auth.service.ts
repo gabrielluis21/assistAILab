@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import bcrypt from 'bcrypt';
 
 import {
@@ -53,8 +54,7 @@ export class AuthService {
         SALT_ROUNDS
       );
 
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (tx) => {
           const customer =
             await tx

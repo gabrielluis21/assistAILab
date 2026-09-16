@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   createHash,
 } from 'node:crypto';
@@ -633,8 +634,7 @@ export class EquipmentAcquisitionService {
     organizationId:
       string
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {

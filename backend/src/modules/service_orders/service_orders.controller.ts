@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 ﻿import {
   FastifyRequest,
   FastifyReply,
@@ -31,10 +32,6 @@ import {
 import {
   serviceOrderCustomerRelationshipService,
 } from '../customer_relationship/service_order_customer_relationship.service.js';
-
-import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
 
 import {
   ALLOWED_TRANSITIONS,
@@ -550,8 +547,7 @@ export async function createServiceOrderHandler(
    */
 
   const order =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           let equipmentId =
             existingEquipmentId;
@@ -673,12 +669,6 @@ export async function createServiceOrderHandler(
             );
 
           
-          await recordServiceOrderSyncChange(
-            createdOrder,
-            OperationType.CREATE,
-            tx
-          );
-
           return createdOrder;
         }
       );
@@ -790,8 +780,7 @@ export async function updateServiceOrderStatusHandler(
   }
 
   const updatedOrder =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           /**
            * Optimistic locking.
@@ -877,12 +866,6 @@ export async function updateServiceOrderStatusHandler(
             );
 
           
-          await recordServiceOrderSyncChange(
-            updated,
-            OperationType.UPDATE,
-            tx
-          );
-
           return updated;
         }
       );
@@ -1011,8 +994,7 @@ export async function markServiceOrderNotApprovedHandler(
   }
 
   const updatedOrder =
-    await prisma
-      .$transaction(
+    await syncTransaction(
         async (tx) => {
           const result =
             await tx

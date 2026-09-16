@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   CustomerEventType,
   EquipmentOwnerType,
@@ -8,10 +9,6 @@ import {
 import {
   prisma,
 } from '../../core/database/prisma.js';
-
-import {
-  recordServiceOrderSyncChange,
-} from '../../core/sync/sync_change_log.service.js';
 
 import {
   ConflictError,
@@ -79,8 +76,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       CustomerCancelReturnInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -284,18 +280,6 @@ export class ServiceOrderCustomerActionsService {
                   },
                 });
 
-            /**
-             * CUSTOMER_ACTION_SYNC_FIX_CANCEL
-             *
-             * A alteração da ServiceOrder e o ChangeLog
-             * pertencem ao mesmo commit.
-             */
-            await recordServiceOrderSyncChange(
-              currentOrder,
-              OperationType.UPDATE,
-              tx
-            );
-
             statusChanged =
               true;
           }
@@ -398,8 +382,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       MarkReturnedInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -624,8 +607,7 @@ export class ServiceOrderCustomerActionsService {
     input:
       QuoteDecisionInput
   ) {
-    return prisma
-      .$transaction(
+    return syncTransaction(
         async (
           tx
         ) => {
@@ -794,19 +776,6 @@ export class ServiceOrderCustomerActionsService {
                   },
                 });
 
-            /**
-             * CUSTOMER_ACTION_SYNC_FIX_APPROVE
-             *
-             * APPROVE só retorna sucesso depois que
-             * ServiceOrder + SyncChangeLog estiverem
-             * dentro da mesma transação.
-             */
-            await recordServiceOrderSyncChange(
-              updated,
-              OperationType.UPDATE,
-              tx
-            );
-
             return {
               order:
                 updated,
@@ -964,19 +933,6 @@ export class ServiceOrderCustomerActionsService {
                     order.id,
                 },
               });
-
-          /**
-           * CUSTOMER_ACTION_SYNC_FIX_REJECT
-           *
-           * A rejeição mantém sua semântica CRM própria,
-           * mas a ServiceOrder CANCELADO também precisa
-           * entrar no feed incremental.
-           */
-          await recordServiceOrderSyncChange(
-            updated,
-            OperationType.UPDATE,
-            tx
-          );
 
           return {
             order:

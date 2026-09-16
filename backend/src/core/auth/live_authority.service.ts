@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import {
   Role,
   UserStatus,
@@ -175,7 +176,8 @@ function staleAuthority():
  */
 export async function resolveLiveAuthority(
   rawClaims:
-    unknown
+    unknown,
+  db: Prisma.TransactionClient | typeof prisma = prisma
 ): Promise<ValidatedPrincipal> {
   const claims =
     parseJwtAuthorityClaims(
@@ -183,7 +185,7 @@ export async function resolveLiveAuthority(
     );
 
   const currentUser =
-    await prisma
+    await db
       .user
       .findUnique({
         where: {
@@ -288,7 +290,7 @@ export async function resolveLiveAuthority(
   }
 
   const membership =
-    await prisma
+    await db
       .membership
       .findUnique({
         where: {

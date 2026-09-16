@@ -1,3 +1,4 @@
+import { getServiceOrderProjectionHandler } from './service_order_projection.controller.js';
 import {
   FastifyInstance,
 } from 'fastify';
@@ -29,6 +30,7 @@ import {
 export async function serviceOrderRoutes(
   fastify: FastifyInstance
 ) {
+  fastify.get('/:id/projection', { preValidation: [(fastify as any).authenticate] }, getServiceOrderProjectionHandler);
   /**
    * Lista OS.
    *

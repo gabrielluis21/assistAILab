@@ -1,3 +1,4 @@
+import { syncTransaction } from '../../core/database/sync_transaction.js';
 import {
   FastifyReply,
   FastifyRequest,
@@ -227,7 +228,7 @@ export async function createCustomerHandler(
   }
 
   const result =
-    await prisma.$transaction(
+    await syncTransaction(
       async (
         tx
       ) => {

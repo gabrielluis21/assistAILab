@@ -1,5 +1,5 @@
 import {
-  computeCanonicalHash,
+  computeCanonicalHash, canonicalJsonStringify,
 } from '../../core/idempotency/canonical_json.js';
 
 export const MAX_SERVICE_ORDER_MONEY_MINOR =
@@ -109,7 +109,7 @@ export function calculateCommercialLineTotalMinor(
       quantity
     ) ||
     quantity <
-      1
+      1 || quantity > 2_147_483_647
   ) {
     throw new RangeError(
       'Quantity must be a positive safe integer'
@@ -189,15 +189,9 @@ function compareSemanticLines(
   right:
     CommercialSemanticLine
 ): number {
-  return JSON
-    .stringify(
-      left
-    )
-    .localeCompare(
-      JSON.stringify(
-        right
-      )
-    );
+  const a = canonicalJsonStringify(left);
+  const b = canonicalJsonStringify(right);
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**

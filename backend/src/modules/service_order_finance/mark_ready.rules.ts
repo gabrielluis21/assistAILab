@@ -1,3 +1,5 @@
+import { decimalMoneyText, decimalToMinorUnits, checkedMinor, DECIMAL_10_2_MAX_MINOR, aggregateTotalMinor, lineTotalMinor } from '../../core/money/money.js';
+import { parseApprovedQuoteSnapshotForResume } from './resume_approved_scope.rules.js';
 import {
   Prisma,
 } from '@prisma/client';
@@ -76,220 +78,22 @@ export function approvedQuoteAuthorityFromRevision(
       string;
   }
 ): ApprovedQuoteAuthority {
-  if (
-    computeCanonicalHash(
-      revision.quoteSnapshot
-    ) !==
-    revision.quoteHash
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_HASH_MISMATCH'
-    );
+  const plan = parseApprovedQuoteSnapshotForResume(revision);
+  const totalAmount = decimalMoneyText(revision.totalAmount, DECIMAL_10_2_MAX_MINOR);
+  if (plan.diagnosis !== revision.diagnosisSnapshot || plan.totalAmount !== totalAmount ||
+      computeCanonicalHash((revision.quoteSnapshot as Prisma.JsonObject).serviceItems) !== computeCanonicalHash(revision.serviceItemsSnapshot)) {
+    throw new RangeError('APPROVED_QUOTE_SNAPSHOT_IDENTITY_MISMATCH');
   }
+  return { totalAmount, commercialScope: {
+    diagnosis: plan.diagnosis,
+    totalAmountMinor: decimalToMinorUnits(revision.totalAmount, DECIMAL_10_2_MAX_MINOR),
+    items: plan.items.map(item => ({
+      partId: item.partId, description: item.description, quantity: item.quantity,
+      unitPriceMinor: checkedMinor(decimalTextToMinor(item.unitPrice), DECIMAL_10_2_MAX_MINOR),
+      totalPriceMinor: checkedMinor(decimalTextToMinor(item.totalPrice), DECIMAL_10_2_MAX_MINOR),
+    })),
+  } };
 
-  if (
-    !revision.quoteSnapshot ||
-    typeof revision.quoteSnapshot !==
-      'object' ||
-    Array.isArray(
-      revision.quoteSnapshot
-    )
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_SNAPSHOT_INVALID'
-    );
-  }
-
-  const snapshot =
-    revision.quoteSnapshot as
-      Record<
-        string,
-        unknown
-      >;
-
-  const totalAmount =
-    revision.totalAmount
-      .toFixed(2);
-
-  if (
-    snapshot.snapshotVersion !==
-      1 ||
-    snapshot.serviceOrderId !==
-      revision.serviceOrderId ||
-    snapshot.organizationId !==
-      revision.organizationId ||
-    snapshot.customerId !==
-      revision.customerId ||
-    snapshot.diagnosis !==
-      revision.diagnosisSnapshot ||
-    snapshot.totalAmount !==
-      totalAmount
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_SNAPSHOT_IDENTITY_MISMATCH'
-    );
-  }
-
-  if (
-    computeCanonicalHash(
-      snapshot.serviceItems
-    ) !==
-    computeCanonicalHash(
-      revision.serviceItemsSnapshot
-    )
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_ITEMS_SNAPSHOT_MISMATCH'
-    );
-  }
-
-  if (
-    !Array.isArray(
-      revision
-        .serviceItemsSnapshot
-    )
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_ITEMS_INVALID'
-    );
-  }
-
-  const items:
-    CommercialSemanticLine[] =
-      [];
-
-  for (
-    const rawItem of
-    revision
-      .serviceItemsSnapshot
-  ) {
-    if (
-      !rawItem ||
-      typeof rawItem !==
-        'object' ||
-      Array.isArray(
-        rawItem
-      )
-    ) {
-      throw new RangeError(
-        'APPROVED_QUOTE_ITEM_INVALID'
-      );
-    }
-
-    const item =
-      rawItem as
-        Record<
-          string,
-          unknown
-        >;
-
-    if (
-      (
-        item.partId !==
-          null &&
-        typeof item.partId !==
-          'string'
-      ) ||
-      typeof item.description !==
-        'string' ||
-      !Number.isSafeInteger(
-        item.quantity
-      ) ||
-      (
-        item.quantity as
-          number
-      ) <
-        1 ||
-      typeof item.unitPrice !==
-        'string' ||
-      typeof item.totalPrice !==
-        'string'
-    ) {
-      throw new RangeError(
-        'APPROVED_QUOTE_ITEM_INVALID'
-      );
-    }
-
-    const unitMinor =
-      decimalTextToMinor(
-        item.unitPrice
-      );
-
-    const lineMinor =
-      decimalTextToMinor(
-        item.totalPrice
-      );
-
-    if (
-      calculateCommercialLineTotalMinor(
-        item.quantity as
-          number,
-        Number(
-          unitMinor
-        )
-      ) !==
-      lineMinor
-    ) {
-      throw new RangeError(
-        'APPROVED_QUOTE_LINE_TOTAL_MISMATCH'
-      );
-    }
-
-    items.push({
-      partId:
-        item.partId as
-          string |
-          null,
-
-      description:
-        item.description,
-
-      quantity:
-        item.quantity as
-          number,
-
-      unitPriceMinor:
-        Number(
-          unitMinor
-        ),
-
-      totalPriceMinor:
-        Number(
-          lineMinor
-        ),
-    });
-  }
-
-  const totalAmountMinor =
-    decimalTextToMinor(
-      totalAmount
-    );
-
-  if (
-    totalAmountMinor <=
-    0n
-  ) {
-    throw new RangeError(
-      'APPROVED_QUOTE_TOTAL_MUST_BE_POSITIVE'
-    );
-  }
-
-  return {
-    totalAmount,
-
-    commercialScope: {
-      diagnosis:
-        revision
-          .diagnosisSnapshot,
-
-      totalAmountMinor:
-        Number(
-          totalAmountMinor
-        ),
-
-      items,
-    },
-  };
 }
 
 export function liveCommercialScopeFingerprint(
@@ -321,58 +125,21 @@ export function liveCommercialScopeFingerprint(
       }>;
   }
 ): string {
-  const scope:
-    CommercialSemanticScope = {
-      diagnosis:
-        order.diagnosis,
+  const scope: CommercialSemanticScope = {
+    diagnosis: order.diagnosis,
+    totalAmountMinor: decimalToMinorUnits(order.totalAmount, DECIMAL_10_2_MAX_MINOR),
+    items: order.items.map(item => ({
+      partId: item.partId, description: item.description, quantity: item.quantity,
+      unitPriceMinor: decimalToMinorUnits(item.unitPrice, DECIMAL_10_2_MAX_MINOR),
+      totalPriceMinor: decimalToMinorUnits(item.totalPrice, DECIMAL_10_2_MAX_MINOR),
+    })),
+  };
+  for (const item of scope.items) if (lineTotalMinor(item.quantity, item.unitPriceMinor) !== item.totalPriceMinor) {
+    throw new RangeError('LIVE_QUOTE_LINE_TOTAL_MISMATCH');
+  }
+  if (aggregateTotalMinor(scope.items) !== scope.totalAmountMinor) throw new RangeError('LIVE_QUOTE_TOTAL_MISMATCH');
+  return commercialScopeFingerprint(scope);
 
-      totalAmountMinor:
-        Number(
-          decimalTextToMinor(
-            order
-              .totalAmount
-              .toFixed(2)
-          )
-        ),
-
-      items:
-        order.items.map(
-          (
-            item
-          ) => ({
-            partId:
-              item.partId,
-
-            description:
-              item.description,
-
-            quantity:
-              item.quantity,
-
-            unitPriceMinor:
-              Number(
-                decimalTextToMinor(
-                  item
-                    .unitPrice
-                    .toFixed(2)
-                )
-              ),
-
-            totalPriceMinor:
-              Number(
-                decimalTextToMinor(
-                  item
-                    .totalPrice
-                    .toFixed(2)
-                )
-              ),
-          })
-        ),
-    };
-
-  return commercialScopeFingerprint(
-    scope
-  );
 }
 
 export function buildInitialReceivablePlan(
