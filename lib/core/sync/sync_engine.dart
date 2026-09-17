@@ -422,7 +422,7 @@ class SyncEngine {
   /// Termination criteria (cursor-progress based, not changes.length):
   /// - previousCursor == nextCursor → cursor stabilised, stop.
   /// - maxPullPagesPerCycle (10) reached → stop to avoid infinite loops.
-  /// - Server returns null/empty nextCursor → stop.
+  /// - malformed or regressive nextCursor → fail closed without persistence.
   Future<SyncPullSummary> pullIncrementalChanges({
     int pullPageSize = 50,
     int maxPullPagesPerCycle = 10,
@@ -446,8 +446,7 @@ class SyncEngine {
     if (!lease.isStillValid) return const SyncPullSummary();
     final targetDb = lease.db!;
     int totalPulled = 0;
-    String? previousCursor = await getLocalCursor(executor: targetDb);
-    String? latestCursor = previousCursor;
+    String? latestCursor = await getLocalCursor(executor: targetDb);
     final proof = await _requiredBootstrapProof(targetDb);
     int pageCount = 0;
 
@@ -459,6 +458,10 @@ class SyncEngine {
       if (latestCursor == null || latestCursor.isEmpty) {
         throw StateError('Sync v2 cursor is unavailable after bootstrap.');
       }
+      final currentCursorValue = _parseCanonicalIncrementalCursor(
+        latestCursor,
+        field: 'currentCursor',
+      );
       final cursorParam =
           '?contractVersion=2&cursor=$latestCursor&limit=$pullPageSize';
 
@@ -485,8 +488,24 @@ class SyncEngine {
         );
       }
 
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final nextCursor = body['nextCursor'] as String?;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('Invalid incremental Sync response.');
+      }
+      final body = decoded;
+      final nextCursor = body['nextCursor'];
+      final nextCursorValue = nextCursor == null
+          ? null
+          : _parseCanonicalIncrementalCursor(
+              nextCursor,
+              field: 'nextCursor',
+            );
+      final nextCursorText = nextCursor as String?;
+      if (nextCursorValue != null && nextCursorValue < currentCursorValue) {
+        throw const FormatException(
+          'Incremental Sync nextCursor must not regress.',
+        );
+      }
       final changes = body['changes'] as List<dynamic>? ?? [];
 
       pageCount++;
@@ -501,10 +520,10 @@ class SyncEngine {
         }
 
         // Persist nextCursor atomically inside the transaction
-        if (nextCursor != null && nextCursor.isNotEmpty) {
+        if (nextCursorText != null) {
           await txn.insert(
             'sync_metadata',
-            {'key': 'last_cursor', 'value': nextCursor},
+            {'key': 'last_cursor', 'value': nextCursorText},
             conflictAlgorithm: ConflictAlgorithm.replace,
           );
         }
@@ -514,13 +533,11 @@ class SyncEngine {
 
       // Cursor-progress termination:
       // Stop when cursor did not advance (stabilised) or server sent no cursor.
-      final cursorAdvanced = nextCursor != null &&
-          nextCursor.isNotEmpty &&
-          nextCursor != latestCursor;
+      final cursorAdvanced =
+          nextCursorText != null && nextCursorText != latestCursor;
 
       if (cursorAdvanced) {
-        previousCursor = latestCursor;
-        latestCursor = nextCursor;
+        latestCursor = nextCursorText;
       } else {
         // Cursor stabilised or exhausted — no more pages.
         break;
@@ -531,5 +548,17 @@ class SyncEngine {
       totalChanges: totalPulled,
       nextCursor: latestCursor,
     );
+  }
+
+  static BigInt _parseCanonicalIncrementalCursor(
+    Object? value, {
+    required String field,
+  }) {
+    if (value is! String || !RegExp(r'^(0|[1-9][0-9]*)$').hasMatch(value)) {
+      throw FormatException(
+        'Incremental Sync $field must be a canonical decimal string.',
+      );
+    }
+    return BigInt.parse(value);
   }
 }

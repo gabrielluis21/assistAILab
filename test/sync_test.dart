@@ -670,6 +670,60 @@ void main() {
       final cursorAfter = await engine.getLocalCursor();
       expect(cursorAfter, equals('1'));
     });
+
+    for (final malformed in const [
+      '',
+      '-1',
+      '+1',
+      ' 11',
+      '11 ',
+      '1.0',
+      '1e3',
+      'not-a-cursor',
+      '011',
+    ]) {
+      test('malformed incremental nextCursor "$malformed" is not persisted',
+          () async {
+        final db = await SqliteDatabase.instance;
+        await _activateSyncV2(db, cursor: '10');
+        final client = MockHttpClientWithCustomResponses((request) async {
+          return http.Response(
+            jsonEncode({'nextCursor': malformed, 'changes': []}),
+            200,
+          );
+        });
+        final engine = SyncEngine(
+          apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+        );
+
+        await expectLater(
+          engine.pullIncrementalChanges(lease: _testLease(db)),
+          throwsA(isA<FormatException>()),
+        );
+        expect(await engine.getLocalCursor(executor: db), '10');
+      });
+    }
+
+    test('regressive incremental nextCursor is rejected without persistence',
+        () async {
+      final db = await SqliteDatabase.instance;
+      await _activateSyncV2(db, cursor: '10');
+      final client = MockHttpClientWithCustomResponses((request) async {
+        return http.Response(
+          jsonEncode({'nextCursor': '9', 'changes': []}),
+          200,
+        );
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+      );
+
+      await expectLater(
+        engine.pullIncrementalChanges(lease: _testLease(db)),
+        throwsA(isA<FormatException>()),
+      );
+      expect(await engine.getLocalCursor(executor: db), '10');
+    });
   });
 
   group('BackgroundSyncCoordinator Lifecycle & Concurrency Tests', () {

@@ -175,6 +175,31 @@ class SqliteDatabase {
       )
     ''');
 
+    // Payment-specific durable command identity. This intentionally remains
+    // inside the auth-scoped SQLite database and is not a generic FE-03
+    // command journal.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS payment_command_intents (
+        operation_id TEXT PRIMARY KEY,
+        command_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        lifecycle_state TEXT NOT NULL CHECK (
+          lifecycle_state IN (
+            'PENDING', 'SENDING', 'UNKNOWN', 'COMPLETED', 'REJECTED'
+          )
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS
+        payment_command_intents_unresolved_identity
+      ON payment_command_intents(command_type, target_id, payload_json)
+      WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS inventory_movements (
         id TEXT PRIMARY KEY,

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 
 import '../../core/money/money_minor.dart';
 import '../auth/application/session_api_client.dart';
@@ -111,7 +112,7 @@ final class PaymentHttpCommandGateway implements PaymentCommandGateway {
         'method': method.toDbString(),
         if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
       },
-    );
+    ).timeout(const Duration(seconds: 15));
     final body = _decodeSuccess(response.statusCode, response.body);
     return _fromWire(_requireMap(body['payment']));
   }
@@ -130,7 +131,7 @@ final class PaymentHttpCommandGateway implements PaymentCommandGateway {
       '/payments/$paymentId/status',
       headers: {'X-Operation-Id': operationId},
       body: {'status': status.toDbString()},
-    );
+    ).timeout(const Duration(seconds: 15));
     final body = _decodeSuccess(response.statusCode, response.body);
     return _fromWire(_requireMap(body['payment']));
   }

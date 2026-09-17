@@ -289,7 +289,7 @@ void main() {
         if (pullPageCount == 1) {
           return http.Response(
             jsonEncode({
-              'nextCursor': 'cur_page_2',
+              'nextCursor': '2',
               'changes': [
                 {
                   'entityType': 'CUSTOMER',
@@ -308,7 +308,7 @@ void main() {
         } else {
           // Page 2 should never be reached if cancelled
           return http.Response(
-              jsonEncode({'nextCursor': 'cur_page_3', 'changes': []}), 200);
+              jsonEncode({'nextCursor': '3', 'changes': []}), 200);
         }
       });
 
