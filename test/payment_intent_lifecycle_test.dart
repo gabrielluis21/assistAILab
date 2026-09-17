@@ -66,6 +66,115 @@ void main() {
     expect(await payments.findById('payment-created', executor: db), isNotNull);
   });
 
+  for (final errorCode in const [
+    'IDEMPOTENCY_IN_PROGRESS',
+    'IDEMPOTENCY_STATE_CONFLICT',
+  ]) {
+    test('409 $errorCode remains UNKNOWN and retry keeps operationId',
+        () async {
+      var attempt = 0;
+      final ids = <String>[];
+      final gateway = _Gateway(
+        onCreate: (operationId) async {
+          ids.add(operationId);
+          attempt++;
+          if (attempt == 1) throw TimeoutException('response lost');
+          if (attempt == 2) {
+            throw PaymentCommandException(409, errorCode);
+          }
+          return _payment(id: 'payment-recovered');
+        },
+      );
+      var factoryCalls = 0;
+      final executor = _executor(
+        db,
+        gateway,
+        payments,
+        intents,
+        () => 'op-${++factoryCalls}',
+      );
+
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await expectLater(
+          executor.create(
+            serviceOrderId: 'order-1',
+            amount: MoneyMinor(12345),
+            method: PaymentMethod.pix,
+          ),
+          throwsA(anything),
+        );
+        final stored = PaymentCommandIntent.fromMap(
+          (await _intentRows(db)).single,
+        );
+        expect(stored.lifecycle, PaymentIntentLifecycle.unknown);
+        expect(stored.lifecycle.isUnresolved, isTrue);
+        expect(stored.operationId, 'op-1');
+      }
+
+      await executor.create(
+        serviceOrderId: 'order-1',
+        amount: MoneyMinor(12345),
+        method: PaymentMethod.pix,
+      );
+      expect(ids, ['op-1', 'op-1', 'op-1']);
+      expect(factoryCalls, 1);
+    });
+  }
+
+  test('ordinary deterministic 409 remains REJECTED', () async {
+    final executor = _executor(
+      db,
+      _Gateway(
+        onCreate: (_) async => throw const PaymentCommandException(
+          409,
+          'PAYMENT_BUSINESS_CONFLICT',
+        ),
+      ),
+      payments,
+      intents,
+      () => 'operation-business-conflict',
+    );
+
+    await expectLater(
+      executor.create(
+        serviceOrderId: 'order-1',
+        amount: MoneyMinor(100),
+        method: PaymentMethod.pix,
+      ),
+      throwsA(isA<PaymentCommandException>()),
+    );
+    final stored = PaymentCommandIntent.fromMap((await _intentRows(db)).single);
+    expect(stored.lifecycle, PaymentIntentLifecycle.rejected);
+    expect(stored.lifecycle.isUnresolved, isFalse);
+  });
+
+  test('409 IDEMPOTENCY_KEY_REUSE remains fail-closed and REJECTED', () async {
+    final executor = _executor(
+      db,
+      _Gateway(
+        onCreate: (_) async => throw const PaymentCommandException(
+          409,
+          'IDEMPOTENCY_KEY_REUSE',
+        ),
+      ),
+      payments,
+      intents,
+      () => 'operation-key-reuse',
+    );
+
+    await expectLater(
+      executor.create(
+        serviceOrderId: 'order-1',
+        amount: MoneyMinor(100),
+        method: PaymentMethod.pix,
+      ),
+      throwsA(isA<PaymentCommandException>()),
+    );
+    final stored = PaymentCommandIntent.fromMap((await _intentRows(db)).single);
+    expect(stored.lifecycle, PaymentIntentLifecycle.rejected);
+    expect(stored.lifecycle.isUnresolved, isFalse);
+  });
+
   for (final status in const [
     PaymentStatus.confirmed,
     PaymentStatus.cancelled,

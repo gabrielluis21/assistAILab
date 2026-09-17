@@ -394,12 +394,20 @@ final class PaymentCommandIntentExecutor {
   }
 
   static PaymentIntentLifecycle _failureLifecycle(Object error) {
-    if (error is PaymentCommandException &&
-        error.statusCode >= 400 &&
-        error.statusCode < 500 &&
-        error.statusCode != 408 &&
-        error.statusCode != 429) {
-      return PaymentIntentLifecycle.rejected;
+    if (error is PaymentCommandException) {
+      if (error.statusCode == 409 &&
+          const {
+            'IDEMPOTENCY_IN_PROGRESS',
+            'IDEMPOTENCY_STATE_CONFLICT',
+          }.contains(error.message)) {
+        return PaymentIntentLifecycle.unknown;
+      }
+      if (error.statusCode >= 400 &&
+          error.statusCode < 500 &&
+          error.statusCode != 408 &&
+          error.statusCode != 429) {
+        return PaymentIntentLifecycle.rejected;
+      }
     }
     return PaymentIntentLifecycle.unknown;
   }
