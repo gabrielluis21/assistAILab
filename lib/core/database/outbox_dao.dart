@@ -15,7 +15,9 @@ class OutboxItem {
   final String? lastAttemptAt;
   final String? nextRetryAt;
   final String? lastError;
-  final String status; // PENDING, PROCESSING, SYNCED, FAILED, CONFLICT
+  final String status;
+  // Process state: PENDING, PROCESSING, SYNCED, FAILED, CONFLICT,
+  // or REQUIRES_ATTENTION. It is never a domain/business status.
 
   OutboxItem({
     required this.operationId,

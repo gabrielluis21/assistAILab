@@ -1,23 +1,49 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
+
+import '../../core/database/auth_scoped_database_manager.dart';
+import '../../core/money/money_minor.dart';
+import '../auth/application/auth_provider.dart';
+import '../auth/application/session_api_client.dart';
+import '../auth/domain/entities/session_state.dart';
+import 'payment_command_gateway.dart';
+import 'payment_command_intent.dart';
 import 'payment_entity.dart';
 import 'payment_repository.dart';
-import '../../core/database/outbox_dao.dart';
-import '../../core/sync/sync_providers.dart';
-import '../../core/sync/sync_trigger.dart';
+
+typedef _PaymentSessionBinding = ({
+  AuthenticatedSessionKey sessionKey,
+  BoundDatabaseHandle databaseHandle,
+});
 
 final paymentRepositoryProvider = Provider<PaymentRepository>(
   (ref) => PaymentLocalDataSource(),
 );
 
-// Dashboard summary data
+final paymentCommandIntentRepositoryProvider =
+    Provider<PaymentCommandIntentRepository>(
+  (ref) => PaymentCommandIntentLocalDataSource(),
+);
+
+final paymentCommandGatewayProvider = Provider<PaymentCommandGateway>(
+  (ref) => PaymentHttpCommandGateway(ref.watch(sessionApiClientProvider)),
+);
+
+final paymentDatabaseManagerProvider = Provider<AuthScopedDatabaseManager>(
+  (ref) => AuthScopedDatabaseManager.instance,
+);
+
+final paymentOperationIdFactoryProvider = Provider<String Function()>(
+  (ref) => const Uuid().v4,
+);
+
 class FinanceSummary {
-  final double totalRevenue;
-  final double monthRevenue;
-  final double pendingAmount;
+  final MoneyMinor totalRevenue;
+  final MoneyMinor monthRevenue;
+  final MoneyMinor pendingAmount;
   final int totalPayments;
   final int pendingPayments;
-  final Map<PaymentMethod, double> revenueByMethod;
+  final Map<PaymentMethod, MoneyMinor> revenueByMethod;
 
   const FinanceSummary({
     required this.totalRevenue,
@@ -29,132 +55,208 @@ class FinanceSummary {
   });
 }
 
-// Main payments list provider
-class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
+class PaymentsNotifier extends AutoDisposeAsyncNotifier<List<PaymentEntity>> {
   @override
-  Future<List<PaymentEntity>> build() => _load();
+  Future<List<PaymentEntity>> build() async {
+    final sessionKey = ref.watch(authenticatedSessionKeyProvider);
+    ref.watch(isOnlineSessionProvider);
+    final binding = _captureBinding(sessionKey);
+    _ensureBindingCurrent(binding);
+    await ref
+        .read(paymentCommandIntentRepositoryProvider)
+        .recoverInterruptedSending(
+          executor: binding.databaseHandle.database,
+        );
+    _ensureBindingCurrent(binding);
+    return _load(binding);
+  }
 
-  Future<List<PaymentEntity>> _load() =>
-      ref.read(paymentRepositoryProvider).listAll();
+  Future<List<PaymentEntity>> _load(_PaymentSessionBinding binding) async {
+    final repository = ref.read(paymentRepositoryProvider);
+    final database = binding.databaseHandle.database;
+    if (!ref.read(isOnlineSessionProvider)) {
+      final local = await repository.listAll(executor: database);
+      _ensureBindingCurrent(binding);
+      return local;
+    }
+
+    final authoritative =
+        await ref.read(paymentCommandGatewayProvider).listAll();
+    _ensureBindingCurrent(binding);
+    final authoritativeIds = authoritative.map((payment) => payment.id).toSet();
+    await database.transaction((txn) async {
+      _ensureBindingCurrent(binding);
+      final cached = await repository.listAll(executor: txn);
+      for (final payment in authoritative) {
+        _ensureBindingCurrent(binding);
+        await repository.upsert(payment, executor: txn);
+      }
+      for (final payment in cached) {
+        if (!authoritativeIds.contains(payment.id)) {
+          _ensureBindingCurrent(binding);
+          await repository.deleteById(payment.id, executor: txn);
+        }
+      }
+    });
+    _ensureBindingCurrent(binding);
+    return authoritative;
+  }
 
   Future<void> createPayment({
     required String serviceOrderId,
-    required String customerId,
-    required double amount,
+    required MoneyMinor amount,
     required PaymentMethod method,
     String? notes,
   }) async {
-    const uuid = Uuid();
-    final now = DateTime.now().toIso8601String();
-    final payment = PaymentEntity(
-      id: uuid.v4(),
+    if (amount.minorUnits == 0) {
+      throw ArgumentError.value(amount, 'amount', 'Payment must be positive.');
+    }
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    await _executor(binding).create(
       serviceOrderId: serviceOrderId,
-      customerId: customerId,
       amount: amount,
       method: method,
-      status: PaymentStatus.pending,
       notes: notes,
-      createdAt: now,
-      updatedAt: now,
     );
-
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-
-    await repo.upsert(payment);
-
-    await outbox.insert(OutboxItem(
-      operationId: uuid.v4(),
-      entityType: 'PAYMENT',
-      entityId: payment.id,
-      operationType: 'CREATE',
-      payload: payment.toMap(),
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
-    state = AsyncData(await _load());
+    _ensureBindingCurrent(binding);
+    final payments = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(payments);
   }
 
-  Future<void> confirmPayment(String id) async {
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-    final now = DateTime.now().toIso8601String();
+  Future<void> confirmPayment(String id) =>
+      _transition(id, PaymentStatus.confirmed);
 
-    await repo.updateStatus(id, PaymentStatus.confirmed, paidAt: now);
+  Future<void> cancelPayment(String id) =>
+      _transition(id, PaymentStatus.cancelled);
 
-    await outbox.insert(OutboxItem(
-      operationId: const Uuid().v4(),
-      entityType: 'PAYMENT',
-      entityId: id,
-      operationType: 'UPDATE',
-      payload: {
-        'id': id,
-        'status': PaymentStatus.confirmed.toDbString(),
-        'paid_at': now
-      },
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
-    state = AsyncData(await _load());
-  }
-
-  Future<void> cancelPayment(String id) async {
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-    final now = DateTime.now().toIso8601String();
-
-    await repo.updateStatus(id, PaymentStatus.cancelled);
-
-    await outbox.insert(OutboxItem(
-      operationId: const Uuid().v4(),
-      entityType: 'PAYMENT',
-      entityId: id,
-      operationType: 'UPDATE',
-      payload: {'id': id, 'status': PaymentStatus.cancelled.toDbString()},
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
-    state = AsyncData(await _load());
+  Future<void> _transition(String id, PaymentStatus requested) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    await _executor(binding).transition(
+      paymentId: id,
+      status: requested,
+    );
+    _ensureBindingCurrent(binding);
+    final payments = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(payments);
   }
 
   Future<void> refresh() async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    _ensureBindingCurrent(binding);
     state = const AsyncLoading();
-    state = AsyncData(await _load());
+    final payments = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(payments);
+  }
+
+  PaymentCommandIntentExecutor _executor(_PaymentSessionBinding binding) {
+    return PaymentCommandIntentExecutor(
+      gateway: ref.read(paymentCommandGatewayProvider),
+      paymentRepository: ref.read(paymentRepositoryProvider),
+      intentRepository: ref.read(paymentCommandIntentRepositoryProvider),
+      database: binding.databaseHandle.database,
+      isBindingCurrent: () => _isBindingCurrent(binding),
+      operationIdFactory: ref.read(paymentOperationIdFactoryProvider),
+    );
+  }
+
+  _PaymentSessionBinding _captureBinding(
+    AuthenticatedSessionKey? sessionKey,
+  ) {
+    if (sessionKey == null) {
+      throw StateError('An authenticated session is required for payments.');
+    }
+    final manager = ref.read(paymentDatabaseManagerProvider);
+    final handle = manager.currentHandle;
+    if (handle == null ||
+        handle.authScope != sessionKey.scope ||
+        handle.sessionGeneration != sessionKey.sessionGeneration ||
+        !manager.isCurrentHandle(handle)) {
+      throw StateError(
+        'No current database is bound to the authenticated Payment session.',
+      );
+    }
+    return (sessionKey: sessionKey, databaseHandle: handle);
+  }
+
+  bool _isBindingCurrent(_PaymentSessionBinding binding) {
+    final manager = ref.read(paymentDatabaseManagerProvider);
+    return ref.read(authenticatedSessionKeyProvider) == binding.sessionKey &&
+        binding.databaseHandle.authScope == binding.sessionKey.scope &&
+        binding.databaseHandle.sessionGeneration ==
+            binding.sessionKey.sessionGeneration &&
+        manager.isCurrentHandle(binding.databaseHandle);
+  }
+
+  void _ensureBindingCurrent(_PaymentSessionBinding binding) {
+    if (!_isBindingCurrent(binding)) {
+      throw StateError('The Payment operation belongs to a stale session.');
+    }
   }
 }
 
 final paymentsProvider =
-    AsyncNotifierProvider<PaymentsNotifier, List<PaymentEntity>>(
+    AutoDisposeAsyncNotifierProvider<PaymentsNotifier, List<PaymentEntity>>(
   PaymentsNotifier.new,
 );
 
-// Finance summary provider
-final financeSummaryProvider = FutureProvider<FinanceSummary>((ref) async {
-  final payments = await ref.watch(paymentsProvider.future);
-  final repo = ref.read(paymentRepositoryProvider);
-
-  final totalRevenue =
-      await repo.totalRevenue(statusFilter: PaymentStatus.confirmed);
-  final monthRevenue = await repo.revenueThisMonth();
-  final pendingAmount =
-      await repo.totalRevenue(statusFilter: PaymentStatus.pending);
-
-  final pendingPayments =
-      payments.where((p) => p.status == PaymentStatus.pending).length;
-
-  // Revenue by method (confirmed only)
-  final confirmedPayments =
-      payments.where((p) => p.status == PaymentStatus.confirmed);
-  final Map<PaymentMethod, double> revenueByMethod = {};
-  for (final p in confirmedPayments) {
-    revenueByMethod[p.method] = (revenueByMethod[p.method] ?? 0.0) + p.amount;
+Map<PaymentMethod, MoneyMinor> aggregateConfirmedRevenueByMethod(
+  Iterable<PaymentEntity> payments,
+) {
+  final result = <PaymentMethod, MoneyMinor>{};
+  for (final payment
+      in payments.where((value) => value.status == PaymentStatus.confirmed)) {
+    result[payment.method] =
+        (result[payment.method] ?? MoneyMinor.zero).add(payment.amount);
   }
+  return result;
+}
+
+final financeSummaryProvider = FutureProvider<FinanceSummary>((ref) async {
+  final sessionKey = ref.watch(authenticatedSessionKeyProvider);
+  if (sessionKey == null) {
+    throw StateError('An authenticated session is required for Finance.');
+  }
+  final manager = ref.watch(paymentDatabaseManagerProvider);
+  final handle = manager.currentHandle;
+  if (handle == null ||
+      handle.authScope != sessionKey.scope ||
+      handle.sessionGeneration != sessionKey.sessionGeneration ||
+      !manager.isCurrentHandle(handle)) {
+    throw StateError('Finance has no current authenticated database binding.');
+  }
+
+  final payments = await ref.watch(paymentsProvider.future);
+  if (ref.read(authenticatedSessionKeyProvider) != sessionKey ||
+      !manager.isCurrentHandle(handle)) {
+    throw StateError('Finance fetch was superseded by another session.');
+  }
+  final repository = ref.read(paymentRepositoryProvider);
+  final totalRevenue = await repository.totalRevenue(
+    statusFilter: PaymentStatus.confirmed,
+    executor: handle.database,
+  );
+  final monthRevenue =
+      await repository.revenueThisMonth(executor: handle.database);
+  final pendingAmount = await repository.totalRevenue(
+    statusFilter: PaymentStatus.pending,
+    executor: handle.database,
+  );
+  if (ref.read(authenticatedSessionKeyProvider) != sessionKey ||
+      !manager.isCurrentHandle(handle)) {
+    throw StateError('Finance aggregation belongs to a stale session.');
+  }
+  final pendingPayments = payments
+      .where((payment) => payment.status == PaymentStatus.pending)
+      .length;
 
   return FinanceSummary(
     totalRevenue: totalRevenue,
@@ -162,6 +264,6 @@ final financeSummaryProvider = FutureProvider<FinanceSummary>((ref) async {
     pendingAmount: pendingAmount,
     totalPayments: payments.length,
     pendingPayments: pendingPayments,
-    revenueByMethod: revenueByMethod,
+    revenueByMethod: aggregateConfirmedRevenueByMethod(payments),
   );
 });

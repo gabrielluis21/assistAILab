@@ -39,6 +39,20 @@ class _CapturingHttpClient extends http.BaseClient {
   }
 }
 
+Future<void> _activateSyncV2(Database db, {String cursor = '0'}) async {
+  for (final entry in {
+    'sync_contract_version': '2',
+    'sync_bootstrap_proof': 'test-bootstrap-proof',
+    'last_cursor': cursor,
+  }.entries) {
+    await db.insert(
+      'sync_metadata',
+      {'key': entry.key, 'value': entry.value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+}
+
 SyncSessionBinding _sessionBinding({
   required BoundDatabaseHandle handle,
   required Future<String?> Function() resolveToken,
@@ -67,11 +81,14 @@ void main() {
   late Directory tempDir;
   var nextSessionGeneration = 0;
 
-  Future<BoundDatabaseHandle> openScopedDatabase(AuthScope scope) {
-    return AuthScopedDatabaseManager.instance.openDatabaseForScope(
+  Future<BoundDatabaseHandle> openScopedDatabase(AuthScope scope) async {
+    final handle =
+        await AuthScopedDatabaseManager.instance.openDatabaseForScope(
       scope,
       sessionGeneration: ++nextSessionGeneration,
     );
+    await _activateSyncV2(handle.database);
+    return handle;
   }
 
   Future<void> closeScopedDatabase() {
@@ -230,8 +247,9 @@ void main() {
 
       // 5. DB B sync cursor is completely untouched
       final cursorB = await syncEngine.getLocalCursor(executor: dbB);
-      expect(cursorB, isNull,
-          reason: 'DB B metadata/cursor must not be modified by stale Sync A');
+      expect(cursorB, '0',
+          reason:
+              'DB B must remain at its own bootstrap boundary after stale Sync A');
 
       // 6. Stale A result did not publish into Coordinator B
       final coordinatorB = BackgroundSyncCoordinator(
@@ -271,13 +289,17 @@ void main() {
         if (pullPageCount == 1) {
           return http.Response(
             jsonEncode({
-              'nextCursor': 'cur_page_2',
+              'nextCursor': '2',
               'changes': [
                 {
                   'entityType': 'CUSTOMER',
                   'entityId': 'c_1',
                   'operationType': 'CREATE',
-                  'data': {'name': 'Client Page 1'},
+                  'data': {
+                    'id': 'c_1',
+                    'name': 'Client Page 1',
+                    'updatedAt': '2026-01-01T00:00:00.000Z',
+                  },
                 }
               ],
             }),
@@ -286,7 +308,7 @@ void main() {
         } else {
           // Page 2 should never be reached if cancelled
           return http.Response(
-              jsonEncode({'nextCursor': 'cur_page_3', 'changes': []}), 200);
+              jsonEncode({'nextCursor': '3', 'changes': []}), 200);
         }
       });
 
@@ -300,9 +322,9 @@ void main() {
         credential: BoundCredential.explicit('TOKEN_A'),
         isCancelled: () {
           cancelChecks++;
-          // Checks 1-3 occur for page 1 (entry, before HTTP 1, before DB write 1).
-          // Check 4 occurs between page 1 and page 2 (before HTTP 2).
-          return cancelChecks >= 4;
+          // Checks 1-5 cover entry/bootstrap/page 1. Check 6 occurs at the
+          // top of the loop before page 2 is dispatched.
+          return cancelChecks >= 6;
         },
       );
 
@@ -400,6 +422,7 @@ void main() {
         () async {
       // Open dbA and dbB directly to test cross-database isolation
       final dbA = await SqliteDatabase.openDatabaseByName('db_a_explicit.db');
+      await _activateSyncV2(dbA);
       final dbB = (await openScopedDatabase(scopeB)).database;
 
       final transport = _CapturingHttpClient((request) async {
@@ -411,7 +434,11 @@ void main() {
                 'entityType': 'CUSTOMER',
                 'entityId': 'c_bound',
                 'operationType': 'CREATE',
-                'data': {'name': 'Bound Client'},
+                'data': {
+                  'id': 'c_bound',
+                  'name': 'Bound Client',
+                  'updatedAt': '2026-01-01T00:00:00.000Z',
+                },
               }
             ],
           }),
@@ -492,13 +519,17 @@ void main() {
         if (pagesRequested == 1) {
           return http.Response(
             jsonEncode({
-              'nextCursor': 'cursor_page_2',
+              'nextCursor': '2',
               'changes': [
                 {
                   'entityType': 'CUSTOMER',
                   'entityId': 'cust_1',
                   'operationType': 'CREATE',
-                  'data': {'name': 'Customer 1'},
+                  'data': {
+                    'id': 'cust_1',
+                    'name': 'Customer 1',
+                    'updatedAt': '2026-01-01T00:00:00.000Z',
+                  },
                 }
               ],
             }),
@@ -507,13 +538,17 @@ void main() {
         } else if (pagesRequested == 2) {
           return http.Response(
             jsonEncode({
-              'nextCursor': 'cursor_page_3',
+              'nextCursor': '3',
               'changes': [
                 {
                   'entityType': 'CUSTOMER',
                   'entityId': 'cust_2',
                   'operationType': 'CREATE',
-                  'data': {'name': 'Customer 2'},
+                  'data': {
+                    'id': 'cust_2',
+                    'name': 'Customer 2',
+                    'updatedAt': '2026-01-01T00:00:01.000Z',
+                  },
                 }
               ],
             }),
@@ -523,7 +558,7 @@ void main() {
           // Cursor stabilized: no more changes
           return http.Response(
             jsonEncode({
-              'nextCursor': 'cursor_page_3',
+              'nextCursor': '3',
               'changes': [],
             }),
             200,
@@ -545,7 +580,7 @@ void main() {
 
       expect(pagesRequested, 3);
       expect(summary.totalChanges, 2);
-      expect(summary.nextCursor, 'cursor_page_3');
+      expect(summary.nextCursor, '3');
 
       // Verify records are persisted in dbA
       final records = await dbA.query('customers', orderBy: 'id ASC');

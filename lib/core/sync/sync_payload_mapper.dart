@@ -1,6 +1,5 @@
 import '../../features/customers/customer_entity.dart';
 import '../../features/equipment/equipment_entity.dart';
-import '../../features/parts/part_entity.dart';
 import '../../features/service_orders/service_order_entity.dart';
 import '../../features/service_orders/service_order_item_entity.dart';
 
@@ -36,15 +35,18 @@ abstract final class SyncPayloadMapper {
   /// (customerId, equipmentId, problemDescription, status, etc.)
   /// are included in the snapshot.
   static Map<String, dynamic> serviceOrder(ServiceOrderEntity order) {
+    final customerId = order.customerId;
+    if (customerId == null) {
+      throw StateError('A minimized CUSTOMER projection cannot be pushed.');
+    }
     return {
-      'customerId': order.customerId,
+      'customerId': customerId,
       'equipmentId': order.equipmentId,
       'technicianId': order.technicianId,
       'status': order.status.toDbString(),
       'problemDescription': order.problemDescription,
       'diagnosis': order.diagnosis,
       'solution': order.solution,
-      'totalAmount': order.totalAmount,
     };
   }
 
@@ -55,26 +57,13 @@ abstract final class SyncPayloadMapper {
       'partId': item.partId,
       'description': item.description,
       'quantity': item.quantity,
-      'unitPrice': item.unitPrice,
-      'totalPrice': item.totalPrice,
-    };
-  }
-
-  /// Builds payload for PART (CREATE / UPDATE).
-  static Map<String, dynamic> part(PartEntity part) {
-    return {
-      'name': part.name,
-      'sku': part.sku,
-      'price': part.price,
-      'costPrice': part.costPrice,
-      'stockQuantity': part.stockQuantity,
+      'unitPriceMinor': item.unitPrice.minorUnits,
     };
   }
 
   /// Builds payload for generic entity DELETE operations.
-  static Map<String, dynamic> delete(String id) {
-    return {
-      'id': id,
-    };
-  }
+  static Map<String, dynamic> delete(String id) => const {};
+
+  static Map<String, dynamic> serviceOrderItemDelete(String serviceOrderId) =>
+      {'serviceOrderId': serviceOrderId};
 }

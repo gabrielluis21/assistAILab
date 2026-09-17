@@ -70,10 +70,13 @@ final serviceOrderPrintDataProvider =
       );
     }
 
-    final customer = await customerRepository.findById(
-      boundOrder.customerId,
-      executor: handle.database,
-    );
+    final customerId = boundOrder.customerId;
+    final customer = customerId == null
+        ? null
+        : await customerRepository.findById(
+            customerId,
+            executor: handle.database,
+          );
     ensureBindingCurrent();
 
     final equipment = await equipmentRepository.findById(

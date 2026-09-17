@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/money/money_minor.dart';
 
 import '../../service_orders/service_order_entity.dart';
 import '../application/customer_service_orders_provider.dart';
@@ -143,7 +144,7 @@ class _OrderDetailContent extends StatelessWidget {
           title: 'Valor',
           icon: Icons.payments_outlined,
           child: Text(
-            _formatCurrency(
+            formatCustomerServiceOrderCurrency(
               order.totalAmount,
             ),
             style: const TextStyle(
@@ -322,7 +323,7 @@ class _QuoteDecisionSection extends ConsumerWidget {
             'Você confirma a aprovação da OS '
             '#${order.friendlyId ?? '-'} '
             'no valor de '
-            '${_formatCurrency(order.totalAmount)}?',
+            '${formatCustomerServiceOrderCurrency(order.totalAmount)}?',
           ),
           actions: [
             TextButton(
@@ -686,10 +687,10 @@ String _nullableText(
   return value.trim();
 }
 
-String _formatCurrency(
-  double value,
+String formatCustomerServiceOrderCurrency(
+  MoneyMinor value,
 ) {
-  return 'R\$ ${value.toStringAsFixed(2).replaceAll('.', ',')}';
+  return formatMoneyMinor(value);
 }
 
 String _formatUpdatedAt(

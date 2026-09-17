@@ -1,4 +1,5 @@
 import 'package:assistailab/core/domain/unsupported_domain_value_exception.dart';
+import 'package:assistailab/core/money/money_minor.dart';
 import 'package:assistailab/features/equipment/equipment_entity.dart';
 import 'package:assistailab/features/finance/payment_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
@@ -150,7 +151,7 @@ void main() {
         id: 'payment-local',
         serviceOrderId: 'order-1',
         customerId: 'customer-1',
-        amount: 10.0,
+        amount: MoneyMinor(1000),
         method: PaymentMethod.pix,
         createdAt: '2026-09-14T10:00:00Z',
         updatedAt: '2026-09-14T10:00:00Z',
@@ -263,7 +264,7 @@ Map<String, dynamic> _serviceOrderMap() => <String, dynamic>{
       'problem_description': 'Problem',
       'diagnosis': null,
       'solution': null,
-      'total_amount': 0.0,
+      'total_amount_minor': 0,
       'updated_at': '2026-09-14T10:00:00Z',
     };
 
@@ -271,7 +272,7 @@ Map<String, dynamic> _paymentMap() => <String, dynamic>{
       'id': 'payment-1',
       'service_order_id': 'order-1',
       'customer_id': 'customer-1',
-      'amount': 10.0,
+      'amount_minor': 1000,
       'method': 'PIX',
       'status': 'PENDING',
       'notes': null,

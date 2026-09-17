@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:assistailab/features/auth/application/auth_provider.dart';
+import 'package:assistailab/core/money/money_minor.dart';
 import 'package:assistailab/features/auth/domain/entities/auth_scope.dart';
 import 'package:assistailab/features/auth/domain/entities/session_state.dart';
 import 'package:assistailab/features/customers/customer_entity.dart';
@@ -44,9 +45,9 @@ void main() {
           equipmentsProvider.overrideWith(_EmptyEquipmentsNotifier.new),
           financeSummaryProvider.overrideWith(
             (ref) async => const FinanceSummary(
-              totalRevenue: 0,
-              monthRevenue: 0,
-              pendingAmount: 0,
+              totalRevenue: MoneyMinor.zero,
+              monthRevenue: MoneyMinor.zero,
+              pendingAmount: MoneyMinor.zero,
               totalPayments: 0,
               pendingPayments: 0,
               revenueByMethod: {},

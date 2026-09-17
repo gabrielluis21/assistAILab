@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/money/money_minor.dart';
 import 'service_order_entity.dart';
 import 'service_order_item_entity.dart';
 import 'service_order_details_provider.dart';
@@ -150,7 +151,7 @@ class _ServiceOrderDetailPageState
                           ),
                         ),
                         Text(
-                          'Total: R\$ ${widget.order.totalAmount.toStringAsFixed(2)}',
+                          'Total: ${formatMoneyMinor(widget.order.totalAmount)}',
                           style: const TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -374,7 +375,8 @@ class _ServiceOrderDetailPageState
                       items: availableParts.map<DropdownMenuItem<String>>((p) {
                         return DropdownMenuItem<String>(
                           value: p.id as String,
-                          child: Text('${p.name} (R\$ ${p.price})',
+                          child: Text(
+                              '${p.name} (${formatMoneyMinor(p.price)})',
                               style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
@@ -386,7 +388,7 @@ class _ServiceOrderDetailPageState
                             selectedPartId = val;
                             descController.text = found.name;
                             priceController.text =
-                                found.price.toStringAsFixed(2);
+                                formatMoneyMinorForInput(found.price);
                           });
                         }
                       },
@@ -414,7 +416,9 @@ class _ServiceOrderDetailPageState
                       Expanded(
                         child: TextFormField(
                           controller: priceController,
-                          keyboardType: TextInputType.number,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
                           style: const TextStyle(color: Colors.white),
                           decoration: _inputDecoration('Valor Unit. (R\$) *'),
                         ),
@@ -436,9 +440,15 @@ class _ServiceOrderDetailPageState
                 onPressed: () async {
                   if (descController.text.trim().isEmpty) return;
                   final qty = int.tryParse(qtyController.text.trim()) ?? 1;
-                  final price = double.tryParse(
-                          priceController.text.trim().replaceAll(',', '.')) ??
-                      0.0;
+                  MoneyMinor price;
+                  try {
+                    price = parseMoneyInput(
+                      priceController.text,
+                      maximum: MoneyMinor.serviceOrderMaximum,
+                    );
+                  } catch (_) {
+                    return;
+                  }
 
                   await ref
                       .read(serviceOrderItemsProvider(widget.order.id).notifier)
@@ -481,14 +491,14 @@ class _ItemTile extends ConsumerWidget {
             style: const TextStyle(
                 color: Colors.white, fontWeight: FontWeight.bold)),
         subtitle: Text(
-          '${item.quantity}x  R\$ ${item.unitPrice.toStringAsFixed(2)}',
+          '${item.quantity}x  ${formatMoneyMinor(item.unitPrice)}',
           style: const TextStyle(color: Colors.white70),
         ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'R\$ ${item.totalPrice.toStringAsFixed(2)}',
+              formatMoneyMinor(item.totalPrice),
               style: const TextStyle(
                   color: Color(0xFF4ADE80),
                   fontWeight: FontWeight.bold,

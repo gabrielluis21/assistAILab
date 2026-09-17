@@ -4,6 +4,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import '../service_order_entity.dart';
+import '../../../core/money/money_minor.dart';
 import 'service_order_print_data.dart';
 
 abstract final class ServiceOrderPdfBuilder {
@@ -305,8 +306,8 @@ abstract final class ServiceOrderPdfBuilder {
               [
                 item.description,
                 item.quantity.toString(),
-                _money(item.unitPrice),
-                _money(item.totalPrice),
+                formatMoneyForPdf(item.unitPrice),
+                formatMoneyForPdf(item.totalPrice),
               ],
             ),
           ),
@@ -371,7 +372,7 @@ abstract final class ServiceOrderPdfBuilder {
               ),
             ),
             pw.Text(
-              _money(
+              formatMoneyForPdf(
                 data.order.totalAmount,
               ),
               style: pw.TextStyle(
@@ -553,11 +554,10 @@ abstract final class ServiceOrderPdfBuilder {
     );
   }
 
-  static String _money(
-    double value,
+  static String formatMoneyForPdf(
+    MoneyMinor value,
   ) {
-    return 'R\$ '
-        '${value.toStringAsFixed(2).replaceAll('.', ',')}';
+    return formatMoneyMinor(value);
   }
 
   static String _nullableText(

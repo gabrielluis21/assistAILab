@@ -1,4 +1,5 @@
 import '../../core/domain/unsupported_domain_value_exception.dart';
+import '../../core/money/money_minor.dart';
 
 enum PaymentMethod {
   dinheiro,
@@ -119,7 +120,7 @@ class PaymentEntity {
   final String id;
   final String serviceOrderId;
   final String customerId;
-  final double amount;
+  final MoneyMinor amount;
   final PaymentMethod method;
   final PaymentStatus status;
   final String? notes;
@@ -144,7 +145,7 @@ class PaymentEntity {
     String? id,
     String? serviceOrderId,
     String? customerId,
-    double? amount,
+    MoneyMinor? amount,
     PaymentMethod? method,
     PaymentStatus? status,
     String? notes,
@@ -171,7 +172,7 @@ class PaymentEntity {
       'id': id,
       'service_order_id': serviceOrderId,
       'customer_id': customerId,
-      'amount': amount,
+      'amount_minor': amount.minorUnits,
       'method': method.toDbString(),
       'status': status.toDbString(),
       'notes': notes,
@@ -186,7 +187,7 @@ class PaymentEntity {
       id: map['id'] as String,
       serviceOrderId: map['service_order_id'] as String,
       customerId: map['customer_id'] as String,
-      amount: (map['amount'] as num).toDouble(),
+      amount: MoneyMinor.fromJson(map['amount_minor'] ?? map['amountMinor']),
       method: PaymentMethodExtension.fromDbString(map['method']),
       status: PaymentStatusExtension.fromDbString(map['status']),
       notes: map['notes'] as String?,

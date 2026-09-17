@@ -147,17 +147,16 @@ class ServiceOrdersNotifier
       createdAt: DateTime.now().toIso8601String(),
     );
 
-    await binding.databaseHandle.database.transaction((txn) async {
-      await repo.upsert(updatedOrder, executor: txn);
-      await outbox.insert(outboxItem, executor: txn);
-    });
+    // The requested transition is process state until the Backend confirms it.
+    // Keep the last authoritative local snapshot and only enqueue the command.
+    await outbox.insert(
+      outboxItem,
+      executor: binding.databaseHandle.database,
+    );
 
     _ensureBindingCurrent(binding);
     _requestSyncIfOnline(binding);
 
-    final orders = await _load(binding);
-    _ensureBindingCurrent(binding);
-    state = AsyncData(orders);
     return true;
   }
 

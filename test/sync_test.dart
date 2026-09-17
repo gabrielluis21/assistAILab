@@ -12,6 +12,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:assistailab/core/database/outbox_dao.dart';
 import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:assistailab/core/network/api_client.dart';
+import 'package:assistailab/core/money/money_minor.dart';
 import 'package:assistailab/core/sync/background_sync_coordinator.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
 import 'package:assistailab/core/sync/sync_lease.dart';
@@ -23,7 +24,6 @@ import 'package:assistailab/core/sync/sync_trigger.dart';
 import 'package:assistailab/features/customers/customer_entity.dart';
 import 'package:assistailab/features/customers/customer_repository.dart';
 import 'package:assistailab/features/equipment/equipment_entity.dart';
-import 'package:assistailab/features/parts/part_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
 
@@ -39,6 +39,26 @@ class FakeApiClient extends ApiClient {
 
   FakeApiClient() : super(baseUrl: 'http://fake.api');
 }
+
+Future<void> _activateSyncV2(Database db, {String cursor = '0'}) async {
+  for (final entry in {
+    'sync_contract_version': '2',
+    'sync_bootstrap_proof': 'test-bootstrap-proof',
+    'last_cursor': cursor,
+  }.entries) {
+    await db.insert(
+      'sync_metadata',
+      {'key': entry.key, 'value': entry.value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+}
+
+SyncLease _testLease(Database db) => SyncLease(
+      db: db,
+      credential: BoundCredential.explicit('test-token'),
+      isCancelled: () => false,
+    );
 
 class FakeOutboxDao extends OutboxDao {
   int pendingCount = 0;
@@ -190,6 +210,11 @@ void main() {
       testScope,
       sessionGeneration: activeSessionGeneration,
     );
+    await _activateSyncV2(
+      AuthScopedDatabaseManager.instance.currentHandle!.database,
+    );
+    await AuthScopedDatabaseManager.instance.currentHandle!.database
+        .delete('outbox');
   });
 
   group('SyncTrigger & SyncState Unit Tests', () {
@@ -368,7 +393,7 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient, outboxDao: OutboxDao());
 
-      final summary = await engine.pushPendingOutbox();
+      final summary = await engine.pushPendingOutbox(lease: _testLease(db));
 
       expect(summary.syncedCount, equals(1));
       expect(receivedHttpBody, isNotNull);
@@ -516,7 +541,7 @@ void main() {
       final db = await SqliteDatabase.instance;
       await db.insert(
         'sync_metadata',
-        {'key': 'last_cursor', 'value': 'initial_cursor_100'},
+        {'key': 'last_cursor', 'value': '100'},
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
@@ -529,15 +554,22 @@ void main() {
           if (callCount == 1) {
             return http.Response(
               jsonEncode({
-                'nextCursor': 'next_cursor_200',
+                'nextCursor': '200',
                 'changes': [
                   {
                     'entityType': 'CUSTOMER',
                     'entityId': 'cust_atomic_1',
                     'operationType': 'CREATE',
                     'data': {
+                      'contractVersion': 2,
+                      'projectionRevision': '200',
+                      'id': 'cust_atomic_1',
                       'name': 'Atomic Customer',
                       'email': 'atomic@test.com',
+                      'document': null,
+                      'phone': null,
+                      'address': null,
+                      'updatedAt': '2026-09-16T00:00:00Z',
                     },
                   }
                 ]
@@ -548,7 +580,7 @@ void main() {
           } else {
             // Same cursor → engine stops.
             return http.Response(
-              jsonEncode({'nextCursor': 'next_cursor_200', 'changes': []}),
+              jsonEncode({'nextCursor': '200', 'changes': []}),
               200,
               headers: {'content-type': 'application/json'},
             );
@@ -560,12 +592,12 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient);
 
-      final result = await engine.pullIncrementalChanges();
+      final result = await engine.pullIncrementalChanges(lease: _testLease(db));
       expect(result.totalChanges, equals(1));
-      expect(result.nextCursor, equals('next_cursor_200'));
+      expect(result.nextCursor, equals('200'));
 
       final storedCursor = await engine.getLocalCursor();
-      expect(storedCursor, equals('next_cursor_200'));
+      expect(storedCursor, equals('200'));
 
       final customerRow = await db.query(
         'customers',
@@ -582,7 +614,7 @@ void main() {
       final db = await SqliteDatabase.instance;
       await db.insert(
         'sync_metadata',
-        {'key': 'last_cursor', 'value': 'stable_cursor_v1'},
+        {'key': 'last_cursor', 'value': '1'},
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
@@ -591,13 +623,23 @@ void main() {
         if (request.url.path.contains('/sync/changes')) {
           return http.Response(
             jsonEncode({
-              'nextCursor': 'uncommitted_cursor_v2',
+              'nextCursor': '2',
               'changes': [
                 {
                   'entityType': 'CUSTOMER',
                   'entityId': 'valid_cust',
                   'operationType': 'CREATE',
-                  'data': {'name': 'Valid'},
+                  'data': {
+                    'contractVersion': 2,
+                    'projectionRevision': '2',
+                    'id': 'valid_cust',
+                    'name': 'Valid',
+                    'document': null,
+                    'email': null,
+                    'phone': null,
+                    'address': null,
+                    'updatedAt': '2026-09-16T00:00:00Z',
+                  },
                 },
                 {
                   // Corrupted payload that causes transaction exception
@@ -620,13 +662,67 @@ void main() {
 
       // Verify that pull throws due to transaction failure
       await expectLater(
-        engine.pullIncrementalChanges(),
+        engine.pullIncrementalChanges(lease: _testLease(db)),
         throwsA(anything),
       );
 
       // Verify transaction rolled back and cursor was NOT updated
       final cursorAfter = await engine.getLocalCursor();
-      expect(cursorAfter, equals('stable_cursor_v1'));
+      expect(cursorAfter, equals('1'));
+    });
+
+    for (final malformed in const [
+      '',
+      '-1',
+      '+1',
+      ' 11',
+      '11 ',
+      '1.0',
+      '1e3',
+      'not-a-cursor',
+      '011',
+    ]) {
+      test('malformed incremental nextCursor "$malformed" is not persisted',
+          () async {
+        final db = await SqliteDatabase.instance;
+        await _activateSyncV2(db, cursor: '10');
+        final client = MockHttpClientWithCustomResponses((request) async {
+          return http.Response(
+            jsonEncode({'nextCursor': malformed, 'changes': []}),
+            200,
+          );
+        });
+        final engine = SyncEngine(
+          apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+        );
+
+        await expectLater(
+          engine.pullIncrementalChanges(lease: _testLease(db)),
+          throwsA(isA<FormatException>()),
+        );
+        expect(await engine.getLocalCursor(executor: db), '10');
+      });
+    }
+
+    test('regressive incremental nextCursor is rejected without persistence',
+        () async {
+      final db = await SqliteDatabase.instance;
+      await _activateSyncV2(db, cursor: '10');
+      final client = MockHttpClientWithCustomResponses((request) async {
+        return http.Response(
+          jsonEncode({'nextCursor': '9', 'changes': []}),
+          200,
+        );
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+      );
+
+      await expectLater(
+        engine.pullIncrementalChanges(lease: _testLease(db)),
+        throwsA(isA<FormatException>()),
+      );
+      expect(await engine.getLocalCursor(executor: db), '10');
     });
   });
 
@@ -828,8 +924,8 @@ void main() {
       // Page 1: 0 changes but cursor advances (cursor-progress = continue)
       // Page 2: cursor stabilises (stop)
       final cursors = [
-        ('cursor_v2', <dynamic>[]),
-        ('cursor_v2', <dynamic>[]), // same cursor → stop
+        ('2', <dynamic>[]),
+        ('2', <dynamic>[]), // same cursor → stop
       ];
 
       final client = MockHttpClientWithCustomResponses((request) async {
@@ -848,7 +944,8 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient);
 
-      final result = await engine.pullIncrementalChanges();
+      final db = await SqliteDatabase.instance;
+      final result = await engine.pullIncrementalChanges(lease: _testLease(db));
 
       // Should have fetched 2 pages: first advanced cursor, second stabilised.
       expect(callCount, equals(2));
@@ -873,7 +970,8 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient);
 
-      await engine.pullIncrementalChanges();
+      final db = await SqliteDatabase.instance;
+      await engine.pullIncrementalChanges(lease: _testLease(db));
 
       // Should only have made one request because cursor didn't advance.
       expect(callCount, equals(1));
@@ -882,25 +980,33 @@ void main() {
     test('Pull respects maxPullPagesPerCycle limit (10 pages)', () async {
       // Clear any cursor left by previous tests to ensure deterministic start.
       final db = await SqliteDatabase.instance;
-      await db.delete('sync_metadata',
-          where: 'key = ?', whereArgs: ['last_cursor']);
+      await _activateSyncV2(db);
 
       int callCount = 0;
       // Use timestamp-based prefixes to avoid ID/cursor conflicts with other tests.
-      final ts = DateTime.now().millisecondsSinceEpoch;
       // Always returns a different advancing cursor so loop would be infinite
       // without the page guard.
       final client = MockHttpClientWithCustomResponses((request) async {
         callCount++;
         return http.Response(
           jsonEncode({
-            'nextCursor': 'cur_${ts}_v$callCount',
+            'nextCursor': '$callCount',
             'changes': [
               {
                 'entityType': 'CUSTOMER',
-                'entityId': 'pg_${ts}_c$callCount',
+                'entityId': 'page-customer-$callCount',
                 'operationType': 'CREATE',
-                'data': {'name': 'Customer $callCount'},
+                'data': {
+                  'contractVersion': 2,
+                  'projectionRevision': '$callCount',
+                  'id': 'page-customer-$callCount',
+                  'name': 'Customer $callCount',
+                  'document': null,
+                  'email': null,
+                  'phone': null,
+                  'address': null,
+                  'updatedAt': '2026-09-16T00:00:00Z',
+                },
               }
             ],
           }),
@@ -912,8 +1018,10 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient);
 
-      final result =
-          await engine.pullIncrementalChanges(maxPullPagesPerCycle: 10);
+      final result = await engine.pullIncrementalChanges(
+        maxPullPagesPerCycle: 10,
+        lease: _testLease(db),
+      );
 
       // Must stop at exactly 10 pages.
       expect(callCount, equals(10));
@@ -1153,7 +1261,7 @@ void main() {
         );
 
         // Push muda temporariamente a entrada para PROCESSING.
-        await engine.pushPendingOutbox();
+        await engine.pushPendingOutbox(lease: _testLease(db));
 
         expect(
           inFlightStatus,
@@ -1338,7 +1446,7 @@ void main() {
         problemDescription: 'Device not turning on',
         diagnosis: 'Blown capacitor',
         solution: 'Replaced capacitor and cleaned board',
-        totalAmount: 150.0,
+        totalAmount: MoneyMinor.serviceOrder(15000),
         updatedAt: '2026-08-24T10:00:00.000Z',
       );
 
@@ -1360,7 +1468,7 @@ void main() {
       expect(payload['diagnosis'], equals('Blown capacitor'));
       expect(
           payload['solution'], equals('Replaced capacitor and cleaned board'));
-      expect(payload['totalAmount'], equals(150.0));
+      expect(payload.containsKey('totalAmount'), isFalse);
 
       // PROHIBITED: Outbox must NEVER contain only {'id': ..., 'status': ...}
       expect(payload.containsKey('customerId'), isTrue);
@@ -1438,8 +1546,8 @@ void main() {
         partId: 'part-50',
         description: 'Capacitor replacement',
         quantity: 2,
-        unitPrice: 25.0,
-        totalPrice: 50.0,
+        unitPrice: MoneyMinor.serviceOrder(2500),
+        totalPrice: MoneyMinor.serviceOrder(5000),
         updatedAt: '2026-08-24T10:00:00.000Z',
       );
 
@@ -1449,33 +1557,13 @@ void main() {
       expect(payload['partId'], equals('part-50'));
       expect(payload['description'], equals('Capacitor replacement'));
       expect(payload['quantity'], equals(2));
-      expect(payload['unitPrice'], equals(25.0));
-      expect(payload['totalPrice'], equals(50.0));
-    });
-
-    test('Part SyncPayloadMapper includes catalog fields', () {
-      final part = PartEntity(
-        id: 'part-50',
-        name: 'Capacitor 100uF',
-        sku: 'CAP-100UF',
-        price: 25.0,
-        costPrice: 10.0,
-        stockQuantity: 40,
-        updatedAt: '2026-08-24T10:00:00.000Z',
-      );
-
-      final payload = SyncPayloadMapper.part(part);
-
-      expect(payload['name'], equals('Capacitor 100uF'));
-      expect(payload['sku'], equals('CAP-100UF'));
-      expect(payload['price'], equals(25.0));
-      expect(payload['costPrice'], equals(10.0));
-      expect(payload['stockQuantity'], equals(40));
+      expect(payload['unitPriceMinor'], equals(2500));
+      expect(payload.containsKey('totalPrice'), isFalse);
     });
 
     test('Generic delete payload contains only entityId', () {
       final payload = SyncPayloadMapper.delete('entity-xyz-999');
-      expect(payload, equals({'id': 'entity-xyz-999'}));
+      expect(payload, isEmpty);
     });
   });
 
@@ -1668,7 +1756,7 @@ void main() {
       final apiClient = ApiClient(baseUrl: 'http://test.api', client: client);
       final engine = SyncEngine(apiClient: apiClient, outboxDao: OutboxDao());
 
-      final summary = await engine.pushPendingOutbox();
+      final summary = await engine.pushPendingOutbox(lease: _testLease(db));
 
       expect(summary.syncedCount, equals(0));
       expect(summary.failedCount, equals(1));
@@ -1684,5 +1772,40 @@ void main() {
       // Clean up
       await db.delete('outbox', where: 'operation_id = ?', whereArgs: [opId]);
     });
+  });
+
+  test('Generic PAYMENT outbox is quarantined without an HTTP push', () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    await db.insert('outbox', {
+      'operation_id': 'legacy-payment-op',
+      'entity_type': 'PAYMENT',
+      'entity_id': 'payment-1',
+      'operation_type': 'CREATE',
+      'payload': jsonEncode({'amount': 10.0}),
+      'status': 'PENDING',
+      'attempt_count': 0,
+      'created_at': '2026-01-01T00:00:00.000Z',
+    });
+    var httpCalled = false;
+    final client = MockHttpClientWithCustomResponses((request) async {
+      httpCalled = true;
+      return http.Response('unexpected', 500);
+    });
+    final engine = SyncEngine(
+      apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+    );
+
+    final summary = await engine.pushPendingOutbox(lease: _testLease(db));
+
+    expect(httpCalled, isFalse);
+    expect(summary.totalProcessed, 0);
+    final row = (await db.query(
+      'outbox',
+      where: 'operation_id = ?',
+      whereArgs: ['legacy-payment-op'],
+    ))
+        .single;
+    expect(row['status'], 'REQUIRES_ATTENTION');
+    expect(row['last_error'], 'FINANCE_COMMAND_REQUIRED');
   });
 }

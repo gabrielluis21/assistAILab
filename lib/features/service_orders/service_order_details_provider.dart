@@ -10,6 +10,7 @@ import '../../core/sync/sync_trigger.dart';
 import '../auth/application/auth_provider.dart';
 import '../auth/domain/entities/session_state.dart';
 import 'service_orders_provider.dart';
+import '../../core/money/money_minor.dart';
 
 typedef _SessionDatabaseBinding = ({
   AuthenticatedSessionKey sessionKey,
@@ -47,13 +48,16 @@ class ServiceOrderItemsNotifier
     String? partId,
     required String description,
     required int quantity,
-    required double unitPrice,
+    required MoneyMinor unitPrice,
   }) async {
     final binding = _captureBinding(
       ref.read(authenticatedSessionKeyProvider),
     );
     const uuid = Uuid();
-    final totalPrice = quantity * unitPrice;
+    final totalPrice = unitPrice.multiplyByQuantity(
+      quantity,
+      maximum: MoneyMinor.serviceOrderMaximum,
+    );
     final item = ServiceOrderItemEntity(
       id: uuid.v4(),
       serviceOrderId: serviceOrderId,
@@ -87,8 +91,10 @@ class ServiceOrderItemsNotifier
       // Recalculate OS total amount inside transaction
       final allItems =
           await itemRepo.listByOrder(serviceOrderId, executor: txn);
-      final newTotal =
-          allItems.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
+      final newTotal = MoneyMinor.sum(
+        allItems.map((item) => item.totalPrice),
+        maximum: MoneyMinor.serviceOrderMaximum,
+      );
 
       final existingOrder =
           await orderRepo.findById(serviceOrderId, executor: txn);
@@ -141,7 +147,7 @@ class ServiceOrderItemsNotifier
           entityType: 'SERVICE_ORDER_ITEM',
           entityId: itemId,
           operationType: 'DELETE',
-          payload: SyncPayloadMapper.delete(itemId),
+          payload: SyncPayloadMapper.serviceOrderItemDelete(serviceOrderId),
           createdAt: DateTime.now().toIso8601String(),
         ),
         executor: txn,
@@ -150,8 +156,10 @@ class ServiceOrderItemsNotifier
       // Recalculate OS total inside transaction
       final remaining =
           await itemRepo.listByOrder(serviceOrderId, executor: txn);
-      final newTotal =
-          remaining.fold<double>(0.0, (sum, i) => sum + i.totalPrice);
+      final newTotal = MoneyMinor.sum(
+        remaining.map((item) => item.totalPrice),
+        maximum: MoneyMinor.serviceOrderMaximum,
+      );
 
       final existingOrder =
           await orderRepo.findById(serviceOrderId, executor: txn);

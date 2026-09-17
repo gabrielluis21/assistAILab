@@ -1,4 +1,5 @@
 import '../../core/domain/unsupported_domain_value_exception.dart';
+import '../../core/money/money_minor.dart';
 
 enum ServiceOrderStatusEnum {
   draft,
@@ -84,14 +85,14 @@ extension ServiceOrderStatusExtension on ServiceOrderStatusEnum {
 class ServiceOrderEntity {
   final String id;
   final int? friendlyId;
-  final String customerId;
+  final String? customerId;
   final String equipmentId;
   final String? technicianId;
   final ServiceOrderStatusEnum status;
   final String problemDescription;
   final String? diagnosis;
   final String? solution;
-  final double totalAmount;
+  final MoneyMinor totalAmount;
   final String updatedAt;
 
   ServiceOrderEntity({
@@ -104,7 +105,7 @@ class ServiceOrderEntity {
     required this.problemDescription,
     this.diagnosis,
     this.solution,
-    this.totalAmount = 0.0,
+    this.totalAmount = MoneyMinor.zero,
     required this.updatedAt,
   });
 
@@ -118,7 +119,7 @@ class ServiceOrderEntity {
     String? problemDescription,
     String? diagnosis,
     String? solution,
-    double? totalAmount,
+    MoneyMinor? totalAmount,
     String? updatedAt,
   }) {
     return ServiceOrderEntity(
@@ -147,7 +148,7 @@ class ServiceOrderEntity {
       'problem_description': problemDescription,
       'diagnosis': diagnosis,
       'solution': solution,
-      'total_amount': totalAmount,
+      'total_amount_minor': totalAmount.minorUnits,
       'updated_at': updatedAt,
     };
   }
@@ -163,7 +164,7 @@ class ServiceOrderEntity {
       problemDescription: map['problem_description'],
       diagnosis: map['diagnosis'],
       solution: map['solution'],
-      totalAmount: (map['total_amount'] as num?)?.toDouble() ?? 0.0,
+      totalAmount: MoneyMinor.serviceOrderFromJson(map['total_amount_minor']),
       updatedAt: map['updated_at'],
     );
   }
