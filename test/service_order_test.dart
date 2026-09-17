@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_orders_provider.dart';
+import 'package:assistailab/core/money/money_minor.dart';
 
 void main() {
   group('Service Order State Machine Tests', () {
@@ -38,7 +39,7 @@ void main() {
         equipmentId: 'eq-01',
         status: ServiceOrderStatusEnum.emExecucao,
         problemDescription: 'Tela quebrada',
-        totalAmount: 450.0,
+        totalAmount: MoneyMinor.serviceOrder(45000),
         updatedAt: '2026-08-11T10:00:00Z',
       );
 
@@ -48,7 +49,7 @@ void main() {
       final restored = ServiceOrderEntity.fromMap(map);
       expect(restored.id, equals(order.id));
       expect(restored.status, equals(ServiceOrderStatusEnum.emExecucao));
-      expect(restored.totalAmount, equals(450.0));
+      expect(restored.totalAmount, equals(MoneyMinor.serviceOrder(45000)));
     });
   });
 }

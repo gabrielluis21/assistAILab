@@ -107,6 +107,19 @@ class ApiClient {
     );
   }
 
+  Future<http.Response> getBoundWithHeaders(
+    String endpoint,
+    BoundCredential credential, {
+    Map<String, String> headers = const {},
+  }) async {
+    final requestHeaders = await _getHeadersBound(credential)
+      ..addAll(headers);
+    return _client.get(
+      Uri.parse('$baseUrl$endpoint'),
+      headers: requestHeaders,
+    );
+  }
+
   Future<http.Response> post(
     String endpoint, {
     Map<String, dynamic>? body,
@@ -146,6 +159,36 @@ class ApiClient {
     return _client.post(
       Uri.parse('$baseUrl$endpoint'),
       headers: headers,
+      body: body != null ? jsonEncode(body) : null,
+    );
+  }
+
+  Future<http.Response> postBoundWithHeaders(
+    String endpoint,
+    BoundCredential credential, {
+    Map<String, dynamic>? body,
+    Map<String, String> headers = const {},
+  }) async {
+    final requestHeaders = await _getHeadersBound(credential)
+      ..addAll(headers);
+    return _client.post(
+      Uri.parse('$baseUrl$endpoint'),
+      headers: requestHeaders,
+      body: body != null ? jsonEncode(body) : null,
+    );
+  }
+
+  Future<http.Response> patchBoundWithHeaders(
+    String endpoint,
+    BoundCredential credential, {
+    Map<String, dynamic>? body,
+    Map<String, String> headers = const {},
+  }) async {
+    final requestHeaders = await _getHeadersBound(credential)
+      ..addAll(headers);
+    return _client.patch(
+      Uri.parse('$baseUrl$endpoint'),
+      headers: requestHeaders,
       body: body != null ? jsonEncode(body) : null,
     );
   }

@@ -1,23 +1,28 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
+
+import '../../core/money/money_minor.dart';
+import '../auth/application/auth_provider.dart';
+import '../auth/application/session_api_client.dart';
+import 'payment_command_gateway.dart';
 import 'payment_entity.dart';
 import 'payment_repository.dart';
-import '../../core/database/outbox_dao.dart';
-import '../../core/sync/sync_providers.dart';
-import '../../core/sync/sync_trigger.dart';
 
 final paymentRepositoryProvider = Provider<PaymentRepository>(
   (ref) => PaymentLocalDataSource(),
 );
 
-// Dashboard summary data
+final paymentCommandGatewayProvider = Provider<PaymentCommandGateway>(
+  (ref) => PaymentHttpCommandGateway(ref.watch(sessionApiClientProvider)),
+);
+
 class FinanceSummary {
-  final double totalRevenue;
-  final double monthRevenue;
-  final double pendingAmount;
+  final MoneyMinor totalRevenue;
+  final MoneyMinor monthRevenue;
+  final MoneyMinor pendingAmount;
   final int totalPayments;
   final int pendingPayments;
-  final Map<PaymentMethod, double> revenueByMethod;
+  final Map<PaymentMethod, MoneyMinor> revenueByMethod;
 
   const FinanceSummary({
     required this.totalRevenue,
@@ -29,97 +34,72 @@ class FinanceSummary {
   });
 }
 
-// Main payments list provider
 class PaymentsNotifier extends AsyncNotifier<List<PaymentEntity>> {
   @override
   Future<List<PaymentEntity>> build() => _load();
 
-  Future<List<PaymentEntity>> _load() =>
-      ref.read(paymentRepositoryProvider).listAll();
+  Future<List<PaymentEntity>> _load() async {
+    final repository = ref.read(paymentRepositoryProvider);
+    if (!ref.read(isOnlineSessionProvider)) return repository.listAll();
+
+    final authoritative =
+        await ref.read(paymentCommandGatewayProvider).listAll();
+    final authoritativeIds = authoritative.map((payment) => payment.id).toSet();
+    final cached = await repository.listAll();
+    for (final payment in authoritative) {
+      await repository.upsert(payment);
+    }
+    for (final payment in cached) {
+      if (!authoritativeIds.contains(payment.id)) {
+        await repository.deleteById(payment.id);
+      }
+    }
+    return authoritative;
+  }
 
   Future<void> createPayment({
     required String serviceOrderId,
-    required String customerId,
-    required double amount,
+    required MoneyMinor amount,
     required PaymentMethod method,
     String? notes,
   }) async {
-    const uuid = Uuid();
-    final now = DateTime.now().toIso8601String();
-    final payment = PaymentEntity(
-      id: uuid.v4(),
+    if (amount.minorUnits == 0) {
+      throw ArgumentError.value(amount, 'amount', 'Payment must be positive.');
+    }
+    final repository = ref.read(paymentRepositoryProvider);
+    final coordinator = PaymentAuthorityCoordinator(
+      gateway: ref.read(paymentCommandGatewayProvider),
+      commit: repository.upsert,
+    );
+    await coordinator.create(
+      operationId: const Uuid().v4(),
       serviceOrderId: serviceOrderId,
-      customerId: customerId,
       amount: amount,
       method: method,
-      status: PaymentStatus.pending,
       notes: notes,
-      createdAt: now,
-      updatedAt: now,
     );
-
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-
-    await repo.upsert(payment);
-
-    await outbox.insert(OutboxItem(
-      operationId: uuid.v4(),
-      entityType: 'PAYMENT',
-      entityId: payment.id,
-      operationType: 'CREATE',
-      payload: payment.toMap(),
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
     state = AsyncData(await _load());
   }
 
-  Future<void> confirmPayment(String id) async {
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-    final now = DateTime.now().toIso8601String();
+  Future<void> confirmPayment(String id) =>
+      _transition(id, PaymentStatus.confirmed);
 
-    await repo.updateStatus(id, PaymentStatus.confirmed, paidAt: now);
+  Future<void> cancelPayment(String id) =>
+      _transition(id, PaymentStatus.cancelled);
 
-    await outbox.insert(OutboxItem(
+  Future<void> _transition(String id, PaymentStatus requested) async {
+    // Do not mutate the local business status before the authoritative command
+    // response returns. A failed command therefore preserves the snapshot.
+    final repository = ref.read(paymentRepositoryProvider);
+    final coordinator = PaymentAuthorityCoordinator(
+      gateway: ref.read(paymentCommandGatewayProvider),
+      commit: repository.upsert,
+    );
+    await coordinator.transition(
       operationId: const Uuid().v4(),
-      entityType: 'PAYMENT',
-      entityId: id,
-      operationType: 'UPDATE',
-      payload: {
-        'id': id,
-        'status': PaymentStatus.confirmed.toDbString(),
-        'paid_at': now
-      },
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
-    state = AsyncData(await _load());
-  }
-
-  Future<void> cancelPayment(String id) async {
-    final repo = ref.read(paymentRepositoryProvider);
-    final outbox = ref.read(outboxDaoProvider);
-    final now = DateTime.now().toIso8601String();
-
-    await repo.updateStatus(id, PaymentStatus.cancelled);
-
-    await outbox.insert(OutboxItem(
-      operationId: const Uuid().v4(),
-      entityType: 'PAYMENT',
-      entityId: id,
-      operationType: 'UPDATE',
-      payload: {'id': id, 'status': PaymentStatus.cancelled.toDbString()},
-      createdAt: now,
-    ));
-
-    ref.read(syncSchedulerProvider).requestSync(SyncTrigger.localMutation);
-
+      paymentId: id,
+      status: requested,
+    );
     state = AsyncData(await _load());
   }
 
@@ -134,27 +114,31 @@ final paymentsProvider =
   PaymentsNotifier.new,
 );
 
-// Finance summary provider
+Map<PaymentMethod, MoneyMinor> aggregateConfirmedRevenueByMethod(
+  Iterable<PaymentEntity> payments,
+) {
+  final result = <PaymentMethod, MoneyMinor>{};
+  for (final payment
+      in payments.where((value) => value.status == PaymentStatus.confirmed)) {
+    result[payment.method] =
+        (result[payment.method] ?? MoneyMinor.zero).add(payment.amount);
+  }
+  return result;
+}
+
 final financeSummaryProvider = FutureProvider<FinanceSummary>((ref) async {
   final payments = await ref.watch(paymentsProvider.future);
-  final repo = ref.read(paymentRepositoryProvider);
-
+  final repository = ref.read(paymentRepositoryProvider);
   final totalRevenue =
-      await repo.totalRevenue(statusFilter: PaymentStatus.confirmed);
-  final monthRevenue = await repo.revenueThisMonth();
+      await repository.totalRevenue(statusFilter: PaymentStatus.confirmed);
+  final monthRevenue = await repository.revenueThisMonth();
   final pendingAmount =
-      await repo.totalRevenue(statusFilter: PaymentStatus.pending);
+      await repository.totalRevenue(statusFilter: PaymentStatus.pending);
+  final pendingPayments = payments
+      .where((payment) => payment.status == PaymentStatus.pending)
+      .length;
 
-  final pendingPayments =
-      payments.where((p) => p.status == PaymentStatus.pending).length;
-
-  // Revenue by method (confirmed only)
-  final confirmedPayments =
-      payments.where((p) => p.status == PaymentStatus.confirmed);
-  final Map<PaymentMethod, double> revenueByMethod = {};
-  for (final p in confirmedPayments) {
-    revenueByMethod[p.method] = (revenueByMethod[p.method] ?? 0.0) + p.amount;
-  }
+  final revenueByMethod = aggregateConfirmedRevenueByMethod(payments);
 
   return FinanceSummary(
     totalRevenue: totalRevenue,

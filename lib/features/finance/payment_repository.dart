@@ -1,6 +1,7 @@
 import 'package:sqflite/sqflite.dart';
 import '../../core/database/sqlite_database.dart';
 import 'payment_entity.dart';
+import '../../core/money/money_minor.dart';
 
 abstract class PaymentRepository {
   Future<List<PaymentEntity>> listAll();
@@ -10,8 +11,8 @@ abstract class PaymentRepository {
   Future<void> upsert(PaymentEntity payment);
   Future<void> updateStatus(String id, PaymentStatus status, {String? paidAt});
   Future<void> deleteById(String id);
-  Future<double> totalRevenue({PaymentStatus? statusFilter});
-  Future<double> revenueThisMonth();
+  Future<MoneyMinor> totalRevenue({PaymentStatus? statusFilter});
+  Future<MoneyMinor> revenueThisMonth();
 }
 
 class PaymentLocalDataSource implements PaymentRepository {
@@ -90,26 +91,28 @@ class PaymentLocalDataSource implements PaymentRepository {
   }
 
   @override
-  Future<double> totalRevenue({PaymentStatus? statusFilter}) async {
+  Future<MoneyMinor> totalRevenue({PaymentStatus? statusFilter}) async {
     final db = await _db;
     final where = statusFilter != null ? 'status = ?' : null;
     final whereArgs = statusFilter != null ? [statusFilter.toDbString()] : null;
     final result = await db.rawQuery(
-      'SELECT SUM(amount) as total FROM payments${where != null ? ' WHERE $where' : ''}',
+      'SELECT SUM(amount_minor) as total FROM payments${where != null ? ' WHERE $where' : ''}',
       whereArgs,
     );
-    return (result.first['total'] as num?)?.toDouble() ?? 0.0;
+    final total = result.first['total'];
+    return MoneyMinor.fromJson(total ?? 0);
   }
 
   @override
-  Future<double> revenueThisMonth() async {
+  Future<MoneyMinor> revenueThisMonth() async {
     final db = await _db;
     final now = DateTime.now();
     final startOfMonth = DateTime(now.year, now.month, 1).toIso8601String();
     final result = await db.rawQuery(
-      "SELECT SUM(amount) as total FROM payments WHERE status = 'CONFIRMED' AND paid_at >= ?",
+      "SELECT SUM(amount_minor) as total FROM payments WHERE status = 'CONFIRMED' AND paid_at >= ?",
       [startOfMonth],
     );
-    return (result.first['total'] as num?)?.toDouble() ?? 0.0;
+    final total = result.first['total'];
+    return MoneyMinor.fromJson(total ?? 0);
   }
 }

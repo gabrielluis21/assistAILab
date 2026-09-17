@@ -5,10 +5,8 @@ import 'package:sqflite/sqflite.dart';
 import '../network/api_client.dart';
 import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
-import '../../features/equipment/equipment_entity.dart';
-import '../../features/finance/payment_entity.dart';
-import '../../features/service_orders/service_order_entity.dart';
 import 'sync_lease.dart';
+import 'sync_projection_applier.dart';
 
 /// HTTP response failure returned by a Sync endpoint.
 final class SyncHttpException implements Exception {
@@ -85,6 +83,137 @@ class SyncEngine {
     );
   }
 
+  Future<void> ensureV2Bootstrap({required SyncLease lease}) async {
+    if (!lease.isStillValid || lease.db == null) return;
+    final db = lease.db!;
+    final metadata = await db.query(
+      'sync_metadata',
+      where: 'key IN (?, ?, ?)',
+      whereArgs: [
+        'sync_contract_version',
+        'sync_bootstrap_proof',
+        'last_cursor',
+      ],
+    );
+    final values = {
+      for (final row in metadata) row['key'] as String: row['value'] as String,
+    };
+    if (values['sync_contract_version'] == '2' &&
+        (values['sync_bootstrap_proof']?.isNotEmpty ?? false) &&
+        (values['last_cursor']?.isNotEmpty ?? false)) {
+      return;
+    }
+
+    const pageSize = 100;
+    String? continuationToken;
+    String? bootstrapCursor;
+    String? bootstrapProof;
+    final records = <Map<String, dynamic>>[];
+    do {
+      if (!lease.isStillValid) return;
+      final response = await apiClient.postBound(
+        '/sync/bootstrap',
+        lease.credential,
+        body: {
+          'contractVersion': 2,
+          'limit': pageSize,
+          if (continuationToken != null) 'continuationToken': continuationToken,
+        },
+      ).timeout(const Duration(seconds: 15));
+      if (!lease.isStillValid) return;
+      if (response.statusCode != 200) {
+        throw SyncHttpException(
+          statusCode: response.statusCode,
+          operation: 'bootstrap',
+          responseBody: response.body,
+        );
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic> ||
+          decoded['contractVersion'] != 2 ||
+          decoded['complete'] is! bool) {
+        throw const FormatException('Invalid sync v2 bootstrap response.');
+      }
+      final cursor = decoded['bootstrapCursor'];
+      if (cursor is! String ||
+          !RegExp(r'^(0|[1-9][0-9]*)$').hasMatch(cursor) ||
+          bootstrapCursor != null && bootstrapCursor != cursor) {
+        throw const FormatException('Invalid sync v2 bootstrap cursor.');
+      }
+      bootstrapCursor = cursor;
+      final pageRecords = decoded['records'];
+      if (pageRecords is! List) {
+        throw const FormatException('Invalid sync v2 bootstrap records.');
+      }
+      for (final record in pageRecords) {
+        if (record is! Map<String, dynamic>) {
+          throw const FormatException('Invalid sync v2 bootstrap record.');
+        }
+        records.add(record);
+      }
+      final complete = decoded['complete'] as bool;
+      if (complete) {
+        if (decoded['continuationToken'] != null ||
+            decoded['bootstrapProof'] is! String ||
+            (decoded['bootstrapProof'] as String).isEmpty) {
+          throw const FormatException('Incomplete sync v2 bootstrap proof.');
+        }
+        bootstrapProof = decoded['bootstrapProof'] as String;
+        continuationToken = null;
+      } else {
+        if (decoded['bootstrapProof'] != null ||
+            decoded['continuationToken'] is! String ||
+            (decoded['continuationToken'] as String).isEmpty) {
+          throw const FormatException('Invalid bootstrap continuation.');
+        }
+        continuationToken = decoded['continuationToken'] as String;
+      }
+    } while (continuationToken != null);
+
+    if (!lease.isStillValid) return;
+    await db.transaction((txn) async {
+      await SyncProjectionApplier.replaceBootstrap(txn, records);
+      for (final entry in {
+        'sync_contract_version': '2',
+        'sync_bootstrap_proof': bootstrapProof,
+        'last_cursor': bootstrapCursor,
+      }.entries) {
+        await txn.insert(
+          'sync_metadata',
+          {'key': entry.key, 'value': entry.value},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  Future<String> _requiredBootstrapProof(DatabaseExecutor db) async {
+    final result = await db.query(
+      'sync_metadata',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: ['sync_bootstrap_proof'],
+      limit: 1,
+    );
+    final proof = result.isEmpty ? null : result.first['value'];
+    if (proof is! String || proof.isEmpty) {
+      throw StateError('Sync v2 bootstrap proof is unavailable.');
+    }
+    return proof;
+  }
+
+  Future<void> _invalidateV2Bootstrap(Database db) async {
+    await db.delete(
+      'sync_metadata',
+      where: 'key IN (?, ?, ?)',
+      whereArgs: [
+        'sync_contract_version',
+        'sync_bootstrap_proof',
+        'last_cursor',
+      ],
+    );
+  }
+
   /// Calculates next retry timestamp using Exponential Backoff + Jitter
   DateTime calculateNextRetryAt(int attemptCount) {
     const baseDelaySeconds = 2;
@@ -102,39 +231,60 @@ class SyncEngine {
     SyncLease? lease,
   }) async {
     assertWebNoSqlite();
+    if (lease == null) return const SyncPushSummary();
     // 1. Validate lease lifecycle
-    if (lease != null && !lease.isStillValid) {
+    if (!lease.isStillValid) {
       return const SyncPushSummary();
     }
 
     // A leased native cycle must never fall through to the process-global DB.
-    if (lease != null && lease.db == null) {
+    if (lease.db == null) {
       return const SyncPushSummary();
     }
 
     // 2. Validate explicit credential (fail-closed before any DB mutations or HTTP)
-    if (lease != null && !lease.credential.hasValidToken) {
+    if (!lease.credential.hasValidToken) {
       return const SyncPushSummary();
     }
 
+    await ensureV2Bootstrap(lease: lease);
+    if (!lease.isStillValid) return const SyncPushSummary();
+
     // 3. Resolve/use bound DB
-    final targetDb =
-        lease != null ? lease.db! : db ?? await SqliteDatabase.instance;
+    final targetDb = lease.db!;
 
     // 4. Read pending entries
-    final pendingEntries = await outboxDao.getPendingEntries(
+    final rawPendingEntries = await outboxDao.getPendingEntries(
       limit: batchSize,
       executor: targetDb,
     );
+    final pendingEntries = <OutboxItem>[];
+    for (final entry in rawPendingEntries) {
+      final type = entry.entityType.toUpperCase();
+      if (type == 'PAYMENT' || type == 'PART') {
+        await outboxDao.updateStatus(
+          entry.operationId,
+          'REQUIRES_ATTENTION',
+          lastError: type == 'PAYMENT'
+              ? 'FINANCE_COMMAND_REQUIRED'
+              : 'PART_TENANCY_REQUIRED',
+          executor: targetDb,
+        );
+      } else {
+        pendingEntries.add(entry);
+      }
+    }
     if (pendingEntries.isEmpty) {
       return const SyncPushSummary();
     }
 
-    if (lease != null && !lease.isStillValid) {
+    if (!lease.isStillValid) {
       return const SyncPushSummary();
     }
 
+    final proof = await _requiredBootstrapProof(targetDb);
     final payload = {
+      'contractVersion': 2,
       'entries': pendingEntries.map((e) => e.toApiPayload()).toList(),
     };
 
@@ -149,7 +299,7 @@ class SyncEngine {
       );
     }
 
-    if (lease != null && !lease.isStillValid) {
+    if (!lease.isStillValid) {
       return const SyncPushSummary();
     }
 
@@ -159,16 +309,14 @@ class SyncEngine {
     int conflict = 0;
 
     try {
-      final response = await (lease != null
-              ? apiClient.postBound(
-                  '/sync/push',
-                  lease.credential,
-                  body: payload,
-                )
-              : apiClient.post('/sync/push', body: payload))
-          .timeout(const Duration(seconds: 15));
+      final response = await apiClient.postBoundWithHeaders(
+        '/sync/push',
+        lease.credential,
+        body: payload,
+        headers: {'X-Sync-Bootstrap-Proof': proof},
+      ).timeout(const Duration(seconds: 15));
 
-      if (lease != null && !lease.isStillValid) {
+      if (!lease.isStillValid) {
         return SyncPushSummary(
           totalProcessed: pendingEntries.length,
           syncedCount: synced,
@@ -281,46 +429,55 @@ class SyncEngine {
     Database? db,
     SyncLease? lease,
   }) async {
-    if (lease != null && !lease.isStillValid) {
+    if (lease == null) return const SyncPullSummary();
+    if (!lease.isStillValid) {
       return const SyncPullSummary();
     }
     // A leased native cycle must never fall through to the process-global DB.
-    if (lease != null && lease.db == null) {
+    if (lease.db == null) {
       return const SyncPullSummary();
     }
     // Fail-closed credential guard for the pull phase.
-    if (lease != null && !lease.credential.hasValidToken) {
+    if (!lease.credential.hasValidToken) {
       return const SyncPullSummary();
     }
-    final targetDb =
-        lease != null ? lease.db! : db ?? await SqliteDatabase.instance;
+
+    await ensureV2Bootstrap(lease: lease);
+    if (!lease.isStillValid) return const SyncPullSummary();
+    final targetDb = lease.db!;
     int totalPulled = 0;
     String? previousCursor = await getLocalCursor(executor: targetDb);
     String? latestCursor = previousCursor;
+    final proof = await _requiredBootstrapProof(targetDb);
     int pageCount = 0;
 
     while (pageCount < maxPullPagesPerCycle) {
-      if (lease != null && !lease.isStillValid) {
+      if (!lease.isStillValid) {
         break;
       }
 
-      final cursorParam = (latestCursor != null && latestCursor.isNotEmpty)
-          ? '?cursor=$latestCursor&limit=$pullPageSize'
-          : '?limit=$pullPageSize';
+      if (latestCursor == null || latestCursor.isEmpty) {
+        throw StateError('Sync v2 cursor is unavailable after bootstrap.');
+      }
+      final cursorParam =
+          '?contractVersion=2&cursor=$latestCursor&limit=$pullPageSize';
 
-      final response = await (lease != null
-              ? apiClient.getBound(
-                  '/sync/changes$cursorParam',
-                  lease.credential,
-                )
-              : apiClient.get('/sync/changes$cursorParam'))
-          .timeout(const Duration(seconds: 15));
+      final response = await apiClient.getBoundWithHeaders(
+        '/sync/changes$cursorParam',
+        lease.credential,
+        headers: {'X-Sync-Bootstrap-Proof': proof},
+      ).timeout(const Duration(seconds: 15));
 
-      if (lease != null && !lease.isStillValid) {
+      if (!lease.isStillValid) {
         break;
       }
 
       if (response.statusCode != 200) {
+        if (response.statusCode == 409 &&
+            (response.body.contains('SYNC_V2_REFRESH_REQUIRED') ||
+                response.body.contains('SYNC_V2_BOOTSTRAP_REQUIRED'))) {
+          await _invalidateV2Bootstrap(targetDb);
+        }
         throw SyncHttpException(
           statusCode: response.statusCode,
           operation: 'pull',
@@ -337,177 +494,10 @@ class SyncEngine {
       // BEGIN ATOMIC TRANSACTION (Changes + Cursor) bound to targetDb
       await targetDb.transaction((txn) async {
         for (final change in changes) {
-          final entityType = (change['entityType'] as String).toUpperCase();
-          final entityId = change['entityId'] as String;
-          final opType = change['operationType'] as String;
-          final data = (change['data'] as Map<String, dynamic>?) ?? {};
-
-          if (entityType == 'CUSTOMER') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'customers',
-                {
-                  'id': entityId,
-                  'name': data['name'] ?? '',
-                  'document': data['document'],
-                  'email': data['email'],
-                  'phone': data['phone'],
-                  'address': data['address'],
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn
-                  .delete('customers', where: 'id = ?', whereArgs: [entityId]);
-            }
-          } else if (entityType == 'EQUIPMENT') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'equipments',
-                {
-                  'id': entityId,
-                  'customer_id': data['customer_id'] ?? data['customerId'],
-                  'organization_id':
-                      data['organization_id'] ?? data['organizationId'],
-                  'owner_type': EquipmentOwnerType.fromDbValue(
-                    data['owner_type'] ?? data['ownerType'],
-                  ).wireValue,
-                  'organization_purpose':
-                      EquipmentOrganizationPurpose.fromNullableDbValue(
-                    data['organization_purpose'] ?? data['organizationPurpose'],
-                  )?.wireValue,
-                  'type': data['type'] ?? '',
-                  'brand': data['brand'] ?? '',
-                  'model': data['model'] ?? '',
-                  'serial_number':
-                      data['serial_number'] ?? data['serialNumber'],
-                  'notes': data['notes'],
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn
-                  .delete('equipments', where: 'id = ?', whereArgs: [entityId]);
-            }
-          } else if (entityType == 'SERVICE_ORDER') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'service_orders',
-                {
-                  'id': entityId,
-                  'friendly_id': data['friendly_id'] ?? data['friendlyId'],
-                  'organization_id':
-                      data['organization_id'] ?? data['organizationId'],
-                  'customer_id':
-                      data['customer_id'] ?? data['customerId'] ?? '',
-                  'equipment_id':
-                      data['equipment_id'] ?? data['equipmentId'] ?? '',
-                  'technician_id':
-                      data['technician_id'] ?? data['technicianId'],
-                  'status': ServiceOrderStatusExtension.fromDbString(
-                    data['status'],
-                  ).toDbString(),
-                  'problem_description': data['problem_description'] ??
-                      data['problemDescription'] ??
-                      '',
-                  'diagnosis': data['diagnosis'],
-                  'solution': data['solution'],
-                  'total_amount':
-                      data['total_amount'] ?? data['totalAmount'] ?? 0.0,
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn.delete('service_orders',
-                  where: 'id = ?', whereArgs: [entityId]);
-            }
-          } else if (entityType == 'SERVICE_ORDER_ITEM') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'service_order_items',
-                {
-                  'id': entityId,
-                  'service_order_id':
-                      data['service_order_id'] ?? data['serviceOrderId'] ?? '',
-                  'part_id': data['part_id'] ?? data['partId'],
-                  'description': data['description'] ?? '',
-                  'quantity': data['quantity'] ?? 1,
-                  'unit_price': data['unit_price'] ?? data['unitPrice'] ?? 0.0,
-                  'total_price':
-                      data['total_price'] ?? data['totalPrice'] ?? 0.0,
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn.delete('service_order_items',
-                  where: 'id = ?', whereArgs: [entityId]);
-            }
-          } else if (entityType == 'PART') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'parts',
-                {
-                  'id': entityId,
-                  'name': data['name'] ?? '',
-                  'sku': data['sku'] ?? '',
-                  'price': data['price'] ?? 0.0,
-                  'cost_price': data['cost_price'] ?? data['costPrice'] ?? 0.0,
-                  'stock_quantity':
-                      data['stock_quantity'] ?? data['stockQuantity'] ?? 0,
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn.delete('parts', where: 'id = ?', whereArgs: [entityId]);
-            }
-          } else if (entityType == 'PAYMENT') {
-            if (opType == 'CREATE' || opType == 'UPDATE') {
-              await txn.insert(
-                'payments',
-                {
-                  'id': entityId,
-                  'service_order_id':
-                      data['service_order_id'] ?? data['serviceOrderId'] ?? '',
-                  'customer_id':
-                      data['customer_id'] ?? data['customerId'] ?? '',
-                  'amount': data['amount'] ?? 0.0,
-                  'method': PaymentMethodExtension.fromDbString(
-                    data['method'],
-                  ).toDbString(),
-                  'status': PaymentStatusExtension.fromDbString(
-                    data['status'],
-                  ).toDbString(),
-                  'notes': data['notes'],
-                  'paid_at': data['paid_at'] ?? data['paidAt'],
-                  'created_at': data['created_at'] ??
-                      data['createdAt'] ??
-                      DateTime.now().toIso8601String(),
-                  'updated_at': data['updated_at'] ??
-                      data['updatedAt'] ??
-                      DateTime.now().toIso8601String(),
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            } else if (opType == 'DELETE') {
-              await txn
-                  .delete('payments', where: 'id = ?', whereArgs: [entityId]);
-            }
-          }
+          await SyncProjectionApplier.applyChange(
+            txn,
+            Map<String, dynamic>.from(change as Map),
+          );
         }
 
         // Persist nextCursor atomically inside the transaction

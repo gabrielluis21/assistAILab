@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/money/money_minor.dart';
 import 'dashboard_provider.dart';
 import '../service_orders/service_order_entity.dart';
 import '../service_orders/service_orders_provider.dart';
@@ -293,7 +294,7 @@ class DashboardPage extends ConsumerWidget {
         final cards = [
           _RevenueCard(
             label: 'Receita Total',
-            value: 'R\$ ${metrics.totalRevenue.toStringAsFixed(2)}',
+            value: formatMoneyMinor(metrics.totalRevenue),
             sub: 'confirmados',
             icon: Icons.attach_money,
             color: const Color(
@@ -302,7 +303,7 @@ class DashboardPage extends ConsumerWidget {
           ),
           _RevenueCard(
             label: 'Este Mês',
-            value: 'R\$ ${metrics.monthRevenue.toStringAsFixed(2)}',
+            value: formatMoneyMinor(metrics.monthRevenue),
             sub: 'mês atual',
             icon: Icons.calendar_today,
             color: const Color(
@@ -311,7 +312,7 @@ class DashboardPage extends ConsumerWidget {
           ),
           _RevenueCard(
             label: 'A Receber',
-            value: 'R\$ ${metrics.pendingRevenue.toStringAsFixed(2)}',
+            value: formatMoneyMinor(metrics.pendingRevenue),
             sub: '${metrics.paymentsToConfirm} pagamentos',
             icon: Icons.hourglass_top,
             color: const Color(
@@ -538,7 +539,7 @@ class _PendingPaymentsList extends ConsumerWidget {
                           ),
                         ),
                         Text(
-                          'R\$ ${p.amount.toStringAsFixed(2)}',
+                          formatMoneyMinor(p.amount),
                           style: const TextStyle(
                             color: Color(0xFFF59E0B),
                             fontWeight: FontWeight.bold,

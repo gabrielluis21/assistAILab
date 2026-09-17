@@ -1,11 +1,13 @@
+import '../../core/money/money_minor.dart';
+
 class ServiceOrderItemEntity {
   final String id;
   final String serviceOrderId;
   final String? partId;
   final String description;
   final int quantity;
-  final double unitPrice;
-  final double totalPrice;
+  final MoneyMinor unitPrice;
+  final MoneyMinor totalPrice;
   final String updatedAt;
 
   ServiceOrderItemEntity({
@@ -26,8 +28,8 @@ class ServiceOrderItemEntity {
       'part_id': partId,
       'description': description,
       'quantity': quantity,
-      'unit_price': unitPrice,
-      'total_price': totalPrice,
+      'unit_price_minor': unitPrice.minorUnits,
+      'total_price_minor': totalPrice.minorUnits,
       'updated_at': updatedAt,
     };
   }
@@ -40,10 +42,8 @@ class ServiceOrderItemEntity {
       partId: (map['part_id'] ?? map['partId']) as String?,
       description: map['description'] as String,
       quantity: (map['quantity'] as num).toInt(),
-      unitPrice:
-          ((map['unit_price'] ?? map['unitPrice'] ?? 0.0) as num).toDouble(),
-      totalPrice:
-          ((map['total_price'] ?? map['totalPrice'] ?? 0.0) as num).toDouble(),
+      unitPrice: MoneyMinor.serviceOrderFromJson(map['unit_price_minor']),
+      totalPrice: MoneyMinor.serviceOrderFromJson(map['total_price_minor']),
       updatedAt: (map['updated_at'] ?? map['updatedAt'] ?? '') as String,
     );
   }

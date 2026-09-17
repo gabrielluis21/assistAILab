@@ -59,7 +59,9 @@ class ServiceOrderLocalDataSource implements ServiceOrderRepository {
 
     final maps = await db.query(
       'service_orders',
-      where: 'customer_id = ?',
+      // CUSTOMER v2 intentionally omits customerId. This database is already
+      // auth-scoped, so NULL identifies the minimized owned projection only.
+      where: 'customer_id = ? OR customer_id IS NULL',
       whereArgs: [customerId],
       orderBy: 'updated_at DESC',
     );

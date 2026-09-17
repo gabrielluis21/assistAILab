@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'payment_entity.dart';
 import 'payments_provider.dart';
+import '../../core/money/money_minor.dart';
 
 class FinancePage extends ConsumerWidget {
   const FinancePage({super.key});
@@ -88,7 +89,7 @@ class FinancePage extends ConsumerWidget {
               Expanded(
                 child: _SummaryCard(
                   label: 'Receita Total',
-                  value: 'R\$ ${summary.totalRevenue.toStringAsFixed(2)}',
+                  value: formatMoneyMinor(summary.totalRevenue),
                   icon: Icons.trending_up,
                   color: const Color(0xFF10B981),
                 ),
@@ -97,7 +98,7 @@ class FinancePage extends ConsumerWidget {
               Expanded(
                 child: _SummaryCard(
                   label: 'Este Mês',
-                  value: 'R\$ ${summary.monthRevenue.toStringAsFixed(2)}',
+                  value: formatMoneyMinor(summary.monthRevenue),
                   icon: Icons.calendar_month,
                   color: const Color(0xFF38BDF8),
                 ),
@@ -106,7 +107,7 @@ class FinancePage extends ConsumerWidget {
               Expanded(
                 child: _SummaryCard(
                   label: 'Pendente',
-                  value: 'R\$ ${summary.pendingAmount.toStringAsFixed(2)}',
+                  value: formatMoneyMinor(summary.pendingAmount),
                   icon: Icons.hourglass_empty,
                   color: const Color(0xFFF59E0B),
                 ),
@@ -122,7 +123,7 @@ class FinancePage extends ConsumerWidget {
     );
   }
 
-  Widget _buildMethodBreakdown(Map<PaymentMethod, double> byMethod) {
+  Widget _buildMethodBreakdown(Map<PaymentMethod, MoneyMinor> byMethod) {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -148,7 +149,7 @@ class FinancePage extends ConsumerWidget {
               return Chip(
                 backgroundColor: const Color(0xFF0F172A),
                 label: Text(
-                  '${entry.key.label}: R\$ ${entry.value.toStringAsFixed(2)}',
+                  '${entry.key.label}: ${formatMoneyMinor(entry.value)}',
                   style: const TextStyle(color: Colors.white70, fontSize: 11),
                 ),
               );
@@ -327,7 +328,7 @@ class _PaymentCard extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      'R\$ ${payment.amount.toStringAsFixed(2)}',
+                      formatMoneyMinor(payment.amount),
                       style: TextStyle(
                         color: _statusColor,
                         fontWeight: FontWeight.bold,
@@ -415,7 +416,6 @@ class _CreatePaymentDialog extends ConsumerStatefulWidget {
 class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
   final _formKey = GlobalKey<FormState>();
   final _soIdCtrl = TextEditingController();
-  final _customerIdCtrl = TextEditingController();
   final _amountCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
   PaymentMethod _method = PaymentMethod.pix;
@@ -424,7 +424,6 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
   @override
   void dispose() {
     _soIdCtrl.dispose();
-    _customerIdCtrl.dispose();
     _amountCtrl.dispose();
     _notesCtrl.dispose();
     super.dispose();
@@ -436,8 +435,7 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
     try {
       await ref.read(paymentsProvider.notifier).createPayment(
             serviceOrderId: _soIdCtrl.text.trim(),
-            customerId: _customerIdCtrl.text.trim(),
-            amount: double.parse(_amountCtrl.text.trim()),
+            amount: parseMoneyInput(_amountCtrl.text, allowZero: false),
             method: _method,
             notes:
                 _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
@@ -473,16 +471,20 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
               const SizedBox(height: 20),
               _field(_soIdCtrl, 'ID da Ordem de Serviço', required: true),
               const SizedBox(height: 12),
-              _field(_customerIdCtrl, 'ID do Cliente', required: true),
-              const SizedBox(height: 12),
               _field(
                 _amountCtrl,
                 'Valor (R\$)',
                 required: true,
-                keyboardType: TextInputType.number,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
                 validator: (v) {
                   if (v == null || v.isEmpty) return 'Campo obrigatório';
-                  if (double.tryParse(v) == null) return 'Valor inválido';
+                  try {
+                    parseMoneyInput(v, allowZero: false);
+                  } catch (_) {
+                    return 'Valor inválido';
+                  }
                   return null;
                 },
               ),
@@ -580,8 +582,9 @@ class _CreatePaymentDialogState extends ConsumerState<_CreatePaymentDialog> {
       ),
       validator: validator ??
           (v) {
-            if (required && (v == null || v.isEmpty))
+            if (required && (v == null || v.isEmpty)) {
               return 'Campo obrigatório';
+            }
             return null;
           },
     );

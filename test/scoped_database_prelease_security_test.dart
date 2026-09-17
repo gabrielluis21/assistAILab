@@ -52,6 +52,20 @@ final class _SequencedSameFileOpener {
   }
 }
 
+Future<void> _activateSyncV2(Database db, {String cursor = '0'}) async {
+  for (final entry in {
+    'sync_contract_version': '2',
+    'sync_bootstrap_proof': 'test-bootstrap-proof',
+    'last_cursor': cursor,
+  }.entries) {
+    await db.insert(
+      'sync_metadata',
+      {'key': entry.key, 'value': entry.value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+}
+
 final class _RecordingOutboxDao extends OutboxDao {
   int recoveryCalls = 0;
   int countCalls = 0;
@@ -649,6 +663,7 @@ void main() {
         'typed_http_exception.db',
       );
       databasesToClose.add(database);
+      await _activateSyncV2(database);
       final transport = _RecordingHttpClient(
         statusCode: 503,
         body: 'temporarily unavailable',

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/money/money_minor.dart';
 import 'service_orders_provider.dart';
 import 'service_order_entity.dart';
 import 'service_order_detail_page.dart';
@@ -323,10 +324,10 @@ class _ServiceOrderCard extends ConsumerWidget {
               order.problemDescription,
               style: const TextStyle(fontSize: 14, color: Colors.white70),
             ),
-            if (order.totalAmount > 0) ...[
+            if (order.totalAmount.minorUnits > 0) ...[
               const SizedBox(height: 8),
               Text(
-                'Total: R\$ ${order.totalAmount.toStringAsFixed(2)}',
+                'Total: ${formatMoneyMinor(order.totalAmount)}',
                 style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF4ADE80),

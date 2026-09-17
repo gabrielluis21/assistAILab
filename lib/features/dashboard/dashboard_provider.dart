@@ -5,6 +5,7 @@ import '../customers/customers_provider.dart';
 import '../equipment/equipments_provider.dart';
 import '../finance/payments_provider.dart';
 import '../auth/application/auth_provider.dart';
+import '../../core/money/money_minor.dart';
 
 class DashboardMetrics {
   final int totalOrders;
@@ -14,9 +15,9 @@ class DashboardMetrics {
   final int ordersDelivered;
   final int totalCustomers;
   final int totalEquipments;
-  final double monthRevenue;
-  final double totalRevenue;
-  final double pendingRevenue;
+  final MoneyMinor monthRevenue;
+  final MoneyMinor totalRevenue;
+  final MoneyMinor pendingRevenue;
   final int paymentsToConfirm;
 
   const DashboardMetrics({

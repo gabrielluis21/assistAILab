@@ -1,9 +1,11 @@
+import '../../core/money/money_minor.dart';
+
 class PartEntity {
   final String id;
   final String name;
   final String sku;
-  final double price;
-  final double costPrice;
+  final MoneyMinor price;
+  final MoneyMinor costPrice;
   final int stockQuantity;
   final String updatedAt;
 
@@ -22,8 +24,8 @@ class PartEntity {
       'id': id,
       'name': name,
       'sku': sku,
-      'price': price,
-      'cost_price': costPrice,
+      'price_minor': price.minorUnits,
+      'cost_price_minor': costPrice.minorUnits,
       'stock_quantity': stockQuantity,
       'updated_at': updatedAt,
     };
@@ -34,9 +36,8 @@ class PartEntity {
       id: map['id'] as String,
       name: map['name'] as String,
       sku: map['sku'] as String,
-      price: (map['price'] as num).toDouble(),
-      costPrice:
-          ((map['cost_price'] ?? map['costPrice'] ?? 0.0) as num).toDouble(),
+      price: MoneyMinor.serviceOrderFromJson(map['price_minor']),
+      costPrice: MoneyMinor.serviceOrderFromJson(map['cost_price_minor']),
       stockQuantity:
           (map['stock_quantity'] ?? map['stockQuantity'] ?? 0) as int,
       updatedAt: (map['updated_at'] ?? map['updatedAt'] ?? '') as String,

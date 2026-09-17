@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/money/money_minor.dart';
 import 'parts_provider.dart';
 import 'part_entity.dart';
 
@@ -100,6 +101,12 @@ class PartsPage extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              const Text(
+                'Cadastro bloqueado até o Backend disponibilizar o contrato '
+                'autoritativo de tenancy para PART.',
+                style: TextStyle(color: Colors.amberAccent),
+              ),
+              const SizedBox(height: 12),
               _buildTextField(nameController, 'Nome do Item *', Icons.label),
               const SizedBox(height: 12),
               _buildTextField(
@@ -107,11 +114,13 @@ class PartsPage extends ConsumerWidget {
               const SizedBox(height: 12),
               _buildTextField(
                   priceController, 'Preço de Venda (R\$) *', Icons.attach_money,
-                  keyboardType: TextInputType.number),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true)),
               const SizedBox(height: 12),
               _buildTextField(
                   costController, 'Preço de Custo (R\$)', Icons.money_off,
-                  keyboardType: TextInputType.number),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true)),
               const SizedBox(height: 12),
               _buildTextField(
                   stockController, 'Qtd em Estoque *', Icons.warehouse,
@@ -128,30 +137,11 @@ class PartsPage extends ConsumerWidget {
           ElevatedButton(
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF0284C7)),
-            onPressed: () async {
-              if (nameController.text.trim().isEmpty ||
-                  skuController.text.trim().isEmpty ||
-                  priceController.text.trim().isEmpty) {
-                return;
-              }
-              final price = double.tryParse(
-                      priceController.text.trim().replaceAll(',', '.')) ??
-                  0.0;
-              final cost = double.tryParse(
-                      costController.text.trim().replaceAll(',', '.')) ??
-                  0.0;
-              final stock = int.tryParse(stockController.text.trim()) ?? 0;
-
-              await ref.read(partsProvider.notifier).createPart(
-                    name: nameController.text.trim(),
-                    sku: skuController.text.trim(),
-                    price: price,
-                    costPrice: cost,
-                    stockQuantity: stock,
-                  );
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
-            child: const Text('Salvar', style: TextStyle(color: Colors.white)),
+            onPressed: null,
+            child: const Text(
+              'Indisponível',
+              style: TextStyle(color: Colors.white),
+            ),
           ),
         ],
       ),
@@ -227,7 +217,7 @@ class _PartCard extends ConsumerWidget {
             Row(
               children: [
                 Text(
-                  'Preço: R\$ ${part.price.toStringAsFixed(2)}',
+                  'Preço: ${formatMoneyMinor(part.price)}',
                   style: const TextStyle(
                       color: Color(0xFF4ADE80),
                       fontWeight: FontWeight.w600,
@@ -256,9 +246,10 @@ class _PartCard extends ConsumerWidget {
             ),
           ],
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          onPressed: () => ref.read(partsProvider.notifier).deletePart(part.id),
+        trailing: const IconButton(
+          icon: Icon(Icons.delete_outline, color: Colors.redAccent),
+          tooltip: 'Indisponível: contrato PART pendente no Backend',
+          onPressed: null,
         ),
       ),
     );

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/money/money_minor.dart';
 
 import '../../service_orders/service_order_entity.dart';
 import '../application/customer_service_orders_provider.dart';
@@ -191,7 +192,7 @@ class _ServiceOrderCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    _formatCurrency(
+                    formatCustomerServiceOrderCurrency(
                       order.totalAmount,
                     ),
                     style: const TextStyle(
@@ -369,8 +370,8 @@ _StatusInfo _statusInfo(
   }
 }
 
-String _formatCurrency(
-  double value,
+String formatCustomerServiceOrderCurrency(
+  MoneyMinor value,
 ) {
-  return 'R\$ ${value.toStringAsFixed(2).replaceAll('.', ',')}';
+  return formatMoneyMinor(value);
 }
