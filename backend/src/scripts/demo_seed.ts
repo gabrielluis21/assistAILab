@@ -79,13 +79,16 @@ export async function runDemoSeed() {
   const app = buildApp();
   try {
     await app.ready();
+    if (await prisma.operationIdempotency.findUnique({ where: { operationId: demoId('operation:delivered:deliver') } })) {
+      throw new Error('DEMO_LEGACY_DELIVERY_REQUIRES_FRESH_DATABASE');
+    }
     await seedIdentities(password);
     const headers = Object.fromEntries(accounts.map(account => [account.key, {
       authorization: `Bearer ${app.jwt.sign({ sub: demoId(`user:${account.key}`), name: account.name, role: account.role,
         organizationId: account.tenant ? demoId(`organization:${account.tenant}`) : null,
         customerId: account.customer ? demoId(`customer:${account.customer}`) : null })}`,
     }]));
-    async function request(actor: string, method: 'POST' | 'GET', url: string, payload?: Record<string, unknown>, extra: Record<string, string> = {}) {
+    async function request(actor: string, method: 'POST' | 'GET' | 'PATCH', url: string, payload?: Record<string, unknown>, extra: Record<string, string> = {}) {
       const response = await app.inject({ method, url, headers: { ...headers[actor], ...extra }, ...(payload ? { payload } : {}) });
       assert.ok(response.statusCode >= 200 && response.statusCode < 300, `${method} ${url}: ${response.statusCode} ${response.body}`);
       return response.json();
@@ -120,6 +123,7 @@ export async function runDemoSeed() {
             assert.equal(response.results?.[0]?.status, 'SYNCED', JSON.stringify(response));
           },
           post: (path, payload, operationId, customer) => request(customer ? scenario.customer : staff, 'POST', path, payload, { 'x-operation-id': operationId }),
+          patch: (path, payload, operationId) => request(staff, 'PATCH', path, payload, { 'x-operation-id': operationId }),
         });
       }
     }

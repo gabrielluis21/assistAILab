@@ -6,6 +6,7 @@
 } from 'node:test';
 
 import assert from 'node:assert/strict';
+import { legacyMoneyToMinor } from '../../core/money/money.js';
 
 import {
   randomUUID,
@@ -3864,15 +3865,12 @@ describe(
       );
 
       assert.equal(
-        approved.json().order.status,
+        approved.json().status,
         ServiceOrderStatus.EM_EXECUCAO
       );
 
       assert.equal(
-        approved
-          .json()
-          .order
-          .lastApprovedQuoteRevisionId,
+        approved.json().quoteDecision.quoteRevisionId,
         publishedQuoteRevisionId
       );
 
@@ -3976,23 +3974,29 @@ describe(
         publishedQuoteRevisionId
       );
 
+      const payment = await app.inject({ method: 'POST', url: '/api/v1/payments',
+        headers: { authorization: `Bearer ${adminToken}`, 'x-operation-id': randomUUID() },
+        payload: { serviceOrderId: created.id, amountMinor: legacyMoneyToMinor(ready.json().receivable.totalAmount), method: 'PIX' } });
+      assert.equal(payment.statusCode, 201, payment.body);
+      const confirmation = await app.inject({ method: 'PATCH', url: `/api/v1/payments/${payment.json().payment.id}/status`,
+        headers: { authorization: `Bearer ${adminToken}`, 'x-operation-id': randomUUID() }, payload: { status: 'CONFIRMED' } });
+      assert.equal(confirmation.statusCode, 200, confirmation.body);
+      const deliveryOperationId = randomUUID();
       const delivered =
         await app.inject({
           method:
-            'PATCH',
+            'POST',
 
           url:
-            `/api/v1/service-orders/${created.id}/status`,
+            `/api/v1/service-orders/${created.id}/mark-delivered`,
 
           headers: {
             authorization:
               `Bearer ${adminToken}`,
+            'x-operation-id': deliveryOperationId,
           },
 
-          payload: {
-            newStatus:
-              ServiceOrderStatus.ENTREGUE,
-          },
+          payload: {},
         });
 
       assert.equal(
@@ -4001,6 +4005,7 @@ describe(
       );
 
       return {
+        deliveryOperationId,
         orderId:
           created.id,
 
@@ -4313,20 +4318,18 @@ describe(
         const retry =
           await app.inject({
             method:
-              'PATCH',
+              'POST',
 
             url:
-              `/api/v1/service-orders/${result.orderId}/status`,
+              `/api/v1/service-orders/${result.orderId}/mark-delivered`,
 
             headers: {
               authorization:
                 `Bearer ${adminToken}`,
+              'x-operation-id': result.deliveryOperationId,
             },
 
-            payload: {
-              newStatus:
-                ServiceOrderStatus.ENTREGUE,
-            },
+            payload: {},
           });
 
         assert.equal(

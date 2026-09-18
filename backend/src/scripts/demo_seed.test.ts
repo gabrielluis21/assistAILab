@@ -18,8 +18,9 @@ function recorder() {
     post: async (path, payload, operationId, customer) => {
       z.string().uuid().parse(operationId);
       calls.push({ path, payload, operationId, customer });
-      return { quoteRevision: { id: demoId(`server-result:${operationId}`) } };
+      return { quoteRevision: { id: demoId(`server-result:${operationId}`) }, payment: { id: demoId(`payment:${operationId}`) } };
     },
+    patch: async (path, payload, operationId) => { calls.push({ path, payload, operationId }); return {}; },
   };
   return { transport, calls };
 }
@@ -61,6 +62,18 @@ test('demo stops after a rejected application command instead of fabricating lat
   run.transport.post = async () => { commands++; throw new Error('command rejected'); };
   await assert.rejects(seedDemoScenario(demoScenarios.find(s => s.stage === 'ready')!, run.transport), /command rejected/);
   assert.equal(commands, 1);
+});
+
+test('demo delivery settles through dedicated Payment commands before mark-delivered', async () => {
+  const run = recorder();
+  await seedDemoScenario(demoScenarios.find(s => s.stage === 'delivered')!, run.transport);
+  const calls = run.calls as any[];
+  const payment = calls.findIndex(c => c.path === '/api/v1/payments');
+  assert.ok(payment >= 0);
+  assert.equal(calls[payment].payload.amountMinor, 24180);
+  assert.equal(calls[payment + 1].payload.status, 'CONFIRMED');
+  assert.ok(calls[payment + 2].path.endsWith('/mark-delivered'));
+  assert.equal(calls.some(c => c.entry?.payload.status === 'ENTREGUE'), false);
 });
 
 test('demo CUSTOMER verification rejects internal root fields and item references', () => {

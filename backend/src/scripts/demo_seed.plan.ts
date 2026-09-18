@@ -27,6 +27,7 @@ export type DemoScenario = typeof demoScenarios[number];
 export type DemoTransport = {
   push(entry: OutboxEntry): Promise<void>;
   post(path: string, payload: Record<string, unknown>, operationId: string, customer: boolean): Promise<unknown>;
+  patch(path: string, payload: Record<string, unknown>, operationId: string): Promise<unknown>;
 };
 
 const quoteResult = z.object({ quoteRevision: z.object({ id: z.string().uuid() }) });
@@ -58,7 +59,12 @@ export async function seedDemoScenario(scenario: DemoScenario, transport: DemoTr
   if (scenario.stage === 'executing') return;
   if (scenario.stage === 'ready' || scenario.stage === 'delivered') {
     await post('ready', 'mark-ready', { notes: 'Reparo concluído e equipamento testado em bancada.' });
-    if (scenario.stage === 'delivered') await push('deliver', 'SERVICE_ORDER', orderId, { status: 'ENTREGUE' }, 'UPDATE');
+    if (scenario.stage === 'delivered') {
+      const payment = z.object({ payment: z.object({ id: z.string().uuid() }) }).parse(await transport.post(
+        '/api/v1/payments', { serviceOrderId: orderId, amountMinor: 24180, method: 'PIX' }, op('payment-create'), false));
+      await transport.patch(`/api/v1/payments/${payment.payment.id}/status`, { status: 'CONFIRMED' }, op('payment-confirm'));
+      await post('deliver-settled', 'mark-delivered', {});
+    }
     return;
   }
   const revised = quoteResult.parse(await post('revise', 'quotes/revise', {

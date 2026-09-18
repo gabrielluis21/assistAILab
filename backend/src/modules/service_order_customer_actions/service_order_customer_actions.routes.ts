@@ -1,6 +1,7 @@
 import {
   FastifyInstance,
 } from 'fastify';
+import { customerQuoteHandler } from '../service_order_finance/customer_quote.controller.js';
 
 import {
   customerCancelReturnHandler,
@@ -32,6 +33,8 @@ export async function serviceOrderCustomerActionRoutes(
         'ADMIN',
         'TECHNICIAN',
       ]);
+
+  fastify.get('/:id/customer-quote', { preValidation: [auth, customerOnly] }, customerQuoteHandler);
 
   /**
    * C5:
