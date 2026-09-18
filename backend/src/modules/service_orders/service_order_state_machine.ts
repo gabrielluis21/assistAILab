@@ -64,8 +64,8 @@ export function isFinanceCommandOnlyStatusTransition(
    *
    * Once a v2 ServiceOrder reaches PRONTO, the Receivable already
    * exists. Generic cancellation would split operational and financial
-   * truth, so cancellation from this point must fail closed until a
-   * dedicated finance-aware command is formally introduced.
+   * truth. Delivery also requires its dedicated settlement-aware command;
+   * generic cancellation remains closed.
    *
    * Legacy ServiceOrders (financeCoreVersion NULL) keep their previous
    * FIN-F01 transition behavior.
@@ -74,8 +74,7 @@ export function isFinanceCommandOnlyStatusTransition(
     financeCoreVersion === 2 &&
     currentStatus ===
       ServiceOrderStatus.PRONTO &&
-    newStatus ===
-      ServiceOrderStatus.CANCELADO
+    (newStatus === ServiceOrderStatus.CANCELADO || newStatus === ServiceOrderStatus.ENTREGUE)
   ) {
     return true;
   }

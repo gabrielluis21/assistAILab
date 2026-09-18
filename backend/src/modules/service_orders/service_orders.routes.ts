@@ -1,4 +1,5 @@
 import { getServiceOrderProjectionHandler } from './service_order_projection.controller.js';
+import { markDeliveredHandler } from '../service_order_finance/mark_delivered.controller.js';
 import {
   FastifyInstance,
 } from 'fastify';
@@ -30,6 +31,8 @@ import {
 export async function serviceOrderRoutes(
   fastify: FastifyInstance
 ) {
+  fastify.post('/:id/mark-delivered', { preValidation: [(fastify as any).authenticate,
+    (fastify as any).authorize(['ADMIN', 'TECHNICIAN'])] }, markDeliveredHandler);
   fastify.get('/:id/projection', { preValidation: [(fastify as any).authenticate] }, getServiceOrderProjectionHandler);
   /**
    * Lista OS.

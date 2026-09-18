@@ -9,13 +9,15 @@ Data: 2026-09-16. Substitui a recomendação anterior de usar apenas o seed lega
 - Nove equipamentos, nove OS e dezoito itens de serviço sem vínculo com PART global.
 - Cenários: diagnóstico; aguardando aprovação; execução; pronto; entregue; aguardando reaprovação; revisão rejeitada; retomada do escopo aprovado; aprovação pendente na segunda assistência.
 - Orçamento inicial: 15000 + 2 × 4590 = 24180 centavos (R$ 241,80). Revisões comerciais: 15000 + 2 × 5590 = 26180 centavos (R$ 261,80). O servidor calcula e persiste todos os totais.
-- As OS pronta e entregue passam pelo comando mark-ready, que gera a conta a receber. Não são fabricados pagamentos nem baixas: esses cenários permitem demonstrar recebíveis em aberto.
+- As OS pronta e entregue passam pelo comando mark-ready, que gera a conta a receber. A pronta mantém o recebível aberto. Com FE03-BE-P01, o cenário entregue cria e confirma um pagamento PIX de 24180 minor pelos comandos REST antes de chamar mark-delivered. Nenhum pagamento é fabricado diretamente no banco.
 
 As identidades e relações iniciais são criadas sob syncTransaction. OS e itens usam o Push v2 real, com autenticação e prova obtida por travessia completa do bootstrap. Publicação, aprovação/rejeição pelo cliente, revisão, retomada e conclusão usam os endpoints existentes por Fastify.inject (o mesmo pipeline da API, sem precisar abrir uma porta). Nunca gravamos QuoteRevision, hashes, snapshots financeiros, totais ou status comerciais diretamente no Prisma.
 
 Ao final, o seed confere projeções staff/CUSTOMER, total calculado pelos itens, revisão decimal, ausência de campos internos no CUSTOMER, negação de acesso de outra assistência e bootstrap paginado de todas as contas. A prova usada pelo script não é exportada nem substitui o bootstrap do aplicativo.
 
 ## Reexecução
+
+FE03-BE-P01 altera o contrato de entrega: use um banco demo novo para este cenário. Uma demonstração antiga já entregue sem quitação não é migrada nem reparada pelo seed; o comando de entrega falha fechado. Não apague operações nem altere hashes para forçar replay.
 
 IDs e operationIds são determinísticos e separados das fixtures antigas. Reexecutar reproduz os mesmos comandos para obter replay idempotente. Não redefine senhas existentes, não limpa histórico, não altera hashes, não reinicia PROCESSING nem restaura edições feitas manualmente. Se um comando falhar, o script interrompe e mostra a resposta; corrigir a causa antes de repetir. O seed inteiro não é uma única transação: cenários anteriores podem ter concluído quando ocorrer uma falha, e a repetição usa os mesmos IDs para retomar.
 

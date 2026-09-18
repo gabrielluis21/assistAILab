@@ -1,3 +1,4 @@
+import { customerQuoteDecisionResponse } from '../service_order_finance/customer_quote.projection.js';
 import {
   FastifyReply,
   FastifyRequest,
@@ -282,7 +283,7 @@ export async function customerQuoteDecisionHandler(
 
   return executeFinanceCommand(
     reply,
-    () =>
+    async () => customerQuoteDecisionResponse(await
       customerQuoteDecisionFinanceService
         .decideExactQuoteRevision(
           customerId,
@@ -300,6 +301,6 @@ export async function customerQuoteDecisionHandler(
               body
                 .reason,
           }
-        )
+        ))
   );
 }
