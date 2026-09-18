@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import '../commands/command_intent.dart';
 import 'assert_web_no_sqlite.dart';
 import 'auth_scoped_database_manager.dart';
 import '../money/legacy_money_major_adapter.dart';
@@ -11,7 +12,7 @@ import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
 class SqliteDatabase {
-  static const schemaVersion = 6;
+  static const schemaVersion = 7;
 
   /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
   ///
@@ -58,13 +59,17 @@ class SqliteDatabase {
         if (oldVersion < 6) {
           await _migrateV5ToV6(db);
         }
+
+        if (oldVersion < 7) {
+          await _migrateV6ToV7(db, requireLegacyTable: oldVersion >= 6);
+        }
       },
       onOpen: (db) async {
         await _createTables(db);
 
         // Compatibilidade defensiva para instalações antigas que
         // já estavam marcadas como v4 com schema físico incompleto.
-        await _verifyV6Schema(db);
+        await _verifyV7Schema(db);
       },
     );
   }
@@ -175,30 +180,7 @@ class SqliteDatabase {
       )
     ''');
 
-    // Payment-specific durable command identity. This intentionally remains
-    // inside the auth-scoped SQLite database and is not a generic FE-03
-    // command journal.
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS payment_command_intents (
-        operation_id TEXT PRIMARY KEY,
-        command_type TEXT NOT NULL,
-        target_id TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        lifecycle_state TEXT NOT NULL CHECK (
-          lifecycle_state IN (
-            'PENDING', 'SENDING', 'UNKNOWN', 'COMPLETED', 'REJECTED'
-          )
-        ),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    ''');
-    await db.execute('''
-      CREATE UNIQUE INDEX IF NOT EXISTS
-        payment_command_intents_unresolved_identity
-      ON payment_command_intents(command_type, target_id, payload_json)
-      WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')
-    ''');
+    await _createCommandIntentTable(db);
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS inventory_movements (
@@ -218,6 +200,30 @@ class SqliteDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       )
+    ''');
+  }
+
+  static Future<void> _createCommandIntentTable(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS command_intents (
+        operation_id TEXT PRIMARY KEY,
+        command_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        lifecycle_state TEXT NOT NULL CHECK (
+          lifecycle_state IN (
+            'PENDING', 'SENDING', 'UNKNOWN', 'COMPLETED', 'REJECTED'
+          )
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS
+        command_intents_unresolved_identity
+      ON command_intents(command_type, target_id, payload_json)
+      WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')
     ''');
   }
 
@@ -316,6 +322,14 @@ class SqliteDatabase {
   /// and therefore calls [_migrateV5ToV6] directly.
   static Future<void> migrateV5ToV6(Database db) =>
       db.transaction(_migrateV5ToV6);
+
+  /// Transactional v6 -> v7 durable command migration. Exposed for
+  /// deterministic migration tests; normal upgrades use the same body inside
+  /// sqflite's upgrade transaction.
+  static Future<void> migrateV6ToV7(Database db) => db.transaction((txn) async {
+        await _createCommandIntentTable(txn);
+        await _migrateV6ToV7(txn, requireLegacyTable: true);
+      });
 
   static Future<void> _migrateV5ToV6(DatabaseExecutor db) async {
     final serviceOrders = await _convertedRows(
@@ -481,6 +495,108 @@ class SqliteDatabase {
     }
   }
 
+  static Future<void> _migrateV6ToV7(
+    DatabaseExecutor db, {
+    required bool requireLegacyTable,
+  }) async {
+    final legacyExists = await _tableExists(db, 'payment_command_intents');
+    if (!legacyExists) {
+      if (requireLegacyTable) {
+        throw StateError(
+          'SQLite v6 payment command authority table is missing.',
+        );
+      }
+      if ((await db.query('command_intents')).isNotEmpty) {
+        throw StateError('Unexpected command authority before v7 migration.');
+      }
+      return;
+    }
+
+    const expectedColumns = {
+      'operation_id',
+      'command_type',
+      'target_id',
+      'payload_json',
+      'lifecycle_state',
+      'created_at',
+      'updated_at',
+    };
+    final legacyColumns = await _columnNames(db, 'payment_command_intents');
+    if (legacyColumns.length != expectedColumns.length ||
+        !legacyColumns.containsAll(expectedColumns)) {
+      throw StateError('SQLite v6 payment command schema is malformed.');
+    }
+    if ((await db.query('command_intents')).isNotEmpty) {
+      throw StateError('SQLite v7 command authority is not empty.');
+    }
+
+    const commandMapping = {
+      'CREATE': 'PAYMENT_CREATE',
+      'CONFIRM': 'PAYMENT_CONFIRM',
+      'CANCEL': 'PAYMENT_CANCEL',
+    };
+    final legacyRows = await db.query(
+      'payment_command_intents',
+      orderBy: 'created_at, operation_id',
+    );
+    final migratedRows = <Map<String, Object?>>[];
+    final unresolvedIdentities = <String>{};
+    for (final legacy in legacyRows) {
+      final mappedType = commandMapping[legacy['command_type']];
+      if (mappedType == null) {
+        throw const FormatException(
+          'Unsupported legacy Payment command type.',
+        );
+      }
+      final mapped = <String, Object?>{
+        'operation_id': legacy['operation_id'],
+        'command_type': mappedType,
+        'target_id': legacy['target_id'],
+        'payload_json': legacy['payload_json'],
+        'lifecycle_state': legacy['lifecycle_state'],
+        'created_at': legacy['created_at'],
+        'updated_at': legacy['updated_at'],
+      };
+      final intent = CommandIntent.fromMap(mapped);
+      if (intent.lifecycle.isUnresolved) {
+        final identity = '${intent.commandType}\u0000${intent.targetId}'
+            '\u0000${intent.canonicalPayload}';
+        if (!unresolvedIdentities.add(identity)) {
+          throw StateError(
+            'Contradictory unresolved legacy command identity.',
+          );
+        }
+      }
+      migratedRows.add(mapped);
+    }
+
+    for (final row in migratedRows) {
+      await db.insert('command_intents', row);
+    }
+    final verification = await db.query(
+      'command_intents',
+      orderBy: 'created_at, operation_id',
+    );
+    if (verification.length != migratedRows.length) {
+      throw StateError('SQLite v7 command migration count mismatch.');
+    }
+    for (var index = 0; index < verification.length; index++) {
+      final expected = migratedRows[index];
+      final actual = verification[index];
+      for (final column in expectedColumns) {
+        if (actual[column] != expected[column]) {
+          throw StateError('SQLite v7 command migration mismatch.');
+        }
+      }
+      CommandIntent.fromMap(actual);
+    }
+
+    await db.execute('DROP TABLE payment_command_intents');
+    if (await _tableExists(db, 'payment_command_intents')) {
+      throw StateError('Legacy Payment command authority was not removed.');
+    }
+  }
+
   static Future<List<Map<String, Object?>>> _convertedRows(
     DatabaseExecutor db,
     String table,
@@ -542,8 +658,43 @@ class SqliteDatabase {
     }
   }
 
+  static Future<void> _verifyV7Schema(Database db) async {
+    await _verifyV6Schema(db);
+    if (await _tableExists(db, 'payment_command_intents')) {
+      throw StateError('Legacy Payment command authority remains in v7.');
+    }
+    const expectedColumns = {
+      'operation_id',
+      'command_type',
+      'target_id',
+      'payload_json',
+      'lifecycle_state',
+      'created_at',
+      'updated_at',
+    };
+    final columns = await _columnNames(db, 'command_intents');
+    if (columns.length != expectedColumns.length ||
+        !columns.containsAll(expectedColumns)) {
+      throw StateError('SQLite v7 command intent schema is incomplete.');
+    }
+  }
+
+  static Future<bool> _tableExists(
+    DatabaseExecutor db,
+    String table,
+  ) async {
+    final rows = await db.query(
+      'sqlite_master',
+      columns: ['name'],
+      where: "type = 'table' AND name = ?",
+      whereArgs: [table],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
   static Future<Set<String>> _columnNames(
-    Database db,
+    DatabaseExecutor db,
     String table,
   ) async {
     final result = await db.rawQuery(

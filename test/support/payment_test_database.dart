@@ -23,7 +23,7 @@ Future<Database> openPaymentTestDatabase() async {
           )
         ''');
         await db.execute('''
-          CREATE TABLE payment_command_intents (
+          CREATE TABLE command_intents (
             operation_id TEXT PRIMARY KEY,
             command_type TEXT NOT NULL,
             target_id TEXT NOT NULL,
@@ -38,8 +38,8 @@ Future<Database> openPaymentTestDatabase() async {
           )
         ''');
         await db.execute('''
-          CREATE UNIQUE INDEX payment_command_intents_unresolved_identity
-          ON payment_command_intents(command_type, target_id, payload_json)
+          CREATE UNIQUE INDEX command_intents_unresolved_identity
+          ON command_intents(command_type, target_id, payload_json)
           WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')
         ''');
       },

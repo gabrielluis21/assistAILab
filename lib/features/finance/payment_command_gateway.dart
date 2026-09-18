@@ -1,18 +1,16 @@
 import 'dart:convert';
 import 'dart:async';
 
+import '../../core/commands/command_failure.dart';
 import '../../core/money/money_minor.dart';
 import '../auth/application/session_api_client.dart';
 import 'payment_entity.dart';
 
-final class PaymentCommandException implements Exception {
-  final int statusCode;
-  final String message;
-
-  const PaymentCommandException(this.statusCode, this.message);
+final class PaymentCommandException extends CommandException {
+  const PaymentCommandException(super.statusCode, super.errorCode);
 
   @override
-  String toString() => 'PaymentCommandException($statusCode): $message';
+  String toString() => 'PaymentCommandException($statusCode): $errorCode';
 }
 
 abstract interface class PaymentCommandGateway {
