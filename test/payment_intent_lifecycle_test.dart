@@ -243,7 +243,7 @@ void main() {
   test('operationId reuse with a changed canonical payload fails closed',
       () async {
     final first = await intents.getOrCreate(
-      commandType: PaymentCommandType.create,
+      commandType: PaymentCommandType.create.wireValue,
       targetId: 'order-1',
       payload: {'amountMinor': 100, 'serviceOrderId': 'order-1'},
       operationIdFactory: () => 'fixed-operation',
@@ -253,7 +253,7 @@ void main() {
 
     await expectLater(
       intents.getOrCreate(
-        commandType: PaymentCommandType.create,
+        commandType: PaymentCommandType.create.wireValue,
         targetId: 'order-1',
         payload: {'amountMinor': 200, 'serviceOrderId': 'order-1'},
         operationIdFactory: () => 'fixed-operation',
@@ -303,7 +303,7 @@ void main() {
   test('app restart recovers SENDING as UNKNOWN and retains operationId',
       () async {
     final stored = await intents.getOrCreate(
-      commandType: PaymentCommandType.create,
+      commandType: PaymentCommandType.create.wireValue,
       targetId: 'order-1',
       payload: {
         'amountMinor': 250,
@@ -437,7 +437,7 @@ PaymentCommandIntentExecutor _executor(
 }
 
 Future<List<Map<String, Object?>>> _intentRows(Database db) =>
-    db.query('payment_command_intents', orderBy: 'created_at, operation_id');
+    db.query('command_intents', orderBy: 'created_at, operation_id');
 
 PaymentEntity _payment({
   String id = 'payment-1',

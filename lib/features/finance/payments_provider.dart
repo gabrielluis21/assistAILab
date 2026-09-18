@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/commands/command_intent.dart';
 import '../../core/database/auth_scoped_database_manager.dart';
 import '../../core/money/money_minor.dart';
 import '../auth/application/auth_provider.dart';
@@ -21,8 +22,8 @@ final paymentRepositoryProvider = Provider<PaymentRepository>(
 );
 
 final paymentCommandIntentRepositoryProvider =
-    Provider<PaymentCommandIntentRepository>(
-  (ref) => PaymentCommandIntentLocalDataSource(),
+    Provider<CommandIntentRepository>(
+  (ref) => CommandIntentLocalDataSource(),
 );
 
 final paymentCommandGatewayProvider = Provider<PaymentCommandGateway>(
