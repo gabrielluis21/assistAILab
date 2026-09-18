@@ -47,10 +47,25 @@ export function assertDeliverySettlement(
   }
   for (const payment of payments) {
     if (!sameScope(payment)) invalid();
+    const amount = BigInt(decimalToMinorUnits(payment.amount));
+    if (amount <= 0n) invalid();
     const allocated = byPayment.get(payment.id) ?? 0n;
-    if (payment.status === 'CONFIRMED') {
-      if (!payment.paidAt || payment.cancelledAt || allocated <= 0n || allocated !== BigInt(decimalToMinorUnits(payment.amount))) invalid();
-    } else if (allocated !== 0n) invalid();
+    switch (payment.status) {
+      case 'PENDING':
+        if (payment.paidAt !== null || payment.confirmedByUserId !== null ||
+            payment.cancelledAt !== null || payment.cancelledByUserId !== null || allocated !== 0n) invalid();
+        break;
+      case 'CONFIRMED':
+        if (!payment.paidAt || !payment.confirmedByUserId || payment.cancelledAt !== null ||
+            payment.cancelledByUserId !== null || allocated !== amount) invalid();
+        break;
+      case 'CANCELLED':
+        if (!payment.cancelledAt || !payment.cancelledByUserId || payment.paidAt !== null ||
+            payment.confirmedByUserId !== null || allocated !== 0n) invalid();
+        break;
+      default:
+        invalid();
+    }
   }
   for (const installment of installments) {
     if ((byInstallment.get(installment.id) ?? 0n) > BigInt(decimalToMinorUnits(installment.amount))) invalid();

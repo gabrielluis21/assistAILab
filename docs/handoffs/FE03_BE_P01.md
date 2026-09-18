@@ -27,6 +27,8 @@ Response:
 
 `decisionMode` can also be `REAPPROVAL`. Diagnosis/changeReason are nullable. The explicit action selector does not add quote pointers to the generic CUSTOMER projection. Nonowned/missing orders return 404 `SERVICE_ORDER_NOT_FOUND`; owned unavailable states return 409 `CUSTOMER_QUOTE_NOT_ACTIONABLE`; corrupt history returns `CUSTOMER_QUOTE_HISTORY_INVALID`; decided revisions return `QUOTE_REVISION_ALREADY_DECIDED`.
 
+Error precedence (R1): authenticate/resolve live ownership first (nonowned stays 404), validate the current revision's identity/scope, then check its scoped decision. An existing decision on the current revision returns `QUOTE_REVISION_ALREADY_DECIDED` even after initial approval/rejection changes the order status. Without a decision, unavailable status returns `CUSTOMER_QUOTE_NOT_ACTIONABLE`. An unpublished order outside an actionable status also returns NOT_ACTIONABLE. Actionable undecided quotes continue through approval-history, snapshot/hash and materialization validation before any DTO is emitted. Invalid revision/decision scope returns HISTORY_INVALID rather than exposing another resource's decision.
+
 FIN-F02 `POST /:id/quote-decision` keeps its input/header unchanged. Its public successful response is now `{serviceOrderId,status,quoteDecision:{quoteRevisionId,decision,reason,decidedAt}}`. Fresh responses and historical replays pass through the same allowlist. Persisted response bodies, request hashes and operation identities are unchanged. Malformed replay bodies fail closed. Legacy quote decisions retain their existing contract.
 
 ## Settled delivery
@@ -34,6 +36,8 @@ FIN-F02 `POST /:id/quote-decision` keeps its input/header unchanged. Its public 
 `POST /api/v1/service-orders/:id/mark-delivered`, ADMIN/TECHNICIAN, exact single UUID `X-Operation-Id`, strict body `{notes?: string}` (trimmed, 1–1000 characters).
 
 Requires a FIN-F02 order in PRONTO, valid materialized approved quote and exactly one coherent ACTIVE receivable, whose confirmed allocations fully settle its positive exact total. Current schedule/installed amounts, scope of every allocation/payment, confirmation state and sums per payment/installment are validated. Pending payments do not prove settlement. Cancelled or contradictory allocated payments fail closed.
+
+Every payment in the graph must have a positive exact amount, including payments without allocations. PENDING must have no paidAt/confirmedByUserId/cancelledAt/cancelledByUserId and no allocations. CONFIRMED requires paidAt and confirmedByUserId, no cancellation evidence, and its full amount allocated. CANCELLED requires cancelledAt and cancelledByUserId, no confirmation evidence, and no allocations. A fully funded receivable never exempts other payments from these checks.
 
 Lock order is the existing Sync barrier → scoped ServiceOrder → Receivable → current Schedule → current Installments → Payments → allocation reads. Status ENTREGUE, history, CRM completion, financial audit, observed canonical Sync event and idempotency completion commit together. No Payment/Receivable writes are performed by delivery.
 
@@ -47,7 +51,9 @@ The delivered demo scenario now creates/confirms its payment through dedicated R
 
 ## Validation / remaining gate
 
-TypeScript build and 114 pure/regression rule tests passed with Node 24.19.0 / npm 11.9.0. The project requires Node >=24.20.0 <25 and npm 11.19.0: repeat the required gate with those versions. This execution environment has no MySQL server and no DATABASE_URL. Therefore new MySQL tests, the FE-02B MySQL regression and the full backend suite are **not executed**, and no release/merge approval is asserted.
+R1 correction: TypeScript build, 46 targeted tests and 139 total pure/regression tests passed with Node 24.19.0 / npm 11.9.0 (the 46 are included in 139). The project requires Node >=24.20.0 <25 and npm 11.19.0: repeat the required gate with those versions. This execution environment has no MySQL server and no DATABASE_URL. Therefore the corrected candidate's MySQL tests, FE-02B MySQL regression and full backend suite are **not executed**, and no release/merge approval is asserted. The reviewer reported 288/288 full-suite passes on the rejected parent f7a880a; that evidence does not validate this correction.
+
+R1 adds a shared 25-case adversarial matrix exercised by both pure and MySQL tests: coherent controls for each payment state, zero/negative amounts, every missing/forbidden evidence field, the two reported exploits, and forbidden allocations. Each fixture starts with fully confirmed settlement. MySQL cases also check status/history/CRM/audit/Sync remain unchanged on failure and deterministic failure replay. Quote tests now assert the exact decision error after initial approval, initial rejection and reapproval rejection, while retaining ownership and unpublished-state checks.
 
 New DB tests cover quote ownership/privacy, initial/reapproval reads, corrupt history, historical replay minimization, unpaid/partial delivery, generic writer firewall, settled success, replay/conflicting intents, concurrent commands, transaction rollback and stale membership. Existing C7 tests now use Payment confirmation and mark-delivered. Database test fixtures deliberately keep immutable financial history until the whole disposable database is removed.
 

@@ -17,18 +17,24 @@ export async function customerQuoteHandler(request: FastifyRequest, reply: Fasti
     await resolveLiveAuthority(principal, tx);
     const order = await tx.serviceOrder.findFirst({ where: { id, customerId }, include: orderAggregateInclude });
     if (!order) throw new NotFoundError('SERVICE_ORDER_NOT_FOUND');
-    if (!['AGUARDANDO_APROVACAO', 'AGUARDANDO_REAPROVACAO'].includes(order.status)) {
-      throw new ConflictError('CUSTOMER_QUOTE_NOT_ACTIONABLE');
-    }
     const revision = order.currentQuoteRevision;
-    const initial = order.status === 'AGUARDANDO_APROVACAO';
+    const actionable = ['AGUARDANDO_APROVACAO', 'AGUARDANDO_REAPROVACAO'].includes(order.status);
+    if (!revision && !order.currentQuoteRevisionId && !actionable) throw new ConflictError('CUSTOMER_QUOTE_NOT_ACTIONABLE');
     if (order.financeCoreVersion !== 2 || !revision || revision.id !== order.currentQuoteRevisionId ||
         revision.serviceOrderId !== order.id || revision.organizationId !== order.organizationId ||
-        revision.customerId !== customerId || initial !== (order.lastApprovedQuoteRevisionId === null)) {
+        revision.customerId !== customerId) {
       throw new ConflictError('CUSTOMER_QUOTE_HISTORY_INVALID');
     }
     const decision = await tx.customerQuoteDecision.findUnique({ where: { quoteRevisionId: revision.id } });
-    if (decision) throw new ConflictError('QUOTE_REVISION_ALREADY_DECIDED');
+    if (decision) {
+      if (decision.serviceOrderId !== order.id || decision.organizationId !== order.organizationId || decision.customerId !== customerId) {
+        throw new ConflictError('CUSTOMER_QUOTE_HISTORY_INVALID');
+      }
+      throw new ConflictError('QUOTE_REVISION_ALREADY_DECIDED');
+    }
+    if (!actionable) throw new ConflictError('CUSTOMER_QUOTE_NOT_ACTIONABLE');
+    const initial = order.status === 'AGUARDANDO_APROVACAO';
+    if (initial !== (order.lastApprovedQuoteRevisionId === null)) throw new ConflictError('CUSTOMER_QUOTE_HISTORY_INVALID');
     const priorDecision = order.lastApprovedQuoteRevisionId ? await tx.customerQuoteDecision.findUnique({
       where: { quoteRevisionId: order.lastApprovedQuoteRevisionId },
     }) : null;

@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../core/database/prisma.js';
 import { buildApp } from '../../app.js';
 import { serviceOrderCustomerRelationshipService } from '../customer_relationship/service_order_customer_relationship.service.js';
+import { deliveryPaymentCases } from './delivery_payment.test-cases.js';
 
 // Existing migrations only. Run on a disposable MySQL DB; immutable history is retained until disposal.
-test('FE03-BE-P01 MySQL quote privacy and settled delivery gate', { timeout: 120000 }, async t => {
+test('FE03-BE-P01 MySQL quote privacy and settled delivery gate', { timeout: 240000 }, async t => {
   assert.ok(process.env.DATABASE_URL, 'An isolated disposable MySQL DATABASE_URL is required');
   const priorSecret = process.env.JWT_SECRET;
   process.env.JWT_SECRET = 'fe03-be-p01-test-only';
@@ -72,10 +73,27 @@ test('FE03-BE-P01 MySQL quote privacy and settled delivery gate', { timeout: 120
       assert.deepEqual(Object.keys(first.json()).sort(), ['quoteDecision', 'serviceOrderId', 'status']);
       assert.deepEqual(Object.keys(first.json().quoteDecision).sort(), ['decidedAt', 'decision', 'quoteRevisionId', 'reason']);
       assert.deepEqual(await prisma.operationIdempotency.findUniqueOrThrow({ where: { operationId } }), stored);
-      assert.equal((await app.inject({ method: 'GET', url, headers: customerHeaders() })).statusCode, 409);
+      const decided = await app.inject({ method: 'GET', url, headers: customerHeaders() });
+      assert.equal(decided.statusCode, 409);
+      assert.ok(decided.body.includes('QUOTE_REVISION_ALREADY_DECIDED'), decided.body);
       const projection = await app.inject({ method: 'GET', url: `/api/v1/service-orders/${order.id}/projection`, headers: customerHeaders() });
       assert.equal(projection.statusCode, 200, projection.body);
       assert.equal('currentQuoteRevisionId' in projection.json(), false);
+    });
+    await t.test('initial rejection reports already decided before nonactionable status; ownership still wins', async () => {
+      const order = await waiting();
+      assert.equal((await command(order.id, 'quote-decision', { quoteRevisionId: order.quoteRevisionId, decision: 'REJECT' },
+        randomUUID(), customerHeaders())).statusCode, 200);
+      const url = `/api/v1/service-orders/${order.id}/customer-quote`;
+      const decided = await app.inject({ method: 'GET', url, headers: customerHeaders() });
+      assert.equal(decided.statusCode, 409, decided.body);
+      assert.ok(decided.body.includes('QUOTE_REVISION_ALREADY_DECIDED'), decided.body);
+      assert.equal((await app.inject({ method: 'GET', url, headers: customerHeaders(outsider) })).statusCode, 404);
+      const unpublished = await prisma.serviceOrder.create({ data: { organizationId: org.id, customerId: customer.id,
+        equipmentId: equipment.id, status: 'DIAGNOSTICO', problemDescription: 'Unpublished' } });
+      const unavailable = await app.inject({ method: 'GET', url: `/api/v1/service-orders/${unpublished.id}/customer-quote`, headers: customerHeaders() });
+      assert.equal(unavailable.statusCode, 409, unavailable.body);
+      assert.ok(unavailable.body.includes('CUSTOMER_QUOTE_NOT_ACTIONABLE'), unavailable.body);
     });
     await t.test('reapproval presents only the current actionable revision and blocks a decided quote', async () => {
       const order = await waiting();
@@ -137,6 +155,28 @@ test('FE03-BE-P01 MySQL quote privacy and settled delivery gate', { timeout: 120
       const projection = await app.inject({ method: 'GET', url: `/api/v1/service-orders/${order.id}/projection`, headers: staff });
       assert.equal(projection.json().status, 'ENTREGUE');
       assert.equal(projection.json().totalAmountMinor, 2468);
+    });
+    // Corrupt fixtures only inside this disposable gate; never repair production history.
+    for (const scenario of deliveryPaymentCases(actor.id)) await t.test(`MySQL settled graph with ${scenario.name}`, async () => {
+      const order = await ready(); await pay(order.id);
+      const payment = await prisma.payment.findFirstOrThrow({ where: { serviceOrderId: order.id } });
+      if (scenario.allocated) await prisma.payment.update({ where: { id: payment.id }, data: scenario.data });
+      else await prisma.payment.create({ data: { organizationId: org.id, customerId: customer.id, serviceOrderId: order.id,
+        clientOperationId: randomUUID(), method: 'PIX', createdByUserId: actor.id, ...scenario.data } });
+      const changesBefore = await prisma.syncChangeLog.count({ where: { entityId: order.id } });
+      const operationId = randomUUID();
+      const response = await command(order.id, 'mark-delivered', {}, operationId);
+      assert.equal(response.statusCode, scenario.valid ? 200 : 409, response.body);
+      const delivered = scenario.valid ? 1 : 0;
+      if (!scenario.valid) {
+        assert.equal(response.json().error, 'DELIVERY_FINANCIAL_INTEGRITY_INVALID');
+        assert.deepEqual((await command(order.id, 'mark-delivered', {}, operationId)).json(), response.json());
+        assert.equal(await prisma.syncChangeLog.count({ where: { entityId: order.id } }), changesBefore);
+      }
+      assert.equal((await prisma.serviceOrder.findUniqueOrThrow({ where: { id: order.id } })).status, scenario.valid ? 'ENTREGUE' : 'PRONTO');
+      assert.equal(await prisma.serviceOrderStatusHistory.count({ where: { serviceOrderId: order.id, newStatus: 'ENTREGUE' } }), delivered);
+      assert.equal(await prisma.customerEvent.count({ where: { serviceOrderId: order.id, type: 'SERVICE_ORDER_COMPLETED' } }), delivered);
+      assert.equal(await prisma.financialAuditEvent.count({ where: { serviceOrderId: order.id, eventType: 'SERVICE_ORDER_DELIVERED' } }), delivered);
     });
     await t.test('concurrent delivery intents commit exactly once', async () => {
       const order = await ready(); await pay(order.id);

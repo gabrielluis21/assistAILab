@@ -6,6 +6,7 @@ import type { Receivable, Payment } from '@prisma/client';
 import { customerQuoteDecisionResponse } from './customer_quote.projection.js';
 import { assertDeliverySettlement } from './mark_delivered.rules.js';
 import { isFinanceCommandOnlyStatusTransition } from '../service_orders/service_order_state_machine.js';
+import { deliveryPaymentCases } from './delivery_payment.test-cases.js';
 
 test('CUSTOMER fresh and historical quote-decision results are minimized without modifying stored history', () => {
   const body = { order: { id: randomUUID(), status: 'EM_EXECUCAO', financeCoreVersion: 2,
@@ -45,6 +46,13 @@ function settlement() {
 function validate(f: ReturnType<typeof settlement>) {
   assertDeliverySettlement(f.scope, f.receivables, f.schedules, f.installments, f.payments, f.allocations);
 }
+for (const scenario of deliveryPaymentCases('staff')) test(`settled graph with ${scenario.name}`, () => {
+  const f = settlement();
+  if (scenario.allocated) Object.assign(f.payments[0], scenario.data);
+  else f.payments.push({ ...f.payments[0], id: 'additional-payment', clientOperationId: randomUUID(), ...scenario.data });
+  if (scenario.valid) assert.doesNotThrow(() => validate(f));
+  else assert.throws(() => validate(f), RangeError);
+});
 test('delivery accepts exact settled minor units; unpaid and partial remain blocked', () => {
   validate(settlement());
   const unpaid = settlement(); unpaid.payments = []; unpaid.allocations = [];
