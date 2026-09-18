@@ -94,7 +94,10 @@ void main() {
     final store = CommandIntentLocalDataSource();
     var row = CommandIntent.fromMap((await db.query('command_intents')).single);
     expect(row.lifecycle, CommandIntentLifecycle.sending);
-    await store.recoverInterruptedSending(executor: db);
+    await store.recoverInterruptedSending(
+      ownedCommandTypes: const {'PAYMENT_CREATE'},
+      executor: db,
+    );
     row = CommandIntent.fromMap((await db.query('command_intents')).single);
     expect(row.lifecycle, CommandIntentLifecycle.unknown);
     expect(row.operationId, 'operation-a');

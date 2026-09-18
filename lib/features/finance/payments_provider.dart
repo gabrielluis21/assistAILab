@@ -66,6 +66,7 @@ class PaymentsNotifier extends AutoDisposeAsyncNotifier<List<PaymentEntity>> {
     await ref
         .read(paymentCommandIntentRepositoryProvider)
         .recoverInterruptedSending(
+          ownedCommandTypes: paymentOwnedCommandTypes,
           executor: binding.databaseHandle.database,
         );
     _ensureBindingCurrent(binding);

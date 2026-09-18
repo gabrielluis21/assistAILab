@@ -210,7 +210,72 @@ void main() {
     );
   });
 
-  test('interrupted SENDING recovery becomes UNKNOWN', () async {
+  test('scoped recovery changes only owned SENDING commands', () async {
+    Future<CommandIntent> stored(
+      String operationId,
+      String commandType,
+      CommandIntentLifecycle lifecycle,
+    ) async {
+      final intent = await intents.getOrCreate(
+        commandType: commandType,
+        targetId: operationId,
+        payload: {'value': operationId},
+        operationIdFactory: () => operationId,
+        executor: db,
+      );
+      if (lifecycle != CommandIntentLifecycle.pending) {
+        await intents.setLifecycle(
+          operationId,
+          CommandIntentLifecycle.sending,
+          executor: db,
+        );
+      }
+      if (lifecycle != CommandIntentLifecycle.pending &&
+          lifecycle != CommandIntentLifecycle.sending) {
+        await intents.setLifecycle(operationId, lifecycle, executor: db);
+      }
+      return intent;
+    }
+
+    final ownedSending = await stored(
+      'owned-sending',
+      'TEST_EXECUTE',
+      CommandIntentLifecycle.sending,
+    );
+    final otherSending = await stored(
+      'other-sending',
+      'OTHER_EXECUTE',
+      CommandIntentLifecycle.sending,
+    );
+    final ownedUnknown = await stored(
+      'owned-unknown',
+      'TEST_EXECUTE',
+      CommandIntentLifecycle.unknown,
+    );
+    final ownedCompleted = await stored(
+      'owned-completed',
+      'TEST_EXECUTE',
+      CommandIntentLifecycle.completed,
+    );
+    final ownedRejected = await stored(
+      'owned-rejected',
+      'TEST_EXECUTE',
+      CommandIntentLifecycle.rejected,
+    );
+
+    await intents.recoverInterruptedSending(
+      ownedCommandTypes: const {'TEST_EXECUTE'},
+      executor: db,
+    );
+
+    expect(await _lifecycle(db, ownedSending.operationId), 'UNKNOWN');
+    expect(await _lifecycle(db, otherSending.operationId), 'SENDING');
+    expect(await _lifecycle(db, ownedUnknown.operationId), 'UNKNOWN');
+    expect(await _lifecycle(db, ownedCompleted.operationId), 'COMPLETED');
+    expect(await _lifecycle(db, ownedRejected.operationId), 'REJECTED');
+  });
+
+  test('empty or malformed recovery ownership fails closed', () async {
     final intent = await intents.getOrCreate(
       commandType: 'TEST_EXECUTE',
       targetId: 'target-1',
@@ -223,8 +288,21 @@ void main() {
       CommandIntentLifecycle.sending,
       executor: db,
     );
-    await intents.recoverInterruptedSending(executor: db);
-    expect(await _lifecycle(db, intent.operationId), 'UNKNOWN');
+    await expectLater(
+      intents.recoverInterruptedSending(
+        ownedCommandTypes: const {},
+        executor: db,
+      ),
+      throwsArgumentError,
+    );
+    await expectLater(
+      intents.recoverInterruptedSending(
+        ownedCommandTypes: const {'TEST_%'},
+        executor: db,
+      ),
+      throwsFormatException,
+    );
+    expect(await _lifecycle(db, intent.operationId), 'SENDING');
   });
 
   test('stale binding after response cannot commit or redirect authority',

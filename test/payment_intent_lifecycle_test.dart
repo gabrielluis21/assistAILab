@@ -318,10 +318,26 @@ void main() {
       PaymentIntentLifecycle.sending,
       executor: db,
     );
+    final customer = await intents.getOrCreate(
+      commandType: 'CUSTOMER_QUOTE_DECISION',
+      targetId: 'quote-1',
+      payload: const {'decision': 'APPROVE', 'quoteRevisionId': 'quote-1'},
+      operationIdFactory: () => 'customer-operation',
+      executor: db,
+    );
+    await intents.setLifecycle(
+      customer.operationId,
+      PaymentIntentLifecycle.sending,
+      executor: db,
+    );
 
     final recreatedStore = PaymentCommandIntentLocalDataSource();
-    await recreatedStore.recoverInterruptedSending(executor: db);
-    expect((await _intentRows(db)).single['lifecycle_state'], 'UNKNOWN');
+    await recreatedStore.recoverInterruptedSending(
+      ownedCommandTypes: paymentOwnedCommandTypes,
+      executor: db,
+    );
+    expect(await _intentLifecycle(db, stored.operationId), 'UNKNOWN');
+    expect(await _intentLifecycle(db, customer.operationId), 'SENDING');
     final ids = <String>[];
     await _executor(
       db,
@@ -341,6 +357,7 @@ void main() {
     );
 
     expect(ids, ['op-before-restart']);
+    expect(await _intentLifecycle(db, customer.operationId), 'SENDING');
   });
 
   test('UNKNOWN intent is isolated to its auth-scoped database', () async {
@@ -438,6 +455,15 @@ PaymentCommandIntentExecutor _executor(
 
 Future<List<Map<String, Object?>>> _intentRows(Database db) =>
     db.query('command_intents', orderBy: 'created_at, operation_id');
+
+Future<Object?> _intentLifecycle(Database db, String operationId) async =>
+    (await db.query(
+      'command_intents',
+      columns: ['lifecycle_state'],
+      where: 'operation_id = ?',
+      whereArgs: [operationId],
+    ))
+        .single['lifecycle_state'];
 
 PaymentEntity _payment({
   String id = 'payment-1',
