@@ -36,7 +36,7 @@ final customerQuoteOperationIdFactoryProvider = Provider<String Function()>(
   (ref) => const Uuid().v4,
 );
 
-class CustomerQuoteDecisionNotifier extends AutoDisposeAsyncNotifier<void> {
+class CustomerQuoteDecisionNotifier extends AsyncNotifier<void> {
   @override
   Future<void> build() async {
     final sessionKey = ref.watch(authenticatedSessionKeyProvider);
@@ -73,8 +73,13 @@ class CustomerQuoteDecisionNotifier extends AutoDisposeAsyncNotifier<void> {
     try {
       final gateway = ref.read(customerQuoteCommandGatewayProvider);
       _ensureBindingCurrent(binding);
-      final quote = await gateway.readActionableQuote(serviceOrderId);
-      _ensureBindingCurrent(binding);
+      final identity = await _resolveDecisionIdentity(
+        binding: binding,
+        gateway: gateway,
+        serviceOrderId: serviceOrderId,
+        decision: decision,
+        reason: reason,
+      );
       await CustomerQuoteDecisionExecutor(
         gateway: gateway,
         intentRepository:
@@ -83,9 +88,7 @@ class CustomerQuoteDecisionNotifier extends AutoDisposeAsyncNotifier<void> {
         isBindingCurrent: () => _isBindingCurrent(binding),
         operationIdFactory: ref.read(customerQuoteOperationIdFactoryProvider),
       ).decide(
-        quote: quote,
-        decision: decision,
-        reason: reason,
+        identity: identity,
       );
       _ensureBindingCurrent(binding);
       await ref.read(customerServiceOrdersProvider.notifier).refreshSilently();
@@ -98,6 +101,54 @@ class CustomerQuoteDecisionNotifier extends AutoDisposeAsyncNotifier<void> {
       }
       rethrow;
     }
+  }
+
+  Future<CustomerQuoteDecisionIdentity> _resolveDecisionIdentity({
+    required _CustomerQuoteSessionBinding binding,
+    required CustomerQuoteCommandGateway gateway,
+    required String serviceOrderId,
+    required CustomerQuoteDecision decision,
+    required String? reason,
+  }) async {
+    _ensureBindingCurrent(binding);
+    final unresolved = await ref
+        .read(customerQuoteCommandIntentRepositoryProvider)
+        .findUnresolved(
+          commandType: customerQuoteDecisionCommandType,
+          targetId: serviceOrderId,
+          executor: binding.databaseHandle.database,
+        );
+    _ensureBindingCurrent(binding);
+    final matching =
+        <({CommandIntent intent, CustomerQuoteDecisionIdentity identity})>[];
+    for (final intent in unresolved) {
+      final identity = CustomerQuoteDecisionIdentity.fromIntent(intent);
+      if (identity.matchesRequestedAction(
+        requestedDecision: decision,
+        requestedReason: reason,
+      )) {
+        matching.add((intent: intent, identity: identity));
+      }
+    }
+    if (matching.length > 1) {
+      throw StateError('Ambiguous unresolved CUSTOMER quote decision.');
+    }
+    if (matching.length == 1) {
+      final replay = matching.single;
+      if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+        throw StateError('A matching CUSTOMER quote decision is in flight.');
+      }
+      return replay.identity;
+    }
+
+    _ensureBindingCurrent(binding);
+    final quote = await gateway.readActionableQuote(serviceOrderId);
+    _ensureBindingCurrent(binding);
+    return CustomerQuoteDecisionIdentity.fromQuote(
+      quote: quote,
+      decision: decision,
+      reason: reason,
+    );
   }
 
   _CustomerQuoteSessionBinding _captureBinding(
@@ -140,6 +191,6 @@ class CustomerQuoteDecisionNotifier extends AutoDisposeAsyncNotifier<void> {
 }
 
 final customerQuoteDecisionProvider =
-    AutoDisposeAsyncNotifierProvider<CustomerQuoteDecisionNotifier, void>(
+    AsyncNotifierProvider<CustomerQuoteDecisionNotifier, void>(
   CustomerQuoteDecisionNotifier.new,
 );

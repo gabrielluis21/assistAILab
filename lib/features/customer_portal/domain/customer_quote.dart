@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import '../../../core/commands/command_failure.dart';
+import '../../../core/commands/command_intent.dart';
 import '../../../core/money/money_minor.dart';
 
 enum CustomerQuoteDecision {
@@ -132,6 +135,96 @@ final class CustomerQuote {
       createdAt: createdAt,
     );
   }
+}
+
+final class CustomerQuoteDecisionIdentity {
+  const CustomerQuoteDecisionIdentity({
+    required this.serviceOrderId,
+    required this.quoteRevisionId,
+    required this.decision,
+    required this.reason,
+  });
+
+  final String serviceOrderId;
+  final String quoteRevisionId;
+  final CustomerQuoteDecision decision;
+  final String? reason;
+
+  factory CustomerQuoteDecisionIdentity.fromQuote({
+    required CustomerQuote quote,
+    required CustomerQuoteDecision decision,
+    String? reason,
+  }) =>
+      CustomerQuoteDecisionIdentity(
+        serviceOrderId: quote.serviceOrderId,
+        quoteRevisionId: quote.quoteRevisionId,
+        decision: decision,
+        reason: normalizeCustomerQuoteDecisionReason(reason),
+      );
+
+  factory CustomerQuoteDecisionIdentity.fromIntent(CommandIntent intent) {
+    if (intent.commandType != 'CUSTOMER_QUOTE_DECISION') {
+      throw const FormatException('Unexpected CUSTOMER command type.');
+    }
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(intent.canonicalPayload);
+    } catch (_) {
+      throw const FormatException('Malformed CUSTOMER command payload.');
+    }
+    final payload = _requiredMap(decoded);
+    final expectedKeys = <String>{
+      'decision',
+      'quoteRevisionId',
+      if (payload.containsKey('reason')) 'reason',
+      'serviceOrderId',
+    };
+    if (payload.keys.toSet().difference(expectedKeys).isNotEmpty ||
+        expectedKeys.difference(payload.keys.toSet()).isNotEmpty) {
+      throw const FormatException('Unexpected CUSTOMER command payload.');
+    }
+    final serviceOrderId = _requiredString(payload, 'serviceOrderId');
+    if (serviceOrderId != intent.targetId) {
+      throw const FormatException('CUSTOMER command target mismatch.');
+    }
+    final quoteRevisionId = _requiredString(payload, 'quoteRevisionId');
+    if (!_uuidPattern.hasMatch(quoteRevisionId)) {
+      throw const FormatException('Invalid CUSTOMER command quoteRevisionId.');
+    }
+    final decision = switch (payload['decision']) {
+      'APPROVE' => CustomerQuoteDecision.approve,
+      'REJECT' => CustomerQuoteDecision.reject,
+      _ => throw const FormatException('Invalid CUSTOMER command decision.'),
+    };
+    final rawReason = payload['reason'];
+    if (rawReason != null && rawReason is! String) {
+      throw const FormatException('Invalid CUSTOMER command reason.');
+    }
+    final reason = normalizeCustomerQuoteDecisionReason(rawReason as String?);
+    if (rawReason != reason) {
+      throw const FormatException('Non-canonical CUSTOMER command reason.');
+    }
+    return CustomerQuoteDecisionIdentity(
+      serviceOrderId: serviceOrderId,
+      quoteRevisionId: quoteRevisionId,
+      decision: decision,
+      reason: reason,
+    );
+  }
+
+  bool matchesRequestedAction({
+    required CustomerQuoteDecision requestedDecision,
+    required String? requestedReason,
+  }) =>
+      decision == requestedDecision &&
+      reason == normalizeCustomerQuoteDecisionReason(requestedReason);
+
+  Map<String, Object?> toCanonicalPayload() => {
+        'decision': decision.wireValue,
+        'quoteRevisionId': quoteRevisionId,
+        if (reason != null) 'reason': reason,
+        'serviceOrderId': serviceOrderId,
+      };
 }
 
 final class CustomerQuoteDecisionException extends CommandException {

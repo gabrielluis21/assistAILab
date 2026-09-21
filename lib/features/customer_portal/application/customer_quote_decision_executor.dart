@@ -27,17 +27,8 @@ final class CustomerQuoteDecisionExecutor {
   final String Function() operationIdFactory;
 
   Future<CustomerServiceOrderProjection> decide({
-    required CustomerQuote quote,
-    required CustomerQuoteDecision decision,
-    String? reason,
+    required CustomerQuoteDecisionIdentity identity,
   }) {
-    final normalizedReason = normalizeCustomerQuoteDecisionReason(reason);
-    final payload = <String, Object?>{
-      'decision': decision.wireValue,
-      'quoteRevisionId': quote.quoteRevisionId,
-      if (normalizedReason != null) 'reason': normalizedReason,
-      'serviceOrderId': quote.serviceOrderId,
-    };
     return CommandExecutor(
       intentRepository: intentRepository,
       database: database,
@@ -45,18 +36,20 @@ final class CustomerQuoteDecisionExecutor {
       operationIdFactory: operationIdFactory,
     ).execute(
       commandType: customerQuoteDecisionCommandType,
-      targetId: quote.serviceOrderId,
-      payload: payload,
+      targetId: identity.serviceOrderId,
+      payload: identity.toCanonicalPayload(),
       dispatch: (operationId) async {
         await gateway.submitDecision(
           operationId: operationId,
-          serviceOrderId: quote.serviceOrderId,
-          quoteRevisionId: quote.quoteRevisionId,
-          decision: decision,
-          reason: normalizedReason,
+          serviceOrderId: identity.serviceOrderId,
+          quoteRevisionId: identity.quoteRevisionId,
+          decision: identity.decision,
+          reason: identity.reason,
         );
         _ensureBindingCurrent();
-        final projection = await gateway.readProjection(quote.serviceOrderId);
+        final projection = await gateway.readProjection(
+          identity.serviceOrderId,
+        );
         _ensureBindingCurrent();
         return projection;
       },

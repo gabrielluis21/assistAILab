@@ -27,6 +27,235 @@ final _controlledCustomerSessionKey =
     StateProvider<AuthenticatedSessionKey?>((ref) => _keyA);
 
 void main() {
+  test('lost successful response replays UNKNOWN without a fresh quote read',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    var backendApplied = false;
+    var attempt = 0;
+    final gateway = _Gateway(
+      onRead: () async {
+        if (backendApplied) {
+          throw const CustomerQuoteDecisionException(
+            409,
+            'CUSTOMER_QUOTE_NOT_ACTIONABLE',
+          );
+        }
+        return _quote();
+      },
+      onSubmit: (_) async {
+        if (attempt++ == 0) {
+          backendApplied = true;
+          throw TimeoutException('successful response was lost');
+        }
+      },
+    );
+    final container = harness.container(gateway);
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+    await container.read(customerQuoteDecisionProvider.future);
+
+    for (var call = 0; call < 2; call++) {
+      final future =
+          container.read(customerQuoteDecisionProvider.notifier).submit(
+                serviceOrderId: _orderId,
+                decision: CustomerQuoteDecision.reject,
+                reason: '  valor alto  ',
+              );
+      if (call == 0) {
+        await expectLater(future, throwsA(isA<TimeoutException>()));
+        expect(await _lifecycle(harness.handleA.database), 'UNKNOWN');
+      } else {
+        await future;
+      }
+    }
+
+    expect(gateway.quoteReads, 1);
+    expect(gateway.operationIds, ['operation-a', 'operation-a']);
+    expect(gateway.revisionIds, [_revisionId, _revisionId]);
+    expect(gateway.decisions, [
+      CustomerQuoteDecision.reject,
+      CustomerQuoteDecision.reject,
+    ]);
+    expect(gateway.reasons, ['valor alto', 'valor alto']);
+    expect(await _lifecycle(harness.handleA.database), 'COMPLETED');
+    expect(
+      (await harness.handleA.database.query('service_orders')).single['status'],
+      'EM_EXECUCAO',
+    );
+  });
+
+  test('different action does not consume an unrelated UNKNOWN intent',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    var submitAttempt = 0;
+    var quoteAttempt = 0;
+    final gateway = _Gateway(
+      onRead: () async => _quote(
+        revisionId: quoteAttempt++ == 0
+            ? _revisionId
+            : '30000000-0000-4000-8000-000000000003',
+      ),
+      onSubmit: (_) async {
+        if (submitAttempt++ == 0) throw TimeoutException('unknown approval');
+      },
+    );
+    var operation = 0;
+    final container = harness.container(
+      gateway,
+      operationIdFactory: () => 'operation-${++operation}',
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+    await container.read(customerQuoteDecisionProvider.future);
+
+    await expectLater(
+      container.read(customerQuoteDecisionProvider.notifier).submit(
+            serviceOrderId: _orderId,
+            decision: CustomerQuoteDecision.approve,
+          ),
+      throwsA(isA<TimeoutException>()),
+    );
+    await container.read(customerQuoteDecisionProvider.notifier).submit(
+          serviceOrderId: _orderId,
+          decision: CustomerQuoteDecision.reject,
+          reason: 'nova decisão',
+        );
+
+    expect(gateway.quoteReads, 2);
+    expect(gateway.operationIds, ['operation-1', 'operation-2']);
+    expect(gateway.revisionIds, [
+      _revisionId,
+      '30000000-0000-4000-8000-000000000003',
+    ]);
+    expect(
+      await _lifecycleById(harness.handleA.database, 'operation-1'),
+      'UNKNOWN',
+    );
+    expect(
+      await _lifecycleById(harness.handleA.database, 'operation-2'),
+      'COMPLETED',
+    );
+  });
+
+  test('ambiguous unresolved identities fail closed before quote read',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    final intents = CommandIntentLocalDataSource();
+    for (final entry in const [
+      ('operation-a', _revisionId),
+      ('operation-b', '30000000-0000-4000-8000-000000000003'),
+    ]) {
+      final intent = await intents.getOrCreate(
+        commandType: 'CUSTOMER_QUOTE_DECISION',
+        targetId: _orderId,
+        payload: {
+          'decision': 'APPROVE',
+          'quoteRevisionId': entry.$2,
+          'serviceOrderId': _orderId,
+        },
+        operationIdFactory: () => entry.$1,
+        executor: harness.handleA.database,
+      );
+      await intents.setLifecycle(
+        intent.operationId,
+        CommandIntentLifecycle.sending,
+        executor: harness.handleA.database,
+      );
+      await intents.setLifecycle(
+        intent.operationId,
+        CommandIntentLifecycle.unknown,
+        executor: harness.handleA.database,
+      );
+    }
+    final gateway = _Gateway();
+    final container = harness.container(gateway);
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+    await container.read(customerQuoteDecisionProvider.future);
+
+    await expectLater(
+      container.read(customerQuoteDecisionProvider.notifier).submit(
+            serviceOrderId: _orderId,
+            decision: CustomerQuoteDecision.approve,
+          ),
+      throwsA(isA<StateError>()),
+    );
+    expect(gateway.quoteReads, 0);
+    expect(gateway.operationIds, isEmpty);
+  });
+
+  test('listener churn cannot recover a live CUSTOMER SENDING command',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    final entered = Completer<void>();
+    final response = Completer<void>();
+    final gateway = _Gateway(
+      onSubmit: (_) {
+        entered.complete();
+        return response.future;
+      },
+    );
+    final container = harness.container(gateway);
+    addTearDown(container.dispose);
+    var subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    await container.read(customerQuoteDecisionProvider.future);
+    final notifier = container.read(customerQuoteDecisionProvider.notifier);
+    final command = notifier.submit(
+      serviceOrderId: _orderId,
+      decision: CustomerQuoteDecision.approve,
+    );
+    await entered.future;
+    expect(await _lifecycle(harness.handleA.database), 'SENDING');
+
+    subscription.close();
+    await Future<void>.delayed(Duration.zero);
+    subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+    expect(
+      identical(
+        notifier,
+        container.read(customerQuoteDecisionProvider.notifier),
+      ),
+      isTrue,
+    );
+    expect(await _lifecycle(harness.handleA.database), 'SENDING');
+
+    response.complete();
+    await command;
+    expect(await _lifecycle(harness.handleA.database), 'COMPLETED');
+    expect(
+      (await harness.handleA.database.query('service_orders')).single['status'],
+      'EM_EXECUCAO',
+    );
+  });
+
   test('offline-limited CUSTOMER cannot create or dispatch a decision',
       () async {
     final harness = await _Harness.create();
@@ -261,6 +490,7 @@ final class _Harness {
   ProviderContainer container(
     CustomerQuoteCommandGateway gateway, {
     bool online = true,
+    String Function()? operationIdFactory,
   }) =>
       ProviderContainer(
         overrides: [
@@ -271,7 +501,7 @@ final class _Harness {
           customerPortalDatabaseManagerProvider.overrideWithValue(manager),
           customerQuoteCommandGatewayProvider.overrideWithValue(gateway),
           customerQuoteOperationIdFactoryProvider.overrideWithValue(
-            () => 'operation-a',
+            operationIdFactory ?? () => 'operation-a',
           ),
         ],
       );
@@ -313,6 +543,9 @@ final class _Gateway implements CustomerQuoteCommandGateway {
   final Future<CustomerQuote> Function()? onRead;
   final Future<void> Function(String operationId)? onSubmit;
   final List<String> operationIds = [];
+  final List<String> revisionIds = [];
+  final List<CustomerQuoteDecision> decisions = [];
+  final List<String?> reasons = [];
   int quoteReads = 0;
   int projectionReads = 0;
 
@@ -357,13 +590,16 @@ final class _Gateway implements CustomerQuoteCommandGateway {
     String? reason,
   }) async {
     operationIds.add(operationId);
+    revisionIds.add(quoteRevisionId);
+    decisions.add(decision);
+    reasons.add(reason);
     await onSubmit?.call(operationId);
   }
 }
 
-CustomerQuote _quote() => CustomerQuote(
+CustomerQuote _quote({String revisionId = _revisionId}) => CustomerQuote(
       serviceOrderId: _orderId,
-      quoteRevisionId: _revisionId,
+      quoteRevisionId: revisionId,
       revisionNumber: 1,
       decisionMode: CustomerQuoteDecisionMode.initialApproval,
       diagnosis: null,

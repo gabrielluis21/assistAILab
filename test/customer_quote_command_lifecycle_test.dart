@@ -37,8 +37,7 @@ void main() {
     final executor = _executor(db, intents, gateway, () => 'operation-approve');
 
     await executor.decide(
-      quote: _quote(_revisionA),
-      decision: CustomerQuoteDecision.approve,
+      identity: _identity(_revisionA, CustomerQuoteDecision.approve),
     );
 
     expect(gateway.operationIds, ['operation-approve']);
@@ -55,9 +54,11 @@ void main() {
       () async {
     final gateway = _Gateway(projection: _projection('CANCELADO'));
     await _executor(db, intents, gateway, () => 'operation-reject').decide(
-      quote: _quote(_revisionA),
-      decision: CustomerQuoteDecision.reject,
-      reason: '  valor acima do esperado  ',
+      identity: _identity(
+        _revisionA,
+        CustomerQuoteDecision.reject,
+        reason: '  valor acima do esperado  ',
+      ),
     );
     expect(gateway.reasons, ['valor acima do esperado']);
     expect(await _lifecycle(db, 'operation-reject'), 'COMPLETED');
@@ -87,16 +88,14 @@ void main() {
     );
     await expectLater(
       executor.decide(
-        quote: _quote(_revisionA),
-        decision: CustomerQuoteDecision.approve,
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
       ),
       throwsA(isA<TimeoutException>()),
     );
     expect(await _lifecycle(db, 'operation-1'), 'UNKNOWN');
 
     await executor.decide(
-      quote: _quote(_revisionA),
-      decision: CustomerQuoteDecision.approve,
+      identity: _identity(_revisionA, CustomerQuoteDecision.approve),
     );
     expect(gateway.operationIds, ['operation-1', 'operation-1']);
     expect(factoryCalls, 1);
@@ -113,8 +112,7 @@ void main() {
       );
       await expectLater(
         _executor(db, intents, gateway, () => 'operation-uncertain').decide(
-          quote: _quote(_revisionA),
-          decision: CustomerQuoteDecision.approve,
+          identity: _identity(_revisionA, CustomerQuoteDecision.approve),
         ),
         throwsA(isA<CustomerQuoteDecisionException>()),
       );
@@ -133,8 +131,7 @@ void main() {
       );
       await expectLater(
         _executor(db, intents, gateway, () => 'operation-rejected').decide(
-          quote: _quote(_revisionA),
-          decision: CustomerQuoteDecision.approve,
+          identity: _identity(_revisionA, CustomerQuoteDecision.approve),
         ),
         throwsA(isA<CustomerQuoteDecisionException>()),
       );
@@ -166,14 +163,12 @@ void main() {
     );
     await expectLater(
       executor.decide(
-        quote: _quote(_revisionA),
-        decision: CustomerQuoteDecision.approve,
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
       ),
       throwsA(isA<CustomerQuoteDecisionException>()),
     );
     await executor.decide(
-      quote: _quote(_revisionB),
-      decision: CustomerQuoteDecision.approve,
+      identity: _identity(_revisionB, CustomerQuoteDecision.approve),
     );
     expect(gateway.operationIds, ['operation-1', 'operation-2']);
     expect(gateway.revisionIds, [_revisionA, _revisionB]);
@@ -203,8 +198,7 @@ void main() {
     final gateway = _Gateway(projection: malformed);
     await expectLater(
       _executor(db, intents, gateway, () => 'operation-rollback').decide(
-        quote: _quote(_revisionA),
-        decision: CustomerQuoteDecision.approve,
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
       ),
       throwsA(anything),
     );
@@ -258,8 +252,7 @@ void main() {
 
     final gateway = _Gateway(projection: _projection('EM_EXECUCAO'));
     await _executor(db, intents, gateway, () => 'must-not-be-used').decide(
-      quote: _quote(_revisionA),
-      decision: CustomerQuoteDecision.approve,
+      identity: _identity(_revisionA, CustomerQuoteDecision.approve),
     );
     expect(gateway.operationIds, ['customer-operation']);
   });
@@ -289,6 +282,17 @@ CustomerQuote _quote(String revisionId) => CustomerQuote(
       totalAmount: MoneyMinor.zero,
       changeReason: null,
       createdAt: DateTime.utc(2026, 9, 21),
+    );
+
+CustomerQuoteDecisionIdentity _identity(
+  String revisionId,
+  CustomerQuoteDecision decision, {
+  String? reason,
+}) =>
+    CustomerQuoteDecisionIdentity.fromQuote(
+      quote: _quote(revisionId),
+      decision: decision,
+      reason: reason,
     );
 
 Map<String, dynamic> _projection(String status) => {

@@ -86,6 +86,12 @@ final class CommandIntent {
 }
 
 abstract interface class CommandIntentRepository {
+  Future<List<CommandIntent>> findUnresolved({
+    required String commandType,
+    required String targetId,
+    required DatabaseExecutor executor,
+  });
+
   Future<CommandIntent> getOrCreate({
     required String commandType,
     required String targetId,
@@ -111,6 +117,26 @@ final class CommandIntentLocalDataSource implements CommandIntentRepository {
       : _nowUtc = nowUtc ?? (() => DateTime.now().toUtc());
 
   final DateTime Function() _nowUtc;
+
+  @override
+  Future<List<CommandIntent>> findUnresolved({
+    required String commandType,
+    required String targetId,
+    required DatabaseExecutor executor,
+  }) async {
+    validateCommandType(commandType);
+    if (targetId.isEmpty) {
+      throw ArgumentError.value(targetId, 'targetId', 'Must not be empty.');
+    }
+    final rows = await executor.query(
+      'command_intents',
+      where: 'command_type = ? AND target_id = ? '
+          "AND lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')",
+      whereArgs: [commandType, targetId],
+      orderBy: 'created_at, operation_id',
+    );
+    return rows.map(CommandIntent.fromMap).toList(growable: false);
+  }
 
   @override
   Future<CommandIntent> getOrCreate({
