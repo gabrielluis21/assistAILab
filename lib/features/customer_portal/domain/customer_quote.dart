@@ -248,6 +248,38 @@ final class CustomerQuoteDecisionException extends CommandException {
   }
 }
 
+final class CustomerQuoteProjectionUncertaintyException implements Exception {
+  const CustomerQuoteProjectionUncertaintyException({
+    required this.cause,
+    this.safeMessage,
+  });
+
+  final Object cause;
+  final String? safeMessage;
+
+  String get message {
+    final explicit = safeMessage;
+    if (explicit != null) return explicit;
+    if (cause is CustomerQuoteDecisionException) {
+      final decisionException = cause as CustomerQuoteDecisionException;
+      final explicitCauseMessage = decisionException.safeMessage;
+      if (explicitCauseMessage != null) return explicitCauseMessage;
+    }
+    return 'Não foi possível confirmar o resultado da operação. '
+        'Tente novamente.';
+  }
+
+  int? get statusCode =>
+      cause is CommandException ? (cause as CommandException).statusCode : null;
+
+  String? get errorCode =>
+      cause is CommandException ? (cause as CommandException).errorCode : null;
+
+  @override
+  String toString() =>
+      'CustomerQuoteProjectionUncertaintyException(cause: $cause)';
+}
+
 String? normalizeCustomerQuoteDecisionReason(String? reason) {
   final normalized = reason?.trim();
   if (normalized == null || normalized.isEmpty) return null;

@@ -13,7 +13,10 @@ import 'customer_quote_decision_executor.dart';
 import 'customer_service_orders_provider.dart';
 
 export '../domain/customer_quote.dart'
-    show CustomerQuoteDecision, CustomerQuoteDecisionException;
+    show
+        CustomerQuoteDecision,
+        CustomerQuoteDecisionException,
+        CustomerQuoteProjectionUncertaintyException;
 
 typedef _CustomerQuoteSessionBinding = ({
   AuthenticatedSessionKey sessionKey,

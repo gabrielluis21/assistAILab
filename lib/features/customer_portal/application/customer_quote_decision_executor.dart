@@ -47,10 +47,29 @@ final class CustomerQuoteDecisionExecutor {
           reason: identity.reason,
         );
         _ensureBindingCurrent();
-        final projection = await gateway.readProjection(
-          identity.serviceOrderId,
-        );
-        _ensureBindingCurrent();
+        final CustomerServiceOrderProjection projection;
+        try {
+          projection = await gateway.readProjection(
+            identity.serviceOrderId,
+          );
+          if (projection.serviceOrderId != identity.serviceOrderId ||
+              projection.wire['id'] != identity.serviceOrderId ||
+              projection.wire['contractVersion'] != 2) {
+            throw const CustomerQuoteDecisionException(
+              502,
+              'CUSTOMER_PROJECTION_RESPONSE_INVALID',
+            );
+          }
+          _ensureBindingCurrent();
+        } on Object catch (error) {
+          _ensureBindingCurrent();
+          if (error is StateError) {
+            rethrow;
+          }
+          throw CustomerQuoteProjectionUncertaintyException(
+            cause: error,
+          );
+        }
         return projection;
       },
       authoritativeCommit: (executor, projection) =>

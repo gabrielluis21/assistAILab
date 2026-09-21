@@ -461,6 +461,158 @@ void main() {
     expect(gateway.operationIds, isEmpty);
     expect(await harness.handleA.database.query('command_intents'), isEmpty);
   });
+
+  test(
+      'post-success projection 409 SYNC_V2_REFRESH_REQUIRED remains UNKNOWN and retries without fresh quote read',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    var backendApplied = false;
+    var projectionAttempt = 0;
+    final gateway = _Gateway(
+      onRead: () async {
+        if (backendApplied) {
+          throw const CustomerQuoteDecisionException(
+            409,
+            'CUSTOMER_QUOTE_NOT_ACTIONABLE',
+          );
+        }
+        return _quote();
+      },
+      onSubmit: (_) async {
+        backendApplied = true;
+      },
+      onReadProjection: () async {
+        if (projectionAttempt++ == 0) {
+          throw const CustomerQuoteDecisionException(
+            409,
+            'SYNC_V2_REFRESH_REQUIRED',
+          );
+        }
+        return const CustomerServiceOrderProjection(
+          serviceOrderId: _orderId,
+          wire: {
+            'contractVersion': 2,
+            'projectionRevision': '2',
+            'id': _orderId,
+            'friendlyId': 10,
+            'equipmentId': 'equipment-1',
+            'status': 'CANCELADO',
+            'problemDescription': 'Não liga',
+            'solution': null,
+            'updatedAt': '2026-09-21T10:01:00.000Z',
+            'diagnosis': null,
+            'totalAmountMinor': 0,
+            'items': <Object?>[],
+          },
+        );
+      },
+    );
+    final container = harness.container(gateway);
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+    await container.read(customerQuoteDecisionProvider.future);
+
+    for (var call = 0; call < 2; call++) {
+      final future =
+          container.read(customerQuoteDecisionProvider.notifier).submit(
+                serviceOrderId: _orderId,
+                decision: CustomerQuoteDecision.reject,
+                reason: '  valor alto  ',
+              );
+      if (call == 0) {
+        await expectLater(
+          future,
+          throwsA(isA<CustomerQuoteProjectionUncertaintyException>()),
+        );
+        expect(await _lifecycle(harness.handleA.database), 'UNKNOWN');
+      } else {
+        await future;
+      }
+    }
+
+    expect(gateway.quoteReads, 1);
+    expect(gateway.operationIds, ['operation-a', 'operation-a']);
+    expect(gateway.revisionIds, [_revisionId, _revisionId]);
+    expect(gateway.decisions, [
+      CustomerQuoteDecision.reject,
+      CustomerQuoteDecision.reject,
+    ]);
+    expect(gateway.reasons, ['valor alto', 'valor alto']);
+    expect(await _lifecycle(harness.handleA.database), 'COMPLETED');
+    expect(
+      (await harness.handleA.database.query('service_orders')).single['status'],
+      'CANCELADO',
+    );
+  });
+
+  test(
+      'late session A response during projection read cannot commit or mutate session B or superseded session A',
+      () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    final enteredProjection = Completer<void>();
+    final projectionResponse = Completer<CustomerServiceOrderProjection>();
+    final gateway = _Gateway(
+      onSubmit: (_) async {
+        // submitDecision succeeds
+      },
+      onReadProjection: () {
+        enteredProjection.complete();
+        return projectionResponse.future;
+      },
+    );
+    final container = harness.container(gateway);
+    addTearDown(container.dispose);
+    final decisionSubscription = container.listen(
+      customerQuoteDecisionProvider,
+      (_, __) {},
+      fireImmediately: true,
+    );
+    addTearDown(decisionSubscription.close);
+    await container.read(customerQuoteDecisionProvider.future);
+
+    final command = container
+        .read(customerQuoteDecisionProvider.notifier)
+        .submit(
+          serviceOrderId: _orderId,
+          decision: CustomerQuoteDecision.approve,
+        )
+        .then<Object?>((_) => null, onError: (Object error) => error);
+    await enteredProjection.future;
+    final handleB = await harness.switchToB(container);
+    await container.read(customerQuoteDecisionProvider.future);
+    projectionResponse.complete(const CustomerServiceOrderProjection(
+      serviceOrderId: _orderId,
+      wire: {
+        'contractVersion': 2,
+        'projectionRevision': '2',
+        'id': _orderId,
+        'friendlyId': 10,
+        'equipmentId': 'equipment-1',
+        'status': 'EM_EXECUCAO',
+        'problemDescription': 'Não liga',
+        'solution': null,
+        'updatedAt': '2026-09-21T10:01:00.000Z',
+        'diagnosis': null,
+        'totalAmountMinor': 0,
+        'items': <Object?>[],
+      },
+    ));
+
+    expect(await command, isA<StateError>());
+    expect(await handleB.database.query('service_orders'), isEmpty);
+    expect(await handleB.database.query('command_intents'), isEmpty);
+    final aIntent =
+        (await harness.handleA.database.query('command_intents')).single;
+    expect(aIntent['lifecycle_state'], 'SENDING');
+    expect(await harness.handleA.database.query('service_orders'), isEmpty);
+  });
 }
 
 final class _Harness {
@@ -538,10 +690,15 @@ Future<Object?> _lifecycleById(Database db, String operationId) async =>
         .single['lifecycle_state'];
 
 final class _Gateway implements CustomerQuoteCommandGateway {
-  _Gateway({this.onRead, this.onSubmit});
+  _Gateway({
+    this.onRead,
+    this.onSubmit,
+    this.onReadProjection,
+  });
 
   final Future<CustomerQuote> Function()? onRead;
   final Future<void> Function(String operationId)? onSubmit;
+  final Future<CustomerServiceOrderProjection> Function()? onReadProjection;
   final List<String> operationIds = [];
   final List<String> revisionIds = [];
   final List<CustomerQuoteDecision> decisions = [];
@@ -562,6 +719,8 @@ final class _Gateway implements CustomerQuoteCommandGateway {
     String serviceOrderId,
   ) async {
     projectionReads++;
+    final callback = onReadProjection;
+    if (callback != null) return callback();
     return const CustomerServiceOrderProjection(
       serviceOrderId: _orderId,
       wire: {

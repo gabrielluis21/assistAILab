@@ -256,6 +256,173 @@ void main() {
     );
     expect(gateway.operationIds, ['customer-operation']);
   });
+
+  test('phase separation: POST 409 is REJECTED but projection 409 is UNKNOWN',
+      () async {
+    // 1. POST 409 QUOTE_REVISION_NOT_CURRENT -> REJECTED
+    final postConflictGateway = _Gateway(
+      projection: _projection('EM_EXECUCAO'),
+      onSubmit: (_) async => throw const CustomerQuoteDecisionException(
+        409,
+        'QUOTE_REVISION_NOT_CURRENT',
+      ),
+    );
+    await expectLater(
+      _executor(db, intents, postConflictGateway, () => 'op-post-revision')
+          .decide(
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+      ),
+      throwsA(isA<CustomerQuoteDecisionException>()),
+    );
+    expect(await _lifecycle(db, 'op-post-revision'), 'REJECTED');
+
+    // 2. POST 409 IDEMPOTENCY_KEY_REUSE -> REJECTED
+    final postReuseGateway = _Gateway(
+      projection: _projection('EM_EXECUCAO'),
+      onSubmit: (_) async => throw const CustomerQuoteDecisionException(
+        409,
+        'IDEMPOTENCY_KEY_REUSE',
+      ),
+    );
+    await expectLater(
+      _executor(db, intents, postReuseGateway, () => 'op-post-reuse').decide(
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+      ),
+      throwsA(isA<CustomerQuoteDecisionException>()),
+    );
+    expect(await _lifecycle(db, 'op-post-reuse'), 'REJECTED');
+
+    // 3. POST success -> projection 409 SYNC_V2_REFRESH_REQUIRED -> UNKNOWN
+    final projectionConflictGateway = _Gateway(
+      projection: _projection('EM_EXECUCAO'),
+      onReadProjection: () async => throw const CustomerQuoteDecisionException(
+        409,
+        'SYNC_V2_REFRESH_REQUIRED',
+      ),
+    );
+    await expectLater(
+      _executor(
+        db,
+        intents,
+        projectionConflictGateway,
+        () => 'op-proj-conflict',
+      ).decide(
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+      ),
+      throwsA(isA<CustomerQuoteProjectionUncertaintyException>()),
+    );
+    expect(await _lifecycle(db, 'op-proj-conflict'), 'UNKNOWN');
+  });
+
+  test('post-success projection failures remain UNKNOWN and not REJECTED',
+      () async {
+    final failureCases = <({String name, Object failure})>[
+      (
+        name: '401 Unauthorized',
+        failure: const CustomerQuoteDecisionException(401, 'UNAUTHORIZED'),
+      ),
+      (
+        name: '403 Forbidden',
+        failure: const CustomerQuoteDecisionException(403, 'FORBIDDEN'),
+      ),
+      (
+        name: '404 Not Found',
+        failure: const CustomerQuoteDecisionException(404, 'NOT_FOUND'),
+      ),
+      (
+        name: 'ordinary 409 Conflict',
+        failure: const CustomerQuoteDecisionException(409, 'CONFLICT'),
+      ),
+      (
+        name: '409 SYNC_V2_REFRESH_REQUIRED',
+        failure: const CustomerQuoteDecisionException(
+          409,
+          'SYNC_V2_REFRESH_REQUIRED',
+        ),
+      ),
+      (
+        name: '500 Internal Server Error',
+        failure: const CustomerQuoteDecisionException(
+          500,
+          'INTERNAL_SERVER_ERROR',
+        ),
+      ),
+      (
+        name: '502 Bad Gateway',
+        failure: const CustomerQuoteDecisionException(502, 'BAD_GATEWAY'),
+      ),
+      (
+        name: '503 Service Unavailable',
+        failure:
+            const CustomerQuoteDecisionException(503, 'SERVICE_UNAVAILABLE'),
+      ),
+      (
+        name: 'invalid JSON format',
+        failure: const FormatException('Invalid JSON payload'),
+      ),
+    ];
+
+    var counter = 0;
+    for (final testCase in failureCases) {
+      await db.delete('command_intents');
+      final opId = 'op-failure-${++counter}';
+      final gateway = _Gateway(
+        projection: _projection('EM_EXECUCAO'),
+        onReadProjection: () async => throw testCase.failure,
+      );
+      await expectLater(
+        _executor(db, intents, gateway, () => opId).decide(
+          identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+        ),
+        throwsA(isA<CustomerQuoteProjectionUncertaintyException>()),
+        reason: 'Failed on ${testCase.name}',
+      );
+      expect(
+        await _lifecycle(db, opId),
+        'UNKNOWN',
+        reason: 'Lifecycle for ${testCase.name} must be UNKNOWN, not REJECTED',
+      );
+    }
+  });
+
+  test('malformed projection payload validation results in UNKNOWN',
+      () async {
+    // 1. wrong serviceOrderId in projection
+    await db.delete('command_intents');
+    final wrongIdGateway = _Gateway(
+      projection: _projection('EM_EXECUCAO'),
+      onReadProjection: () async => const CustomerServiceOrderProjection(
+        serviceOrderId: 'wrong-order-id',
+        wire: {
+          'id': 'wrong-order-id',
+          'contractVersion': 2,
+        },
+      ),
+    );
+    await expectLater(
+      _executor(db, intents, wrongIdGateway, () => 'op-wrong-id').decide(
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+      ),
+      throwsA(isA<CustomerQuoteProjectionUncertaintyException>()),
+    );
+    expect(await _lifecycle(db, 'op-wrong-id'), 'UNKNOWN');
+
+    // 2. wrong contractVersion in wire
+    await db.delete('command_intents');
+    final wrongContract = _projection('EM_EXECUCAO');
+    wrongContract['contractVersion'] = 1;
+    final wrongContractGateway = _Gateway(
+      projection: wrongContract,
+    );
+    await expectLater(
+      _executor(db, intents, wrongContractGateway, () => 'op-wrong-contract')
+          .decide(
+        identity: _identity(_revisionA, CustomerQuoteDecision.approve),
+      ),
+      throwsA(isA<CustomerQuoteProjectionUncertaintyException>()),
+    );
+    expect(await _lifecycle(db, 'op-wrong-contract'), 'UNKNOWN');
+  });
 }
 
 CustomerQuoteDecisionExecutor _executor(
@@ -320,10 +487,15 @@ Future<Object?> _lifecycle(Database db, String operationId) async =>
         .single['lifecycle_state'];
 
 final class _Gateway implements CustomerQuoteCommandGateway {
-  _Gateway({required this.projection, this.onSubmit});
+  _Gateway({
+    required this.projection,
+    this.onSubmit,
+    this.onReadProjection,
+  });
 
   final Map<String, dynamic> projection;
   final Future<void> Function(String revisionId)? onSubmit;
+  final Future<CustomerServiceOrderProjection> Function()? onReadProjection;
   final List<String> operationIds = [];
   final List<String> revisionIds = [];
   final List<CustomerQuoteDecision> decisions = [];
@@ -336,11 +508,14 @@ final class _Gateway implements CustomerQuoteCommandGateway {
   @override
   Future<CustomerServiceOrderProjection> readProjection(
     String serviceOrderId,
-  ) async =>
-      CustomerServiceOrderProjection(
-        serviceOrderId: serviceOrderId,
-        wire: projection,
-      );
+  ) async {
+    final callback = onReadProjection;
+    if (callback != null) return callback();
+    return CustomerServiceOrderProjection(
+      serviceOrderId: serviceOrderId,
+      wire: projection,
+    );
+  }
 
   @override
   Future<void> submitDecision({
