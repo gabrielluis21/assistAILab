@@ -16,6 +16,11 @@ typedef _SessionDatabaseBinding = ({
   BoundDatabaseHandle databaseHandle,
 });
 
+final customerPortalDatabaseManagerProvider =
+    Provider<AuthScopedDatabaseManager>(
+  (ref) => AuthScopedDatabaseManager.instance,
+);
+
 class CustomerServiceOrdersNotifier
     extends AsyncNotifier<List<ServiceOrderEntity>> {
   @override
@@ -136,7 +141,7 @@ class CustomerServiceOrdersNotifier
       );
     }
 
-    final manager = AuthScopedDatabaseManager.instance;
+    final manager = ref.read(customerPortalDatabaseManagerProvider);
     final handle = manager.currentHandle;
     if (handle == null ||
         handle.authScope != sessionKey.scope ||
@@ -158,7 +163,8 @@ class CustomerServiceOrdersNotifier
         binding.databaseHandle.authScope == binding.sessionKey.scope &&
         binding.databaseHandle.sessionGeneration ==
             binding.sessionKey.sessionGeneration &&
-        AuthScopedDatabaseManager.instance
+        ref
+            .read(customerPortalDatabaseManagerProvider)
             .isCurrentHandle(binding.databaseHandle);
   }
 

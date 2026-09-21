@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../core/commands/command_failure.dart';
 import '../../../core/money/money_minor.dart';
 
 import '../../service_orders/service_order_entity.dart';
@@ -506,6 +508,11 @@ class _QuoteDecisionSection extends ConsumerWidget {
   ) {
     if (error is CustomerQuoteDecisionException) {
       return error.message;
+    }
+
+    if (classifyCommandFailure(error) == CommandFailureDisposition.unknown) {
+      return 'Não foi possível confirmar o resultado da operação. '
+          'Tente novamente.';
     }
 
     return 'Não foi possível enviar sua resposta. Tente novamente.';
