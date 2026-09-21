@@ -3,26 +3,53 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/commands/command_intent.dart';
 import '../../core/database/auth_scoped_database_manager.dart';
-import '../../core/database/service_order_repository.dart';
 import '../auth/application/auth_provider.dart';
 import '../auth/application/session_api_client.dart';
+import '../auth/domain/entities/auth_scope.dart';
 import '../auth/domain/entities/session_state.dart';
-import 'service_order_entity.dart';
 import 'service_orders_provider.dart';
 import 'staff_so_command_executor.dart';
 import 'staff_so_command_gateway.dart';
 
+export 'staff_so_command_executor.dart'
+    show
+        StaffSoCommandIdentity,
+        StaffSoCommandIntentExecutor,
+        StaffSoMarkDeliveredIdentity,
+        StaffSoMarkReadyIdentity,
+        StaffSoProjectionUncertaintyException,
+        StaffSoPublishQuoteIdentity,
+        StaffSoResumeScopeIdentity,
+        StaffSoReviseQuoteIdentity,
+        staffSoMarkDeliveredCommandType,
+        staffSoMarkReadyCommandType,
+        staffSoOwnedCommandTypes,
+        staffSoQuotePublishCommandType,
+        staffSoQuoteReviseCommandType,
+        staffSoResumeApprovedScopeCommandType;
+export 'staff_so_command_gateway.dart'
+    show
+        StaffServiceOrderProjection,
+        StaffSoCommandException,
+        StaffSoCommandGateway,
+        StaffSoHttpCommandGateway,
+        StaffSoQuoteRevisionItem,
+        normalizeDiagnosis,
+        normalizeNotes,
+        normalizeReason;
+
 // ---------------------------------------------------------------------------
-// Binding type alias (session + database handle captured together)
+// Binding type alias (session + professional scope + database handle)
 // ---------------------------------------------------------------------------
 
 typedef _StaffSoBinding = ({
   AuthenticatedSessionKey sessionKey,
+  ProfessionalAuthScope scope,
   BoundDatabaseHandle databaseHandle,
 });
 
 // ---------------------------------------------------------------------------
-// Riverpod infrastructure providers
+// Infrastructure providers
 // ---------------------------------------------------------------------------
 
 final staffSoCommandGatewayProvider = Provider<StaffSoCommandGateway>(
@@ -43,30 +70,15 @@ final staffSoDatabaseManagerProvider = Provider<AuthScopedDatabaseManager>(
 );
 
 // ---------------------------------------------------------------------------
-// Notifier
+// Stable Professional Recovery Owner Notifier (NOT auto-dispose!)
 // ---------------------------------------------------------------------------
 
-/// Staff-side Service Order command notifier.
-///
-/// Exposes all protected SO mutations available to ADMIN / TECHNICIAN users.
-/// Wraps [StaffSoCommandIntentExecutor] with:
-///
-/// - **Session binding guard** — each operation captures the session at call
-///   time and refuses to commit responses that arrive after a logout or
-///   session rotation.
-/// - **Interrupted-sending recovery** — on boot, any SO intents that were
-///   stuck in SENDING (e.g. app crash during a network request) are promoted
-///   to UNKNOWN so they can be replayed on next user action.
-/// - **Authoritative list refresh** — after every successful command the
-///   provider reloads the list from the gateway (online) or local DB
-///   (offline), then invalidates [serviceOrdersProvider] so other UI
-///   subscribers stay in sync.
-class StaffSoCommandsNotifier
-    extends AutoDisposeAsyncNotifier<List<ServiceOrderEntity>> {
+class StaffSoCommandsNotifier extends AsyncNotifier<void> {
+  bool _isInFlight = false;
+
   @override
-  Future<List<ServiceOrderEntity>> build() async {
+  Future<void> build() async {
     final sessionKey = ref.watch(authenticatedSessionKeyProvider);
-    ref.watch(isOnlineSessionProvider);
     final binding = _captureBinding(sessionKey);
     _ensureBindingCurrent(binding);
     await ref
@@ -76,137 +88,310 @@ class StaffSoCommandsNotifier
           executor: binding.databaseHandle.database,
         );
     _ensureBindingCurrent(binding);
-    return _loadFromRepository(binding);
   }
 
-  // ── public command surface ───────────────────────────────────────────────
+  // ── 5 Cyber-approved mutation commands ───────────────────────────────────
 
-  Future<ServiceOrderEntity> updateStatus({
-    required String serviceOrderId,
-    required ServiceOrderStatusEnum status,
-  }) async {
-    return _runCommand(
-      (executor) => executor.updateStatus(
-        serviceOrderId: serviceOrderId,
-        status: status,
-      ),
-    );
-  }
-
-  Future<ServiceOrderEntity> publishInitialQuote({
+  Future<StaffServiceOrderProjection> publishInitialQuote({
     required String serviceOrderId,
     String? changeReason,
   }) async {
-    return _runCommand(
-      (executor) => executor.publishInitialQuote(
-        serviceOrderId: serviceOrderId,
-        changeReason: changeReason,
-      ),
+    return _executeWithIdentityResolution(
+      commandType: staffSoQuotePublishCommandType,
+      serviceOrderId: serviceOrderId,
+      resolveIdentity: (unresolved) {
+        final normalizedReason = normalizeReason(changeReason);
+        final matching = <({
+          CommandIntent intent,
+          StaffSoPublishQuoteIdentity identity,
+        })>[];
+        for (final intent in unresolved) {
+          final identity = StaffSoPublishQuoteIdentity.fromIntent(intent);
+          if (identity.matchesRequestedAction(
+            requestedChangeReason: normalizedReason,
+          )) {
+            matching.add((intent: intent, identity: identity));
+          }
+        }
+        if (matching.length > 1) {
+          throw StateError('Ambiguous unresolved STAFF command intent.');
+        }
+        if (matching.length == 1) {
+          final replay = matching.single;
+          if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+            throw StateError('A matching STAFF command is in flight.');
+          }
+          return replay.identity;
+        }
+        return StaffSoPublishQuoteIdentity(
+          serviceOrderId: serviceOrderId,
+          changeReason: normalizedReason,
+        );
+      },
     );
   }
 
-  Future<ServiceOrderEntity> publishCommercialRevision({
+  Future<StaffServiceOrderProjection> publishCommercialRevision({
     required String serviceOrderId,
-    String? changeReason,
+    required String? diagnosis,
+    required List<StaffSoQuoteRevisionItem> items,
+    required String changeReason,
   }) async {
-    return _runCommand(
-      (executor) => executor.publishCommercialRevision(
-        serviceOrderId: serviceOrderId,
-        changeReason: changeReason,
-      ),
+    return _executeWithIdentityResolution(
+      commandType: staffSoQuoteReviseCommandType,
+      serviceOrderId: serviceOrderId,
+      resolveIdentity: (unresolved) {
+        final normalizedDiagnosis = normalizeDiagnosis(diagnosis);
+        final normalizedReason = normalizeReason(changeReason);
+        if (normalizedReason == null) {
+          throw ArgumentError.value(
+            changeReason,
+            'changeReason',
+            'changeReason is required for quote revision.',
+          );
+        }
+        final matching = <({
+          CommandIntent intent,
+          StaffSoReviseQuoteIdentity identity,
+        })>[];
+        for (final intent in unresolved) {
+          final identity = StaffSoReviseQuoteIdentity.fromIntent(intent);
+          if (identity.matchesRequestedAction(
+            requestedDiagnosis: normalizedDiagnosis,
+            requestedItems: items,
+            requestedChangeReason: normalizedReason,
+          )) {
+            matching.add((intent: intent, identity: identity));
+          }
+        }
+        if (matching.length > 1) {
+          throw StateError('Ambiguous unresolved STAFF command intent.');
+        }
+        if (matching.length == 1) {
+          final replay = matching.single;
+          if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+            throw StateError('A matching STAFF command is in flight.');
+          }
+          return replay.identity;
+        }
+        return StaffSoReviseQuoteIdentity(
+          serviceOrderId: serviceOrderId,
+          diagnosis: normalizedDiagnosis,
+          items: List.unmodifiable(items),
+          changeReason: normalizedReason,
+        );
+      },
     );
   }
 
-  Future<ServiceOrderEntity> resumeApprovedScope({
+  Future<StaffServiceOrderProjection> resumeApprovedScope({
     required String serviceOrderId,
+    required String reason,
   }) async {
-    return _runCommand(
-      (executor) => executor.resumeApprovedScope(
-        serviceOrderId: serviceOrderId,
-      ),
+    return _executeWithIdentityResolution(
+      commandType: staffSoResumeApprovedScopeCommandType,
+      serviceOrderId: serviceOrderId,
+      resolveIdentity: (unresolved) {
+        final normalizedReason = normalizeReason(reason);
+        if (normalizedReason == null) {
+          throw ArgumentError.value(
+            reason,
+            'reason',
+            'reason is required to resume approved scope.',
+          );
+        }
+        final matching = <({
+          CommandIntent intent,
+          StaffSoResumeScopeIdentity identity,
+        })>[];
+        for (final intent in unresolved) {
+          final identity = StaffSoResumeScopeIdentity.fromIntent(intent);
+          if (identity.matchesRequestedAction(
+            requestedReason: normalizedReason,
+          )) {
+            matching.add((intent: intent, identity: identity));
+          }
+        }
+        if (matching.length > 1) {
+          throw StateError('Ambiguous unresolved STAFF command intent.');
+        }
+        if (matching.length == 1) {
+          final replay = matching.single;
+          if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+            throw StateError('A matching STAFF command is in flight.');
+          }
+          return replay.identity;
+        }
+        return StaffSoResumeScopeIdentity(
+          serviceOrderId: serviceOrderId,
+          reason: normalizedReason,
+        );
+      },
     );
   }
 
-  Future<ServiceOrderEntity> markReady({
+  Future<StaffServiceOrderProjection> markReady({
     required String serviceOrderId,
     String? notes,
   }) async {
-    return _runCommand(
-      (executor) => executor.markReady(
-        serviceOrderId: serviceOrderId,
-        notes: notes,
-      ),
+    return _executeWithIdentityResolution(
+      commandType: staffSoMarkReadyCommandType,
+      serviceOrderId: serviceOrderId,
+      resolveIdentity: (unresolved) {
+        final normalizedNotes = normalizeNotes(notes);
+        final matching = <({
+          CommandIntent intent,
+          StaffSoMarkReadyIdentity identity,
+        })>[];
+        for (final intent in unresolved) {
+          final identity = StaffSoMarkReadyIdentity.fromIntent(intent);
+          if (identity.matchesRequestedAction(
+            requestedNotes: normalizedNotes,
+          )) {
+            matching.add((intent: intent, identity: identity));
+          }
+        }
+        if (matching.length > 1) {
+          throw StateError('Ambiguous unresolved STAFF command intent.');
+        }
+        if (matching.length == 1) {
+          final replay = matching.single;
+          if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+            throw StateError('A matching STAFF command is in flight.');
+          }
+          return replay.identity;
+        }
+        return StaffSoMarkReadyIdentity(
+          serviceOrderId: serviceOrderId,
+          notes: normalizedNotes,
+        );
+      },
     );
   }
 
-  Future<ServiceOrderEntity> markDelivered({
+  Future<StaffServiceOrderProjection> markDelivered({
     required String serviceOrderId,
+    String? notes,
   }) async {
-    return _runCommand(
-      (executor) => executor.markDelivered(
-        serviceOrderId: serviceOrderId,
-      ),
+    return _executeWithIdentityResolution(
+      commandType: staffSoMarkDeliveredCommandType,
+      serviceOrderId: serviceOrderId,
+      resolveIdentity: (unresolved) {
+        final normalizedNotes = normalizeNotes(notes);
+        final matching = <({
+          CommandIntent intent,
+          StaffSoMarkDeliveredIdentity identity,
+        })>[];
+        for (final intent in unresolved) {
+          final identity = StaffSoMarkDeliveredIdentity.fromIntent(intent);
+          if (identity.matchesRequestedAction(
+            requestedNotes: normalizedNotes,
+          )) {
+            matching.add((intent: intent, identity: identity));
+          }
+        }
+        if (matching.length > 1) {
+          throw StateError('Ambiguous unresolved STAFF command intent.');
+        }
+        if (matching.length == 1) {
+          final replay = matching.single;
+          if (replay.intent.lifecycle == CommandIntentLifecycle.sending) {
+            throw StateError('A matching STAFF command is in flight.');
+          }
+          return replay.identity;
+        }
+        return StaffSoMarkDeliveredIdentity(
+          serviceOrderId: serviceOrderId,
+          notes: normalizedNotes,
+        );
+      },
     );
   }
 
-  Future<ServiceOrderEntity> recordNotApproved({
+  // ── Shared execution with identity resolution ────────────────────────────
+
+  Future<StaffServiceOrderProjection> _executeWithIdentityResolution({
+    required String commandType,
     required String serviceOrderId,
+    required StaffSoCommandIdentity Function(List<CommandIntent> unresolved)
+        resolveIdentity,
   }) async {
-    return _runCommand(
-      (executor) => executor.recordNotApproved(
-        serviceOrderId: serviceOrderId,
-      ),
-    );
-  }
-
-  // ── shared command runner ────────────────────────────────────────────────
-
-  Future<ServiceOrderEntity> _runCommand(
-    Future<ServiceOrderEntity> Function(StaffSoCommandIntentExecutor) fn,
-  ) async {
+    if (_isInFlight) {
+      throw StateError('A staff SO command is already being processed.');
+    }
+    if (!ref.read(isOnlineSessionProvider)) {
+      throw const StaffSoCommandException(
+        503,
+        'STAFF_COMMAND_REQUIRES_ONLINE_SESSION',
+        safeMessage: 'Conecte-se à internet para executar esta operação.',
+      );
+    }
     final binding = _captureBinding(ref.read(authenticatedSessionKeyProvider));
-    final result = await fn(_executor(binding));
     _ensureBindingCurrent(binding);
-    final orders = await _loadFromRepository(binding);
-    _ensureBindingCurrent(binding);
-    state = AsyncData(orders);
-    // Notify the general list provider so other screens stay in sync.
-    ref.invalidate(serviceOrdersProvider);
-    return result;
+    _isInFlight = true;
+    state = const AsyncLoading();
+
+    try {
+      final unresolved = await ref
+          .read(staffSoCommandIntentRepositoryProvider)
+          .findUnresolved(
+            commandType: commandType,
+            targetId: serviceOrderId,
+            executor: binding.databaseHandle.database,
+          );
+      _ensureBindingCurrent(binding);
+
+      final identity = resolveIdentity(unresolved);
+
+      final executor = StaffSoCommandIntentExecutor(
+        gateway: ref.read(staffSoCommandGatewayProvider),
+        intentRepository: ref.read(staffSoCommandIntentRepositoryProvider),
+        database: binding.databaseHandle.database,
+        isBindingCurrent: () => _isBindingCurrent(binding),
+        operationIdFactory: ref.read(staffSoOperationIdFactoryProvider),
+      );
+
+      final projection = await executor.execute(identity: identity);
+      _ensureBindingCurrent(binding);
+      ref.invalidate(serviceOrdersProvider);
+      _ensureBindingCurrent(binding);
+      state = const AsyncData(null);
+      return projection;
+    } catch (error, stackTrace) {
+      if (_isBindingCurrent(binding)) {
+        state = AsyncError(error, stackTrace);
+      }
+      rethrow;
+    } finally {
+      _isInFlight = false;
+    }
   }
 
-  // ── local list load ──────────────────────────────────────────────────────
-
-  Future<List<ServiceOrderEntity>> _loadFromRepository(
-    _StaffSoBinding binding,
-  ) async {
-    final repo = ref.read(staffSoServiceOrderRepositoryProvider);
-    final orders = await repo.listAll(
-      executor: binding.databaseHandle.database,
-    );
-    _ensureBindingCurrent(binding);
-    return orders;
-  }
-
-  // ── executor factory ─────────────────────────────────────────────────────
-
-  StaffSoCommandIntentExecutor _executor(_StaffSoBinding binding) {
-    return StaffSoCommandIntentExecutor(
-      gateway: ref.read(staffSoCommandGatewayProvider),
-      serviceOrderRepository: ref.read(staffSoServiceOrderRepositoryProvider),
-      intentRepository: ref.read(staffSoCommandIntentRepositoryProvider),
-      database: binding.databaseHandle.database,
-      isBindingCurrent: () => _isBindingCurrent(binding),
-      operationIdFactory: ref.read(staffSoOperationIdFactoryProvider),
-    );
-  }
-
-  // ── session binding helpers ──────────────────────────────────────────────
+  // ── Session and role validation ──────────────────────────────────────────
 
   _StaffSoBinding _captureBinding(AuthenticatedSessionKey? sessionKey) {
     if (sessionKey == null) {
-      throw StateError(
-        'An authenticated session is required for staff SO commands.',
+      throw const StaffSoCommandException(
+        401,
+        'STAFF_UNAUTHENTICATED',
+        safeMessage: 'Autenticação necessária para executar esta operação.',
+      );
+    }
+    if (sessionKey.scope is! ProfessionalAuthScope) {
+      throw const StaffSoCommandException(
+        403,
+        'STAFF_CONTEXT_REQUIRED',
+        safeMessage: 'Apenas equipe autorizada pode executar esta operação.',
+      );
+    }
+    final professionalScope = sessionKey.scope as ProfessionalAuthScope;
+    final user = ref.read(currentUserProvider);
+    if (user == null || (user.role != 'ADMIN' && user.role != 'TECHNICIAN')) {
+      throw const StaffSoCommandException(
+        403,
+        'STAFF_ROLE_REQUIRED',
+        safeMessage:
+            'Apenas administradores e técnicos podem executar esta operação.',
       );
     }
     final manager = ref.read(staffSoDatabaseManagerProvider);
@@ -216,10 +401,14 @@ class StaffSoCommandsNotifier
         handle.sessionGeneration != sessionKey.sessionGeneration ||
         !manager.isCurrentHandle(handle)) {
       throw StateError(
-        'No current database is bound to the authenticated staff SO session.',
+        'No current database is bound to the authenticated STAFF session.',
       );
     }
-    return (sessionKey: sessionKey, databaseHandle: handle);
+    return (
+      sessionKey: sessionKey,
+      scope: professionalScope,
+      databaseHandle: handle,
+    );
   }
 
   bool _isBindingCurrent(_StaffSoBinding binding) {
@@ -241,20 +430,10 @@ class StaffSoCommandsNotifier
 }
 
 // ---------------------------------------------------------------------------
-// Providers
+// Main Provider (Non-auto-dispose!)
 // ---------------------------------------------------------------------------
 
-/// Exposes the current session's service order list as managed by the staff
-/// command notifier.  Consumers call `.notifier` to dispatch mutations.
-final staffSoCommandsProvider = AutoDisposeAsyncNotifierProvider<
-    StaffSoCommandsNotifier, List<ServiceOrderEntity>>(
+final staffSoCommandsProvider =
+    AsyncNotifierProvider<StaffSoCommandsNotifier, void>(
   StaffSoCommandsNotifier.new,
-);
-
-/// Dedicated repository provider so the staff commands layer can share the
-/// same [ServiceOrderLocalDataSource] instance without coupling itself to the
-/// older [serviceOrderRepositoryProvider].
-final staffSoServiceOrderRepositoryProvider =
-    Provider<ServiceOrderRepository>(
-  (ref) => ServiceOrderLocalDataSource(),
 );

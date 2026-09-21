@@ -1,244 +1,391 @@
+import 'dart:async';
 import 'dart:convert';
 
-import '../../core/commands/command_failure.dart';
-import '../auth/application/session_api_client.dart';
-import 'service_order_entity.dart';
+import 'package:http/http.dart' as http;
 
-// ---------------------------------------------------------------------------
-// Domain exception
-// ---------------------------------------------------------------------------
+import 'package:assistailab/core/commands/command_failure.dart';
+import 'package:assistailab/features/auth/application/session_api_client.dart';
 
-final class StaffSoCommandException extends CommandException {
-  const StaffSoCommandException(super.statusCode, super.errorCode);
+final _uuidPattern = RegExp(
+  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+);
 
-  @override
-  String toString() => 'StaffSoCommandException($statusCode): $errorCode';
+String? normalizeReason(String? reason) {
+  if (reason == null) return null;
+  final trimmed = reason.trim();
+  if (trimmed.isEmpty) return null;
+  if (trimmed.length > 1000) {
+    throw ArgumentError.value(
+      reason,
+      'reason',
+      'Reason must be at most 1000 characters.',
+    );
+  }
+  return trimmed;
 }
 
-// ---------------------------------------------------------------------------
-// Abstract gateway — contract only, no policy
-// ---------------------------------------------------------------------------
+String? normalizeDiagnosis(String? diagnosis) {
+  if (diagnosis == null) return null;
+  final trimmed = diagnosis.trim();
+  if (trimmed.isEmpty) return null;
+  if (trimmed.length > 20000) {
+    throw ArgumentError.value(
+      diagnosis,
+      'diagnosis',
+      'Diagnosis must be at most 20000 characters.',
+    );
+  }
+  return trimmed;
+}
 
-/// Wire contract for all staff-only Service Order commands.
-///
-/// Each method receives the [operationId] from the caller's durable intent so
-/// the backend can enforce idempotency end-to-end.  The backend returns the
-/// full updated projection as the authoritative response; callers must commit
-/// that projection — never the optimistic local copy.
+String? normalizeNotes(String? notes) {
+  if (notes == null) return null;
+  final trimmed = notes.trim();
+  if (trimmed.isEmpty) return null;
+  if (trimmed.length > 1000) {
+    throw ArgumentError.value(
+      notes,
+      'notes',
+      'Notes must be at most 1000 characters.',
+    );
+  }
+  return trimmed;
+}
+
+/// Specialized exception thrown by staff SO command operations.
+final class StaffSoCommandException extends CommandException {
+  const StaffSoCommandException(
+    super.statusCode,
+    super.errorCode, {
+    this.safeMessage,
+  });
+
+  final String? safeMessage;
+
+  @override
+  String get message {
+    final explicit = safeMessage;
+    if (explicit != null) return explicit;
+    return switch (errorCode) {
+      'STAFF_UNAUTHENTICATED' =>
+        'Autenticação necessária para executar esta operação.',
+      'STAFF_CONTEXT_REQUIRED' =>
+        'Apenas equipe autorizada pode executar esta operação.',
+      'STAFF_ROLE_REQUIRED' =>
+        'Apenas administradores e técnicos podem executar esta operação.',
+      'STAFF_COMMAND_REQUIRES_ONLINE_SESSION' =>
+        'Conecte-se à internet para executar esta operação.',
+      _ => 'Falha ao executar comando de Ordem de Serviço.',
+    };
+  }
+}
+
+final class StaffServiceOrderProjection {
+  const StaffServiceOrderProjection({
+    required this.serviceOrderId,
+    required this.wire,
+  });
+
+  final String serviceOrderId;
+  final Map<String, dynamic> wire;
+}
+
+final class StaffSoQuoteRevisionItem {
+  const StaffSoQuoteRevisionItem({
+    this.id,
+    this.partId,
+    required this.description,
+    required this.quantity,
+    required this.unitPriceMinor,
+  });
+
+  final String? id;
+  final String? partId;
+  final String description;
+  final int quantity;
+  final int unitPriceMinor;
+
+  factory StaffSoQuoteRevisionItem.fromMap(Map<String, dynamic> map) {
+    final expectedKeys = <String>{
+      if (map.containsKey('id')) 'id',
+      if (map.containsKey('partId')) 'partId',
+      'description',
+      'quantity',
+      'unitPriceMinor',
+    };
+    if (map.keys.toSet().difference(expectedKeys).isNotEmpty ||
+        expectedKeys.difference(map.keys.toSet()).isNotEmpty) {
+      throw const FormatException('Unexpected revision item keys.');
+    }
+    final rawId = map['id'];
+    if (rawId != null && (rawId is! String || !_uuidPattern.hasMatch(rawId))) {
+      throw const FormatException('Invalid revision item id.');
+    }
+    final rawPartId = map['partId'];
+    if (rawPartId != null &&
+        (rawPartId is! String || !_uuidPattern.hasMatch(rawPartId))) {
+      throw const FormatException('Invalid revision item partId.');
+    }
+    final rawDesc = map['description'];
+    if (rawDesc is! String ||
+        rawDesc.trim() != rawDesc ||
+        rawDesc.isEmpty ||
+        rawDesc.length > 1000) {
+      throw const FormatException('Invalid revision item description.');
+    }
+    final rawQty = map['quantity'];
+    if (rawQty is! int || rawQty < 1 || rawQty > 100000) {
+      throw const FormatException('Invalid revision item quantity.');
+    }
+    final rawUnitPrice = map['unitPriceMinor'];
+    if (rawUnitPrice is! int || rawUnitPrice < 0 || rawUnitPrice > 9999999999) {
+      throw const FormatException('Invalid revision item unitPriceMinor.');
+    }
+    return StaffSoQuoteRevisionItem(
+      id: rawId,
+      partId: rawPartId,
+      description: rawDesc,
+      quantity: rawQty,
+      unitPriceMinor: rawUnitPrice,
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+        'description': description,
+        if (id != null) 'id': id,
+        if (partId != null) 'partId': partId,
+        'quantity': quantity,
+        'unitPriceMinor': unitPriceMinor,
+      };
+
+  Map<String, dynamic> toWire() => {
+        if (id != null) 'id': id,
+        if (partId != null) 'partId': partId,
+        'description': description,
+        'quantity': quantity,
+        'unitPriceMinor': unitPriceMinor,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StaffSoQuoteRevisionItem &&
+          id == other.id &&
+          partId == other.partId &&
+          description == other.description &&
+          quantity == other.quantity &&
+          unitPriceMinor == other.unitPriceMinor;
+
+  @override
+  int get hashCode =>
+      Object.hash(id, partId, description, quantity, unitPriceMinor);
+}
+
+typedef StaffSoGet = Future<http.Response> Function(String endpoint);
+typedef StaffSoPost = Future<http.Response> Function(
+  String endpoint, {
+  Map<String, dynamic>? body,
+  Map<String, String> headers,
+});
+
 abstract interface class StaffSoCommandGateway {
-  /// `PATCH /service-orders/:id/status` — generic status transition.
-  Future<ServiceOrderEntity> updateStatus({
-    required String operationId,
-    required String serviceOrderId,
-    required ServiceOrderStatusEnum status,
-  });
-
-  /// `POST /service-orders/:id/quotes/publish` — publish initial quote.
-  Future<ServiceOrderEntity> publishInitialQuote({
+  Future<void> publishInitialQuote({
     required String operationId,
     required String serviceOrderId,
     String? changeReason,
   });
 
-  /// `POST /service-orders/:id/quotes/revise` — commercial revision.
-  Future<ServiceOrderEntity> publishCommercialRevision({
+  Future<void> publishCommercialRevision({
     required String operationId,
     required String serviceOrderId,
-    String? changeReason,
+    required String? diagnosis,
+    required List<StaffSoQuoteRevisionItem> items,
+    required String changeReason,
   });
 
-  /// `POST /service-orders/:id/quotes/resume-approved-scope`.
-  Future<ServiceOrderEntity> resumeApprovedScope({
+  Future<void> resumeApprovedScope({
     required String operationId,
     required String serviceOrderId,
+    required String reason,
   });
 
-  /// `POST /service-orders/:id/mark-ready`.
-  Future<ServiceOrderEntity> markReady({
+  Future<void> markReady({
     required String operationId,
     required String serviceOrderId,
     String? notes,
   });
 
-  /// `POST /service-orders/:id/mark-delivered`.
-  Future<ServiceOrderEntity> markDelivered({
+  Future<void> markDelivered({
     required String operationId,
     required String serviceOrderId,
+    String? notes,
   });
 
-  /// `POST /service-orders/:id/not-approved`.
-  Future<ServiceOrderEntity> recordNotApproved({
-    required String operationId,
-    required String serviceOrderId,
-  });
+  Future<StaffServiceOrderProjection> readProjection(String serviceOrderId);
 }
 
-// ---------------------------------------------------------------------------
-// HTTP implementation
-// ---------------------------------------------------------------------------
-
 final class StaffSoHttpCommandGateway implements StaffSoCommandGateway {
-  const StaffSoHttpCommandGateway(this._client);
+  StaffSoHttpCommandGateway(SessionApiClient client)
+      : this.forTesting(get: client.get, post: client.postWithHeaders);
 
-  final SessionApiClient _client;
+  const StaffSoHttpCommandGateway.forTesting({
+    required StaffSoGet get,
+    required StaffSoPost post,
+  })  : _get = get,
+        _post = post;
 
-  // ── status transition ───────────────────────────────────────────────────
+  final StaffSoGet _get;
+  final StaffSoPost _post;
 
-  @override
-  Future<ServiceOrderEntity> updateStatus({
-    required String operationId,
-    required String serviceOrderId,
-    required ServiceOrderStatusEnum status,
-  }) async {
-    final response = await _client.patchWithHeaders(
-      '/service-orders/$serviceOrderId/status',
-      headers: {'X-Operation-Id': operationId},
-      body: {'status': status.toDbString()},
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
-  }
-
-  // ── quote commands ──────────────────────────────────────────────────────
+  static const _timeout = Duration(seconds: 15);
 
   @override
-  Future<ServiceOrderEntity> publishInitialQuote({
+  Future<void> publishInitialQuote({
     required String operationId,
     required String serviceOrderId,
     String? changeReason,
   }) async {
-    final response = await _client.postWithHeaders(
+    final normalized = normalizeReason(changeReason);
+    final response = await _post(
       '/service-orders/$serviceOrderId/quotes/publish',
       headers: {'X-Operation-Id': operationId},
       body: {
-        if (changeReason != null && changeReason.trim().isNotEmpty)
-          'changeReason': changeReason.trim(),
+        if (normalized != null) 'changeReason': normalized,
       },
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
+    ).timeout(_timeout);
+    _decodeSuccess(response);
   }
 
   @override
-  Future<ServiceOrderEntity> publishCommercialRevision({
+  Future<void> publishCommercialRevision({
     required String operationId,
     required String serviceOrderId,
-    String? changeReason,
+    required String? diagnosis,
+    required List<StaffSoQuoteRevisionItem> items,
+    required String changeReason,
   }) async {
-    final response = await _client.postWithHeaders(
+    final normalizedDiag = normalizeDiagnosis(diagnosis);
+    final normalizedReason = normalizeReason(changeReason);
+    if (normalizedReason == null) {
+      throw ArgumentError.value(
+        changeReason,
+        'changeReason',
+        'changeReason is required for quote revision.',
+      );
+    }
+    final response = await _post(
       '/service-orders/$serviceOrderId/quotes/revise',
       headers: {'X-Operation-Id': operationId},
       body: {
-        if (changeReason != null && changeReason.trim().isNotEmpty)
-          'changeReason': changeReason.trim(),
+        'diagnosis': normalizedDiag,
+        'items': items.map((item) => item.toWire()).toList(growable: false),
+        'changeReason': normalizedReason,
       },
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
+    ).timeout(_timeout);
+    _decodeSuccess(response);
   }
 
   @override
-  Future<ServiceOrderEntity> resumeApprovedScope({
+  Future<void> resumeApprovedScope({
     required String operationId,
     required String serviceOrderId,
+    required String reason,
   }) async {
-    final response = await _client.postWithHeaders(
+    final normalizedReason = normalizeReason(reason);
+    if (normalizedReason == null) {
+      throw ArgumentError.value(
+        reason,
+        'reason',
+        'reason is required to resume approved scope.',
+      );
+    }
+    final response = await _post(
       '/service-orders/$serviceOrderId/quotes/resume-approved-scope',
       headers: {'X-Operation-Id': operationId},
-      body: const {},
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
+      body: {'reason': normalizedReason},
+    ).timeout(_timeout);
+    _decodeSuccess(response);
   }
 
-  // ── execution / delivery commands ───────────────────────────────────────
-
   @override
-  Future<ServiceOrderEntity> markReady({
+  Future<void> markReady({
     required String operationId,
     required String serviceOrderId,
     String? notes,
   }) async {
-    final response = await _client.postWithHeaders(
+    final normalized = normalizeNotes(notes);
+    final response = await _post(
       '/service-orders/$serviceOrderId/mark-ready',
       headers: {'X-Operation-Id': operationId},
       body: {
-        if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
+        if (normalized != null) 'notes': normalized,
       },
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
+    ).timeout(_timeout);
+    _decodeSuccess(response);
   }
 
   @override
-  Future<ServiceOrderEntity> markDelivered({
+  Future<void> markDelivered({
     required String operationId,
     required String serviceOrderId,
+    String? notes,
   }) async {
-    final response = await _client.postWithHeaders(
+    final normalized = normalizeNotes(notes);
+    final response = await _post(
       '/service-orders/$serviceOrderId/mark-delivered',
       headers: {'X-Operation-Id': operationId},
-      body: const {},
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
+      body: {
+        if (normalized != null) 'notes': normalized,
+      },
+    ).timeout(_timeout);
+    _decodeSuccess(response);
   }
 
   @override
-  Future<ServiceOrderEntity> recordNotApproved({
-    required String operationId,
-    required String serviceOrderId,
-  }) async {
-    final response = await _client.postWithHeaders(
-      '/service-orders/$serviceOrderId/not-approved',
-      headers: {'X-Operation-Id': operationId},
-      body: const {},
-    ).timeout(const Duration(seconds: 15));
-    final body = _decodeSuccess(response.statusCode, response.body);
-    return _fromWire(_requireMap(body['serviceOrder']));
-  }
-
-  // ── helpers ─────────────────────────────────────────────────────────────
-
-  static Map<String, dynamic> _decodeSuccess(int statusCode, String raw) {
-    Object? decoded;
-    try {
-      decoded = jsonDecode(raw);
-    } catch (_) {
-      if (statusCode >= 200 && statusCode < 300) {
-        throw const FormatException('Service-order command response is not JSON.');
-      }
-    }
-    if (statusCode < 200 || statusCode >= 300) {
-      final error = decoded is Map ? decoded['error'] : null;
-      throw StaffSoCommandException(
-        statusCode,
-        error is String ? error : 'STAFF_SO_COMMAND_FAILED',
+  Future<StaffServiceOrderProjection> readProjection(
+    String serviceOrderId,
+  ) async {
+    final response = await _get(
+      '/service-orders/$serviceOrderId/projection',
+    ).timeout(_timeout);
+    final decoded = _decodeSuccess(response);
+    if (decoded['id'] != serviceOrderId || decoded['contractVersion'] != 2) {
+      throw const StaffSoCommandException(
+        502,
+        'STAFF_PROJECTION_RESPONSE_INVALID',
       );
     }
-    return _requireMap(decoded);
+    return StaffServiceOrderProjection(
+      serviceOrderId: serviceOrderId,
+      wire: Map.unmodifiable(decoded),
+    );
   }
 
-  static Map<String, dynamic> _requireMap(Object? value) {
-    if (value is! Map<String, dynamic>) {
-      throw const FormatException('Service-order payload must be an object.');
+  static Map<String, dynamic> _decodeSuccess(http.Response response) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } catch (_) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        throw const StaffSoCommandException(
+          502,
+          'STAFF_COMMAND_RESPONSE_INVALID',
+        );
+      }
     }
-    return value;
-  }
-
-  static ServiceOrderEntity _fromWire(Map<String, dynamic> wire) {
-    return ServiceOrderEntity.fromMap({
-      'id': wire['id'],
-      'friendly_id': wire['friendlyId'],
-      'customer_id': wire['customerId'],
-      'equipment_id': wire['equipmentId'],
-      'technician_id': wire['technicianId'],
-      'status': wire['status'],
-      'problem_description': wire['problemDescription'],
-      'diagnosis': wire['diagnosis'],
-      'solution': wire['solution'],
-      'total_amount_minor': wire['totalAmountMinor'] ?? wire['totalAmount'],
-      'updated_at': wire['updatedAt'],
-    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final code = decoded is Map ? decoded['error'] : null;
+      throw StaffSoCommandException(
+        response.statusCode,
+        code is String ? code : 'STAFF_COMMAND_FAILED',
+      );
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const StaffSoCommandException(
+        502,
+        'STAFF_COMMAND_RESPONSE_INVALID',
+      );
+    }
+    return decoded;
   }
 }
