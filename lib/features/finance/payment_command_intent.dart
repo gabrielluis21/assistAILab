@@ -24,6 +24,12 @@ enum PaymentCommandType {
       };
 }
 
+const paymentOwnedCommandTypes = <String>{
+  'PAYMENT_CREATE',
+  'PAYMENT_CONFIRM',
+  'PAYMENT_CANCEL',
+};
+
 typedef PaymentCommandIntent = CommandIntent;
 typedef PaymentIntentLifecycle = CommandIntentLifecycle;
 typedef PaymentIntentIdentityException = CommandIntentIdentityException;

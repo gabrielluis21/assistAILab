@@ -101,6 +101,7 @@ abstract interface class CommandIntentRepository {
   });
 
   Future<void> recoverInterruptedSending({
+    required Set<String> ownedCommandTypes,
     required DatabaseExecutor executor,
   });
 }
@@ -212,16 +213,32 @@ final class CommandIntentLocalDataSource implements CommandIntentRepository {
 
   @override
   Future<void> recoverInterruptedSending({
+    required Set<String> ownedCommandTypes,
     required DatabaseExecutor executor,
   }) async {
+    if (ownedCommandTypes.isEmpty) {
+      throw ArgumentError.value(
+        ownedCommandTypes,
+        'ownedCommandTypes',
+        'Recovery ownership must not be empty.',
+      );
+    }
+    final commandTypes = ownedCommandTypes.toSet().toList()..sort();
+    for (final commandType in commandTypes) {
+      validateCommandType(commandType);
+    }
+    final placeholders = List.filled(commandTypes.length, '?').join(', ');
     await executor.update(
       'command_intents',
       {
         'lifecycle_state': CommandIntentLifecycle.unknown.wireValue,
         'updated_at': _nowUtc().toIso8601String(),
       },
-      where: 'lifecycle_state = ?',
-      whereArgs: [CommandIntentLifecycle.sending.wireValue],
+      where: 'lifecycle_state = ? AND command_type IN ($placeholders)',
+      whereArgs: [
+        CommandIntentLifecycle.sending.wireValue,
+        ...commandTypes,
+      ],
     );
   }
 
