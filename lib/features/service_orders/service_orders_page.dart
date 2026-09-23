@@ -4,7 +4,10 @@ import '../../core/money/money_minor.dart';
 import 'service_orders_provider.dart';
 import 'service_order_entity.dart';
 import 'service_order_detail_page.dart';
+import '../auth/application/auth_provider.dart';
+import '../customers/customer_entity.dart';
 import '../customers/customers_provider.dart';
+import '../equipment/equipment_entity.dart';
 import '../equipment/equipments_provider.dart';
 
 class ServiceOrdersPage extends ConsumerWidget {
@@ -15,6 +18,7 @@ class ServiceOrdersPage extends ConsumerWidget {
     final ordersAsync = ref.watch(serviceOrdersProvider);
     final customersAsync = ref.watch(customersProvider);
     final equipmentsAsync = ref.watch(equipmentsProvider);
+    final canCreate = canCreateServiceOrder(ref.watch(currentUserProvider));
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
@@ -73,34 +77,41 @@ class ServiceOrdersPage extends ConsumerWidget {
           );
         },
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: const Color(0xFF0284C7),
-        onPressed: () => _showCreateOrderDialog(
-          context,
-          ref,
-          customersAsync.value ?? [],
-          equipmentsAsync.value ?? [],
-        ),
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text(
-          'Nova OS',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
-      ),
+      floatingActionButton: canCreate
+          ? FloatingActionButton.extended(
+              key: const Key('create_service_order_fab'),
+              backgroundColor: const Color(0xFF0284C7),
+              onPressed: () => _showCreateOrderDialog(
+                context,
+                ref,
+                customersAsync.value ?? [],
+                equipmentsAsync.value ?? [],
+              ),
+              icon: const Icon(Icons.add, color: Colors.white),
+              label: const Text(
+                'Nova OS',
+                style:
+                    TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+            )
+          : null,
     );
   }
 
   void _showCreateOrderDialog(
     BuildContext context,
     WidgetRef ref,
-    List<dynamic> customers,
-    List<dynamic> equipments,
+    List<CustomerEntity> customers,
+    List<EquipmentEntity> equipments,
   ) {
     final descController = TextEditingController();
     String? selectedCustomerId =
         customers.isNotEmpty ? customers.first.id : null;
+    final initialEquipments = equipments
+        .where((equipment) => equipment.customerId == selectedCustomerId)
+        .toList(growable: false);
     String? selectedEquipmentId =
-        equipments.isNotEmpty ? equipments.first.id : null;
+        initialEquipments.isNotEmpty ? initialEquipments.first.id : null;
 
     showDialog(
       context: context,
@@ -150,8 +161,8 @@ class ServiceOrdersPage extends ConsumerWidget {
                       ),
                       items: customers.map<DropdownMenuItem<String>>((c) {
                         return DropdownMenuItem<String>(
-                          value: c.id as String,
-                          child: Text(c.name as String,
+                          value: c.id,
+                          child: Text(c.name,
                               style: const TextStyle(color: Colors.white)),
                         );
                       }).toList(),
@@ -194,7 +205,7 @@ class ServiceOrdersPage extends ConsumerWidget {
                       items:
                           filteredEquipments.map<DropdownMenuItem<String>>((e) {
                         return DropdownMenuItem<String>(
-                          value: e.id as String,
+                          value: e.id,
                           child: Text('${e.brand} ${e.model}',
                               style: const TextStyle(color: Colors.white)),
                         );
@@ -242,19 +253,24 @@ class ServiceOrdersPage extends ConsumerWidget {
                     style: TextStyle(color: Colors.white54)),
               ),
               ElevatedButton(
+                key: const Key('create_service_order_submit'),
                 style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF0284C7)),
-                onPressed: () async {
-                  if (descController.text.trim().isEmpty) return;
-                  final custId = selectedCustomerId ?? 'cust-placeholder';
-                  final eqId = selectedEquipmentId ?? 'eq-placeholder';
-                  await ref.read(serviceOrdersProvider.notifier).createOrder(
-                        customerId: custId,
-                        equipmentId: eqId,
-                        problemDescription: descController.text.trim(),
-                      );
-                  if (ctx.mounted) Navigator.pop(ctx);
-                },
+                onPressed:
+                    selectedCustomerId == null || selectedEquipmentId == null
+                        ? null
+                        : () async {
+                            final description = descController.text.trim();
+                            if (description.isEmpty) return;
+                            await ref
+                                .read(serviceOrdersProvider.notifier)
+                                .createOrder(
+                                  customerId: selectedCustomerId!,
+                                  equipmentId: selectedEquipmentId!,
+                                  problemDescription: description,
+                                );
+                            if (ctx.mounted) Navigator.pop(ctx);
+                          },
                 child: const Text('Criar OS',
                     style: TextStyle(color: Colors.white)),
               ),

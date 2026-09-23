@@ -8,6 +8,7 @@ import '../../core/sync/sync_payload_mapper.dart';
 import '../../core/sync/sync_providers.dart';
 import '../../core/sync/sync_trigger.dart';
 import '../auth/application/auth_provider.dart';
+import '../auth/domain/entities/user.dart';
 import '../auth/domain/entities/session_state.dart';
 
 typedef _SessionDatabaseBinding = ({
@@ -18,6 +19,36 @@ typedef _SessionDatabaseBinding = ({
 final serviceOrderRepositoryProvider = Provider<ServiceOrderRepository>(
   (ref) => ServiceOrderLocalDataSource(),
 );
+
+bool canCreateServiceOrder(User? user) {
+  final role = user?.role.trim().toUpperCase();
+  return role == 'ADMIN' || role == 'TECHNICIAN';
+}
+
+void validateServiceOrderCreationInput({
+  required String customerId,
+  required String equipmentId,
+  required String problemDescription,
+  String? technicianId,
+}) {
+  if (!Uuid.isValidUUID(fromString: customerId)) {
+    throw ArgumentError.value(customerId, 'customerId', 'Invalid UUID.');
+  }
+  if (!Uuid.isValidUUID(fromString: equipmentId)) {
+    throw ArgumentError.value(equipmentId, 'equipmentId', 'Invalid UUID.');
+  }
+  if (technicianId != null && !Uuid.isValidUUID(fromString: technicianId)) {
+    throw ArgumentError.value(technicianId, 'technicianId', 'Invalid UUID.');
+  }
+  final description = problemDescription.trim();
+  if (description.isEmpty || description.length > 10000) {
+    throw ArgumentError.value(
+      problemDescription,
+      'problemDescription',
+      'Must contain between 1 and 10000 characters.',
+    );
+  }
+}
 
 // Valid state machine transitions - mirrors backend rule set
 final Map<ServiceOrderStatusEnum, List<ServiceOrderStatusEnum>>
@@ -77,6 +108,17 @@ class ServiceOrdersNotifier
     required String problemDescription,
     String? technicianId,
   }) async {
+    if (!canCreateServiceOrder(ref.read(currentUserProvider))) {
+      throw StateError(
+        'Only administrators and technicians can create service orders.',
+      );
+    }
+    validateServiceOrderCreationInput(
+      customerId: customerId,
+      equipmentId: equipmentId,
+      problemDescription: problemDescription,
+      technicianId: technicianId,
+    );
     final binding = _captureBinding(
       ref.read(authenticatedSessionKeyProvider),
     );
@@ -87,7 +129,7 @@ class ServiceOrdersNotifier
       equipmentId: equipmentId,
       technicianId: technicianId,
       status: ServiceOrderStatusEnum.diagnostico,
-      problemDescription: problemDescription,
+      problemDescription: problemDescription.trim(),
       updatedAt: DateTime.now().toIso8601String(),
     );
 
