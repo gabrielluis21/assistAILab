@@ -190,6 +190,11 @@ Future<Database> _openProjectionDb() {
           customer_id TEXT NOT NULL, amount_minor INTEGER NOT NULL,
           method TEXT NOT NULL, status TEXT NOT NULL, notes TEXT, paid_at TEXT,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''');
+        await db.execute('''CREATE TABLE outbox (
+          operation_id TEXT PRIMARY KEY, entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL, operation_type TEXT NOT NULL,
+          payload TEXT NOT NULL, created_at TEXT NOT NULL,
+          status TEXT NOT NULL)''');
       },
     ),
   );

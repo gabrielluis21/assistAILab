@@ -54,6 +54,17 @@ Future<Database> openCustomerQuoteTestDatabase() async {
           )
         ''');
         await db.execute('''
+          CREATE TABLE outbox (
+            operation_id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL
+          )
+        ''');
+        await db.execute('''
           CREATE UNIQUE INDEX command_intents_unresolved_identity
           ON command_intents(command_type, target_id, payload_json)
           WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')

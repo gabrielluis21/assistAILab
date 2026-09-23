@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../../auth/application/session_api_client.dart';
+import '../../service_orders/data/dtos/service_order_read_dto.dart';
 import '../../service_orders/service_order_entity.dart';
 import '../domain/customer_quote.dart';
 
@@ -113,16 +114,22 @@ final class CustomerQuoteHttpCommandGateway
       '/service-orders/$serviceOrderId/projection',
     ).timeout(const Duration(seconds: 15));
     final body = _decodeResponse(response);
-    if (body['id'] != serviceOrderId || body['contractVersion'] != 2) {
+    try {
+      final dto = ServiceOrderProjectionDto.fromWire(
+        body,
+        audience: ServiceOrderProjectionAudience.customer,
+        expectedServiceOrderId: serviceOrderId,
+      );
+      return CustomerServiceOrderProjection(
+        serviceOrderId: serviceOrderId,
+        wire: Map.unmodifiable(Map<String, dynamic>.from(dto.toWire())),
+      );
+    } on Object {
       throw const CustomerQuoteDecisionException(
         502,
         'CUSTOMER_PROJECTION_RESPONSE_INVALID',
       );
     }
-    return CustomerServiceOrderProjection(
-      serviceOrderId: serviceOrderId,
-      wire: Map.unmodifiable(body),
-    );
   }
 
   static Map<String, dynamic> _decodeResponse(http.Response response) {

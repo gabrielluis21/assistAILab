@@ -42,6 +42,9 @@ abstract final class SyncProjectionApplier {
     final entityId = _requiredString(change, 'entityId');
     final operation = _requiredString(change, 'operationType');
     if (operation == 'DELETE') {
+      if (entityType == 'SERVICE_ORDER') {
+        await _assertNoPendingServiceOrderMutation(db, entityId);
+      }
       await _delete(db, entityType, entityId);
       return;
     }
@@ -118,6 +121,7 @@ abstract final class SyncProjectionApplier {
     String entityId,
     Map<String, dynamic> data,
   ) async {
+    await _assertNoPendingServiceOrderMutation(db, entityId);
     if (data['contractVersion'] != 2) {
       throw const SyncProjectionException('SYNC_CONTRACT_VERSION_INVALID');
     }
@@ -228,6 +232,49 @@ abstract final class SyncProjectionApplier {
     );
     for (final row in itemRows) {
       await db.insert('service_order_items', row);
+    }
+  }
+
+  /// A remote snapshot is never allowed to erase a local Service Order or item
+  /// mutation that has not reached the terminal SYNCED state. Throwing keeps
+  /// the surrounding Sync/command transaction atomic and lets the existing
+  /// Outbox + Sync cycle establish precedence; no retry policy is introduced.
+  static Future<void> _assertNoPendingServiceOrderMutation(
+    DatabaseExecutor db,
+    String serviceOrderId,
+  ) async {
+    final rows = await db.query(
+      'outbox',
+      columns: ['entity_type', 'entity_id', 'payload', 'status'],
+      where: 'status <> ? AND entity_type IN (?, ?)',
+      whereArgs: ['SYNCED', 'SERVICE_ORDER', 'SERVICE_ORDER_ITEM'],
+    );
+    for (final row in rows) {
+      final type = (row['entity_type'] as String).toUpperCase();
+      if (type == 'SERVICE_ORDER' && row['entity_id'] == serviceOrderId) {
+        throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
+      }
+      if (type != 'SERVICE_ORDER_ITEM') continue;
+      final rawPayload = row['payload'];
+      if (rawPayload is! String) {
+        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+      }
+      Object? decoded;
+      try {
+        decoded = jsonDecode(rawPayload);
+      } catch (_) {
+        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+      }
+      if (decoded is! Map) {
+        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+      }
+      final parentId = decoded['serviceOrderId'];
+      if (parentId is! String || parentId.isEmpty) {
+        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+      }
+      if (parentId == serviceOrderId) {
+        throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
+      }
     }
   }
 

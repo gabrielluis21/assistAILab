@@ -94,6 +94,26 @@ void main() {
     expect(endpoint, '/service-orders/$_orderId/projection');
     expect(result.wire, projection);
   });
+
+  test('customer projection rejects privileged STAFF fields', () async {
+    final projection = _projectionWire(status: 'EM_EXECUCAO')
+      ..['organizationId'] = '20000000-0000-4000-8000-000000000002';
+    final gateway = CustomerQuoteHttpCommandGateway.forTesting(
+      get: (_) async => http.Response(jsonEncode(projection), 200),
+      post: _unusedPost,
+    );
+
+    await expectLater(
+      gateway.readProjection(_orderId),
+      throwsA(
+        isA<CustomerQuoteDecisionException>().having(
+          (error) => error.errorCode,
+          'errorCode',
+          'CUSTOMER_PROJECTION_RESPONSE_INVALID',
+        ),
+      ),
+    );
+  });
 }
 
 CustomerQuoteHttpCommandGateway _gateway({
@@ -148,7 +168,7 @@ Map<String, dynamic> _projectionWire({required String status}) => {
       'projectionRevision': '2',
       'id': _orderId,
       'friendlyId': 10,
-      'equipmentId': 'equipment-1',
+      'equipmentId': '40000000-0000-4000-8000-000000000004',
       'status': status,
       'problemDescription': 'Não liga',
       'solution': null,
