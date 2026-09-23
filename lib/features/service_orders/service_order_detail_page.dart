@@ -12,7 +12,6 @@ import 'printing/service_order_pdf_preview_page.dart';
 import 'printing/service_order_print_data_provider.dart';
 import 'printing/service_order_print_service.dart';
 import 'staff_so_commands_provider.dart';
-import 'service_orders_provider.dart';
 
 class ServiceOrderDetailPage extends ConsumerStatefulWidget {
   final ServiceOrderEntity order;
@@ -28,13 +27,9 @@ class _ServiceOrderDetailPageState
   late TextEditingController _diagnosisController;
   late TextEditingController _solutionController;
 
-  /// Local display entity — starts as widget.order and is updated after a
-  /// successful STAFF command (re-read from the local DB after projection
-  /// is applied by SyncProjectionApplier). Never mutated optimistically.
+  /// Local display entity. It is updated only from a Projection v2 returned
+  /// after the STAFF command foundation has committed that projection.
   late ServiceOrderEntity _displayOrder;
-
-  /// Prevents concurrent STAFF command dispatches from the same page instance.
-  bool _isCommandInFlight = false;
 
   @override
   void initState() {
@@ -54,36 +49,6 @@ class _ServiceOrderDetailPageState
   }
 
   // ---------------------------------------------------------------------------
-  // Post-command entity refresh (reads from local DB — never from wire)
-  // ---------------------------------------------------------------------------
-
-  Future<void> _refreshDisplayOrderFromDb() async {
-    try {
-      final repo = ref.read(serviceOrderRepositoryProvider);
-      final sessionKey = ref.read(authenticatedSessionKeyProvider);
-      if (sessionKey == null) return;
-
-      // Re-read the entity that SyncProjectionApplier just wrote.
-      final manager =
-          ref.read(staffSoDatabaseManagerProvider);
-      final handle = manager.currentHandle;
-      if (handle == null) return;
-
-      final updated = await repo.findById(
-        _displayOrder.id,
-        executor: handle.database,
-      );
-      if (updated != null && mounted) {
-        setState(() => _displayOrder = updated);
-      }
-    } catch (_) {
-      // Best-effort — the UI will show stale data until the user navigates
-      // away and returns, at which point serviceOrdersProvider is already
-      // invalidated and will provide the authoritative entity.
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Feedback helpers
   // ---------------------------------------------------------------------------
 
@@ -99,11 +64,15 @@ class _ServiceOrderDetailPageState
   }
 
   void _showUncertaintySnackBar(StaffSoProjectionUncertaintyException e) {
+    _showUnconfirmedSnackBar(e.message);
+  }
+
+  void _showUnconfirmedSnackBar(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          e.message,
+          message,
           style: const TextStyle(color: Colors.white),
         ),
         backgroundColor: const Color(0xFFB45309),
@@ -112,8 +81,7 @@ class _ServiceOrderDetailPageState
         action: SnackBarAction(
           label: 'OK',
           textColor: Colors.white,
-          onPressed: () =>
-              ScaffoldMessenger.of(context).hideCurrentSnackBar(),
+          onPressed: () => ScaffoldMessenger.of(context).hideCurrentSnackBar(),
         ),
       ),
     );
@@ -141,22 +109,68 @@ class _ServiceOrderDetailPageState
     Future<StaffServiceOrderProjection> Function() command,
     String successMessage,
   ) async {
-    if (_isCommandInFlight) return;
-    setState(() => _isCommandInFlight = true);
+    if (ref.read(staffSoCommandsProvider).isLoading) return;
     try {
-      await command();
-      // serviceOrdersProvider already invalidated by staffSoCommandsProvider.
-      // Re-read the entity from the now-updated local DB.
-      await _refreshDisplayOrderFromDb();
+      final projection = await command();
+      final projectedOrder = _orderFromConfirmedProjection(projection);
+      if (!mounted) return;
+      setState(() {
+        _displayOrder = projectedOrder;
+        _diagnosisController.text = projectedOrder.diagnosis ?? '';
+        _solutionController.text = projectedOrder.solution ?? '';
+      });
+      ref.invalidate(serviceOrderItemsProvider(projectedOrder.id));
       _showSuccessSnackBar(successMessage);
     } on StaffSoProjectionUncertaintyException catch (e) {
       // POST succeeded but projection could not be confirmed.
       // Do NOT show success. Do NOT update status locally.
       _showUncertaintySnackBar(e);
+    } on StaffSoCommandException catch (e) {
+      if (e.errorCode == 'IDEMPOTENCY_IN_PROGRESS' ||
+          e.errorCode == 'IDEMPOTENCY_STATE_CONFLICT') {
+        _showUnconfirmedSnackBar(
+          'A operação ainda não pôde ser confirmada. '
+          'Verifique o estado da OS antes de tentar novamente.',
+        );
+      } else {
+        _showErrorSnackBar(e);
+      }
     } catch (e) {
       _showErrorSnackBar(e);
-    } finally {
-      if (mounted) setState(() => _isCommandInFlight = false);
+    }
+  }
+
+  ServiceOrderEntity _orderFromConfirmedProjection(
+    StaffServiceOrderProjection projection,
+  ) {
+    final wire = projection.wire;
+    if (projection.serviceOrderId != _displayOrder.id ||
+        wire['id'] != _displayOrder.id ||
+        wire['contractVersion'] != 2) {
+      throw const StaffSoProjectionUncertaintyException(
+        cause: StaffSoCommandException(
+          502,
+          'STAFF_PROJECTION_RESPONSE_INVALID',
+        ),
+      );
+    }
+
+    try {
+      return ServiceOrderEntity(
+        id: wire['id'] as String,
+        friendlyId: wire['friendlyId'] as int?,
+        customerId: wire['customerId'] as String?,
+        equipmentId: wire['equipmentId'] as String,
+        technicianId: wire['technicianId'] as String?,
+        status: ServiceOrderStatusExtension.fromDbString(wire['status']),
+        problemDescription: wire['problemDescription'] as String,
+        diagnosis: wire['diagnosis'] as String?,
+        solution: wire['solution'] as String?,
+        totalAmount: MoneyMinor.serviceOrderFromJson(wire['totalAmountMinor']),
+        updatedAt: wire['updatedAt'] as String,
+      );
+    } catch (error) {
+      throw StaffSoProjectionUncertaintyException(cause: error);
     }
   }
 
@@ -198,8 +212,8 @@ class _ServiceOrderDetailPageState
                 const Text('Cancelar', style: TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
-            style:
-                ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7)),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0284C7)),
             onPressed: () => Navigator.pop(ctx, true),
             child:
                 const Text('Publicar', style: TextStyle(color: Colors.white)),
@@ -266,8 +280,7 @@ class _ServiceOrderDetailPageState
               const SizedBox(height: 8),
               Text(
                 '${currentItems.length} item(s) serão incluídos.',
-                style:
-                    const TextStyle(color: Colors.white54, fontSize: 12),
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
             ],
           ),
@@ -315,14 +328,13 @@ class _ServiceOrderDetailPageState
         : diagnosisController.text.trim();
 
     await _runCommand(
-      () => ref
-          .read(staffSoCommandsProvider.notifier)
-          .publishCommercialRevision(
-            serviceOrderId: _displayOrder.id,
-            diagnosis: diagnosis,
-            items: revisionItems,
-            changeReason: reason,
-          ),
+      () =>
+          ref.read(staffSoCommandsProvider.notifier).publishCommercialRevision(
+                serviceOrderId: _displayOrder.id,
+                diagnosis: diagnosis,
+                items: revisionItems,
+                changeReason: reason,
+              ),
       'Revisão de orçamento publicada com sucesso.',
     );
   }
@@ -368,8 +380,7 @@ class _ServiceOrderDetailPageState
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF0284C7)),
             onPressed: () => Navigator.pop(ctx, true),
-            child:
-                const Text('Retomar', style: TextStyle(color: Colors.white)),
+            child: const Text('Retomar', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -434,8 +445,8 @@ class _ServiceOrderDetailPageState
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF16A34A)),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Confirmar',
-                style: TextStyle(color: Colors.white)),
+            child:
+                const Text('Confirmar', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -527,6 +538,8 @@ class _ServiceOrderDetailPageState
     final role = currentUser?.role.trim().toUpperCase();
     final isStaff = role == 'ADMIN' || role == 'TECHNICIAN';
     final canPrint = isStaff;
+    final isCommandInFlight =
+        isStaff && ref.watch(staffSoCommandsProvider).isLoading;
 
     final itemsAsync = ref.watch(serviceOrderItemsProvider(_displayOrder.id));
     final partsAsync = ref.watch(partsProvider);
@@ -535,10 +548,10 @@ class _ServiceOrderDetailPageState
 
     // Determine which STAFF actions are visible for the current status.
     // These are UX-only rules — the backend is the security authority.
-    final showPublishQuote = isStaff && status == ServiceOrderStatusEnum.diagnostico;
-    final showReviseQuote = isStaff &&
-        (status == ServiceOrderStatusEnum.aguardandoAprovacao ||
-            status == ServiceOrderStatusEnum.aguardandoReaprovacao);
+    final showPublishQuote =
+        isStaff && status == ServiceOrderStatusEnum.diagnostico;
+    final showReviseQuote =
+        isStaff && status == ServiceOrderStatusEnum.emExecucao;
     final showResumeApprovedScope =
         isStaff && status == ServiceOrderStatusEnum.aguardandoReaprovacao;
     final showMarkReady =
@@ -701,7 +714,7 @@ class _ServiceOrderDetailPageState
                         ],
                       ),
                       const SizedBox(height: 12),
-                      if (_isCommandInFlight) ...[
+                      if (isCommandInFlight) ...[
                         const Center(
                           child: Padding(
                             padding: EdgeInsets.symmetric(vertical: 8),
@@ -1060,8 +1073,8 @@ class _ServiceOrderDetailPageState
                   }
 
                   await ref
-                      .read(serviceOrderItemsProvider(_displayOrder.id)
-                          .notifier)
+                      .read(
+                          serviceOrderItemsProvider(_displayOrder.id).notifier)
                       .addItem(
                         serviceOrderId: _displayOrder.id,
                         partId: selectedPartId,
