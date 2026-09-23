@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'package:assistailab/core/commands/command_failure.dart';
 import 'package:assistailab/features/auth/application/session_api_client.dart';
+import 'package:assistailab/features/service_orders/data/dtos/service_order_read_dto.dart';
 
 final _uuidPattern = RegExp(
   r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
@@ -349,16 +350,22 @@ final class StaffSoHttpCommandGateway implements StaffSoCommandGateway {
       '/service-orders/$serviceOrderId/projection',
     ).timeout(_timeout);
     final decoded = _decodeSuccess(response);
-    if (decoded['id'] != serviceOrderId || decoded['contractVersion'] != 2) {
+    try {
+      final dto = ServiceOrderProjectionDto.fromWire(
+        decoded,
+        audience: ServiceOrderProjectionAudience.staff,
+        expectedServiceOrderId: serviceOrderId,
+      );
+      return StaffServiceOrderProjection(
+        serviceOrderId: serviceOrderId,
+        wire: Map.unmodifiable(Map<String, dynamic>.from(dto.toWire())),
+      );
+    } on Object {
       throw const StaffSoCommandException(
         502,
         'STAFF_PROJECTION_RESPONSE_INVALID',
       );
     }
-    return StaffServiceOrderProjection(
-      serviceOrderId: serviceOrderId,
-      wire: Map.unmodifiable(decoded),
-    );
   }
 
   static Map<String, dynamic> _decodeSuccess(http.Response response) {
