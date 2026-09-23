@@ -20,17 +20,44 @@ abstract final class SyncProjectionApplier {
     DatabaseExecutor db,
     List<Map<String, dynamic>> records,
   ) async {
-    for (final table in const [
-      'service_order_items',
-      'service_orders',
-      'payments',
-      'equipments',
-      'customers',
-    ]) {
-      await db.delete(table);
-    }
+    final policy = await _ProjectionPendingMutationPolicy.forBootstrap(db);
+
+    // A bootstrap must be able to finish before the existing Push flow runs.
+    // Preserve pending aggregates in place instead of rejecting the complete
+    // snapshot, which would otherwise deadlock local mutations behind the
+    // bootstrap prerequisite.
+    await _deleteBootstrapRowsExcept(
+      db,
+      table: 'service_order_items',
+      identityColumn: 'service_order_id',
+      protectedIds: policy.serviceOrderIds,
+    );
+    await _deleteBootstrapRowsExcept(
+      db,
+      table: 'service_orders',
+      identityColumn: 'id',
+      protectedIds: policy.serviceOrderIds,
+    );
+    await db.delete('payments');
+    await _deleteBootstrapRowsExcept(
+      db,
+      table: 'equipments',
+      identityColumn: 'id',
+      protectedIds: policy.equipmentIds,
+    );
+    await _deleteBootstrapRowsExcept(
+      db,
+      table: 'customers',
+      identityColumn: 'id',
+      protectedIds: policy.customerIds,
+    );
     for (final record in records) {
-      await applyRecord(db, record);
+      await _applyRecord(
+        db,
+        record,
+        policy: policy,
+        preservePending: true,
+      );
     }
   }
 
@@ -42,9 +69,9 @@ abstract final class SyncProjectionApplier {
     final entityId = _requiredString(change, 'entityId');
     final operation = _requiredString(change, 'operationType');
     if (operation == 'DELETE') {
-      if (entityType == 'SERVICE_ORDER') {
-        await _assertNoPendingServiceOrderMutation(db, entityId);
-      }
+      final policy =
+          await _ProjectionPendingMutationPolicy.forEntity(db, entityType);
+      policy.assertRemoteApplicationAllowed(entityType, entityId);
       await _delete(db, entityType, entityId);
       return;
     }
@@ -62,12 +89,27 @@ abstract final class SyncProjectionApplier {
   static Future<void> applyRecord(
     DatabaseExecutor db,
     Map<String, dynamic> record,
-  ) async {
+  ) {
+    return _applyRecord(db, record);
+  }
+
+  static Future<void> _applyRecord(
+    DatabaseExecutor db,
+    Map<String, dynamic> record, {
+    _ProjectionPendingMutationPolicy? policy,
+    bool preservePending = false,
+  }) async {
     final entityType = _requiredString(record, 'entityType').toUpperCase();
     final entityId = _requiredString(record, 'entityId');
     final data = _requiredMap(record['data']);
     if (data['id'] != entityId) {
       throw const SyncProjectionException('SYNC_ENTITY_ID_MISMATCH');
+    }
+    final effectivePolicy = policy ??
+        await _ProjectionPendingMutationPolicy.forEntity(db, entityType);
+    if (effectivePolicy.hasPendingMutation(entityType, entityId)) {
+      if (preservePending) return;
+      throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
     }
     switch (entityType) {
       case 'CUSTOMER':
@@ -121,7 +163,6 @@ abstract final class SyncProjectionApplier {
     String entityId,
     Map<String, dynamic> data,
   ) async {
-    await _assertNoPendingServiceOrderMutation(db, entityId);
     if (data['contractVersion'] != 2) {
       throw const SyncProjectionException('SYNC_CONTRACT_VERSION_INVALID');
     }
@@ -235,49 +276,6 @@ abstract final class SyncProjectionApplier {
     }
   }
 
-  /// A remote snapshot is never allowed to erase a local Service Order or item
-  /// mutation that has not reached the terminal SYNCED state. Throwing keeps
-  /// the surrounding Sync/command transaction atomic and lets the existing
-  /// Outbox + Sync cycle establish precedence; no retry policy is introduced.
-  static Future<void> _assertNoPendingServiceOrderMutation(
-    DatabaseExecutor db,
-    String serviceOrderId,
-  ) async {
-    final rows = await db.query(
-      'outbox',
-      columns: ['entity_type', 'entity_id', 'payload', 'status'],
-      where: 'status <> ? AND entity_type IN (?, ?)',
-      whereArgs: ['SYNCED', 'SERVICE_ORDER', 'SERVICE_ORDER_ITEM'],
-    );
-    for (final row in rows) {
-      final type = (row['entity_type'] as String).toUpperCase();
-      if (type == 'SERVICE_ORDER' && row['entity_id'] == serviceOrderId) {
-        throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
-      }
-      if (type != 'SERVICE_ORDER_ITEM') continue;
-      final rawPayload = row['payload'];
-      if (rawPayload is! String) {
-        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
-      }
-      Object? decoded;
-      try {
-        decoded = jsonDecode(rawPayload);
-      } catch (_) {
-        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
-      }
-      if (decoded is! Map) {
-        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
-      }
-      final parentId = decoded['serviceOrderId'];
-      if (parentId is! String || parentId.isEmpty) {
-        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
-      }
-      if (parentId == serviceOrderId) {
-        throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
-      }
-    }
-  }
-
   static Future<void> _applyPayment(
     DatabaseExecutor db,
     String entityId,
@@ -333,6 +331,42 @@ abstract final class SyncProjectionApplier {
     }
   }
 
+  static Future<void> _deleteBootstrapRowsExcept(
+    DatabaseExecutor db, {
+    required String table,
+    required String identityColumn,
+    required Set<String> protectedIds,
+  }) async {
+    if (protectedIds.isEmpty) {
+      await db.delete(table);
+      return;
+    }
+
+    final rows = await db.query(table, columns: [identityColumn]);
+    final deletableIds = rows
+        .map((row) => row[identityColumn])
+        .whereType<String>()
+        .where((id) => !protectedIds.contains(id))
+        .toSet()
+        .toList(growable: false);
+
+    // Stay below common SQLite bind limits without introducing a schema or
+    // temporary-table protocol solely for bootstrap replacement.
+    const chunkSize = 400;
+    for (var start = 0; start < deletableIds.length; start += chunkSize) {
+      final end = (start + chunkSize < deletableIds.length)
+          ? start + chunkSize
+          : deletableIds.length;
+      final chunk = deletableIds.sublist(start, end);
+      await db.delete(
+        table,
+        where:
+            '$identityColumn IN (${List.filled(chunk.length, '?').join(',')})',
+        whereArgs: chunk,
+      );
+    }
+  }
+
   static Map<String, dynamic> _requiredMap(Object? value) {
     if (value is! Map<String, dynamic>) {
       throw const SyncProjectionException('SYNC_OBJECT_REQUIRED');
@@ -357,5 +391,134 @@ abstract final class SyncProjectionApplier {
       return {for (final key in keys) key: _canonical(value[key])};
     }
     return value;
+  }
+}
+
+/// Central policy for remote projection application while local mutations are
+/// still authoritative in the Outbox.
+///
+/// `status <> SYNCED` intentionally preserves the existing Service Order
+/// behavior, including FAILED/CONFLICT/REQUIRES_ATTENTION as unresolved. The
+/// policy does not pick a winner or remove/mutate Outbox rows.
+final class _ProjectionPendingMutationPolicy {
+  final Set<String> customerIds;
+  final Set<String> equipmentIds;
+  final Set<String> serviceOrderIds;
+
+  const _ProjectionPendingMutationPolicy({
+    required this.customerIds,
+    required this.equipmentIds,
+    required this.serviceOrderIds,
+  });
+
+  static Future<_ProjectionPendingMutationPolicy> forBootstrap(
+    DatabaseExecutor db,
+  ) {
+    return _load(
+      db,
+      includeCustomer: true,
+      includeEquipment: true,
+      includeServiceOrder: true,
+    );
+  }
+
+  static Future<_ProjectionPendingMutationPolicy> forEntity(
+    DatabaseExecutor db,
+    String entityType,
+  ) {
+    return _load(
+      db,
+      includeCustomer: entityType == 'CUSTOMER',
+      includeEquipment: entityType == 'EQUIPMENT',
+      includeServiceOrder: entityType == 'SERVICE_ORDER',
+    );
+  }
+
+  static Future<_ProjectionPendingMutationPolicy> _load(
+    DatabaseExecutor db, {
+    required bool includeCustomer,
+    required bool includeEquipment,
+    required bool includeServiceOrder,
+  }) async {
+    final includedTypes = <String>[
+      if (includeCustomer) 'CUSTOMER',
+      if (includeEquipment) 'EQUIPMENT',
+      if (includeServiceOrder) ...['SERVICE_ORDER', 'SERVICE_ORDER_ITEM'],
+    ];
+    if (includedTypes.isEmpty) {
+      return const _ProjectionPendingMutationPolicy(
+        customerIds: {},
+        equipmentIds: {},
+        serviceOrderIds: {},
+      );
+    }
+
+    final rows = await db.query(
+      'outbox',
+      columns: ['entity_type', 'entity_id', 'payload'],
+      where:
+          'status <> ? AND UPPER(entity_type) IN (${List.filled(includedTypes.length, '?').join(',')})',
+      whereArgs: ['SYNCED', ...includedTypes],
+    );
+    final customerIds = <String>{};
+    final equipmentIds = <String>{};
+    final serviceOrderIds = <String>{};
+    for (final row in rows) {
+      final rawType = row['entity_type'];
+      final entityId = row['entity_id'];
+      if (rawType is! String || entityId is! String || entityId.isEmpty) {
+        throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+      }
+      switch (rawType.toUpperCase()) {
+        case 'CUSTOMER':
+          customerIds.add(entityId);
+        case 'EQUIPMENT':
+          equipmentIds.add(entityId);
+        case 'SERVICE_ORDER':
+          serviceOrderIds.add(entityId);
+        case 'SERVICE_ORDER_ITEM':
+          serviceOrderIds.add(_serviceOrderParentId(row['payload']));
+      }
+    }
+    return _ProjectionPendingMutationPolicy(
+      customerIds: customerIds,
+      equipmentIds: equipmentIds,
+      serviceOrderIds: serviceOrderIds,
+    );
+  }
+
+  bool hasPendingMutation(String entityType, String entityId) {
+    return switch (entityType) {
+      'CUSTOMER' => customerIds.contains(entityId),
+      'EQUIPMENT' => equipmentIds.contains(entityId),
+      'SERVICE_ORDER' => serviceOrderIds.contains(entityId),
+      _ => false,
+    };
+  }
+
+  void assertRemoteApplicationAllowed(String entityType, String entityId) {
+    if (hasPendingMutation(entityType, entityId)) {
+      throw const SyncProjectionException('SYNC_LOCAL_MUTATION_PENDING');
+    }
+  }
+
+  static String _serviceOrderParentId(Object? rawPayload) {
+    if (rawPayload is! String) {
+      throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+    }
+    Object? decoded;
+    try {
+      decoded = jsonDecode(rawPayload);
+    } catch (_) {
+      throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+    }
+    if (decoded is! Map) {
+      throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+    }
+    final parentId = decoded['serviceOrderId'];
+    if (parentId is! String || parentId.isEmpty) {
+      throw const SyncProjectionException('SYNC_LOCAL_OUTBOX_INVALID');
+    }
+    return parentId;
   }
 }
