@@ -63,7 +63,13 @@ class CustomersPage extends ConsumerWidget {
             itemCount: customers.length,
             itemBuilder: (context, index) {
               final customer = customers[index];
-              return _CustomerCard(customer: customer);
+              return _CustomerCard(
+                customer: customer,
+                onEdit: () => _showEditCustomerDialog(
+                  context,
+                  customer,
+                ),
+              );
             },
           );
         },
@@ -143,6 +149,149 @@ class CustomersPage extends ConsumerWidget {
     );
   }
 
+  void _showEditCustomerDialog(
+    BuildContext context,
+    CustomerEntity customer,
+  ) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _EditCustomerDialog(customer: customer),
+    );
+  }
+
+  Widget _buildTextField(
+    TextEditingController controller,
+    String label,
+    IconData icon, {
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.white54),
+        prefixIcon: Icon(icon, color: const Color(0xFF38BDF8), size: 20),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFF334155)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+        ),
+        filled: true,
+        fillColor: const Color(0xFF0F172A),
+      ),
+    );
+  }
+}
+
+class _EditCustomerDialog extends ConsumerStatefulWidget {
+  final CustomerEntity customer;
+
+  const _EditCustomerDialog({required this.customer});
+
+  @override
+  ConsumerState<_EditCustomerDialog> createState() =>
+      _EditCustomerDialogState();
+}
+
+class _EditCustomerDialogState extends ConsumerState<_EditCustomerDialog> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _documentController;
+  late final TextEditingController _emailController;
+  late final TextEditingController _phoneController;
+  late final TextEditingController _addressController;
+
+  @override
+  void initState() {
+    super.initState();
+    final customer = widget.customer;
+    _nameController = TextEditingController(text: customer.name);
+    _documentController = TextEditingController(text: customer.document);
+    _emailController = TextEditingController(text: customer.email);
+    _phoneController = TextEditingController(text: customer.phone);
+    _addressController = TextEditingController(text: customer.address);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _documentController.dispose();
+    _emailController.dispose();
+    _phoneController.dispose();
+    _addressController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1E293B),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text(
+        'Editar Cliente',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildTextField(_nameController, 'Nome *', Icons.person),
+            const SizedBox(height: 12),
+            _buildTextField(_documentController, 'CPF / CNPJ', Icons.badge),
+            const SizedBox(height: 12),
+            _buildTextField(
+              _emailController,
+              'E-mail',
+              Icons.email,
+              keyboardType: TextInputType.emailAddress,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              _phoneController,
+              'Telefone',
+              Icons.phone,
+              keyboardType: TextInputType.phone,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(_addressController, 'Endereço', Icons.home),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text(
+            'Cancelar',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0284C7),
+          ),
+          onPressed: () async {
+            if (_nameController.text.trim().isEmpty) return;
+            await ref.read(customersProvider.notifier).updateCustomer(
+                  id: widget.customer.id,
+                  name: _nameController.text,
+                  document: _documentController.text,
+                  email: _emailController.text,
+                  phone: _phoneController.text,
+                  address: _addressController.text,
+                );
+            if (!mounted) return;
+            Navigator.pop(this.context);
+          },
+          child: const Text('Salvar', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTextField(
     TextEditingController controller,
     String label,
@@ -174,7 +323,12 @@ class CustomersPage extends ConsumerWidget {
 
 class _CustomerCard extends ConsumerWidget {
   final CustomerEntity customer;
-  const _CustomerCard({required this.customer});
+  final VoidCallback onEdit;
+
+  const _CustomerCard({
+    required this.customer,
+    required this.onEdit,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -225,11 +379,23 @@ class _CustomerCard extends ConsumerWidget {
           color: const Color(0xFF1E293B),
           icon: const Icon(Icons.more_vert, color: Colors.white54),
           onSelected: (value) {
-            if (value == 'delete') {
+            if (value == 'edit') {
+              onEdit();
+            } else if (value == 'delete') {
               ref.read(customersProvider.notifier).deleteCustomer(customer.id);
             }
           },
           itemBuilder: (ctx) => [
+            const PopupMenuItem(
+              value: 'edit',
+              child: Row(
+                children: [
+                  Icon(Icons.edit, color: Color(0xFF38BDF8), size: 18),
+                  SizedBox(width: 8),
+                  Text('Editar', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+            ),
             const PopupMenuItem(
               value: 'delete',
               child: Row(

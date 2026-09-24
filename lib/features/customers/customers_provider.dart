@@ -88,6 +88,80 @@ class CustomersNotifier extends AutoDisposeAsyncNotifier<List<CustomerEntity>> {
     state = AsyncData(customers);
   }
 
+  Future<void> updateCustomer({
+    required String id,
+    required String name,
+    String? document,
+    String? email,
+    String? phone,
+    String? address,
+  }) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    final normalizedName = _requiredCustomerField(
+      name,
+      field: 'name',
+      maximumLength: 500,
+    );
+    final updatedCustomer = CustomerEntity(
+      id: id,
+      name: normalizedName,
+      document: _optionalCustomerField(
+        document,
+        field: 'document',
+        maximumLength: 100,
+      ),
+      email: _optionalCustomerField(
+        email,
+        field: 'email',
+        maximumLength: 500,
+      ),
+      phone: _optionalCustomerField(
+        phone,
+        field: 'phone',
+        maximumLength: 100,
+      ),
+      address: _optionalCustomerField(
+        address,
+        field: 'address',
+        maximumLength: 2000,
+      ),
+      updatedAt: DateTime.now().toIso8601String(),
+    );
+    final repo = ref.read(customerRepositoryProvider);
+    final outbox = ref.read(outboxDaoProvider);
+
+    await binding.databaseHandle.database.transaction((txn) async {
+      final existing = await repo.findById(id, executor: txn);
+      if (existing == null) {
+        throw StateError(
+          'Customer is not available in the current authenticated scope.',
+        );
+      }
+
+      await repo.upsert(updatedCustomer, executor: txn);
+      await outbox.insert(
+        OutboxItem(
+          operationId: const Uuid().v4(),
+          entityType: 'CUSTOMER',
+          entityId: updatedCustomer.id,
+          operationType: 'UPDATE',
+          payload: SyncPayloadMapper.customer(updatedCustomer),
+          createdAt: updatedCustomer.updatedAt,
+        ),
+        executor: txn,
+      );
+    });
+
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
+
+    final customers = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(customers);
+  }
+
   Future<void> deleteCustomer(String id) async {
     final binding = _captureBinding(
       ref.read(authenticatedSessionKeyProvider),
@@ -181,3 +255,28 @@ final customersProvider =
     AutoDisposeAsyncNotifierProvider<CustomersNotifier, List<CustomerEntity>>(
   CustomersNotifier.new,
 );
+
+String _requiredCustomerField(
+  String value, {
+  required String field,
+  required int maximumLength,
+}) {
+  final normalized = value.trim();
+  if (normalized.isEmpty || normalized.length > maximumLength) {
+    throw ArgumentError.value(value, field, 'Invalid Customer field.');
+  }
+  return normalized;
+}
+
+String? _optionalCustomerField(
+  String? value, {
+  required String field,
+  required int maximumLength,
+}) {
+  final normalized = value?.trim();
+  if (normalized == null || normalized.isEmpty) return null;
+  if (normalized.length > maximumLength) {
+    throw ArgumentError.value(value, field, 'Invalid Customer field.');
+  }
+  return normalized;
+}
