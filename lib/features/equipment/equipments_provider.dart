@@ -89,6 +89,96 @@ class EquipmentsNotifier
     state = AsyncData(equipments);
   }
 
+  Future<void> updateEquipment({
+    required String id,
+    required String type,
+    required String brand,
+    required String model,
+    String? serialNumber,
+    String? notes,
+  }) async {
+    final binding = _captureBinding(
+      ref.read(authenticatedSessionKeyProvider),
+    );
+    final normalizedType = _requiredEquipmentField(
+      type,
+      field: 'type',
+      maximumLength: 500,
+    );
+    final normalizedBrand = _requiredEquipmentField(
+      brand,
+      field: 'brand',
+      maximumLength: 500,
+    );
+    final normalizedModel = _requiredEquipmentField(
+      model,
+      field: 'model',
+      maximumLength: 500,
+    );
+    final normalizedSerialNumber = _optionalEquipmentField(
+      serialNumber,
+      field: 'serialNumber',
+      maximumLength: 500,
+    );
+    final normalizedNotes = _optionalEquipmentField(
+      notes,
+      field: 'notes',
+      maximumLength: 10000,
+    );
+    final repo = ref.read(equipmentRepositoryProvider);
+    final outbox = ref.read(outboxDaoProvider);
+
+    await binding.databaseHandle.database.transaction((txn) async {
+      final existing = await repo.findById(id, executor: txn);
+      if (existing == null) {
+        throw StateError(
+          'Equipment is not available in the current authenticated scope.',
+        );
+      }
+      if (existing.ownerType != EquipmentOwnerType.customer ||
+          existing.customerId == null) {
+        throw StateError(
+          'Only CUSTOMER-owned Equipment can use generic Sync updates.',
+        );
+      }
+
+      final updatedAt = DateTime.now().toIso8601String();
+      final updatedEquipment = EquipmentEntity(
+        id: existing.id,
+        customerId: existing.customerId,
+        organizationId: existing.organizationId,
+        ownerType: existing.ownerType,
+        organizationPurpose: existing.organizationPurpose,
+        type: normalizedType,
+        brand: normalizedBrand,
+        model: normalizedModel,
+        serialNumber: normalizedSerialNumber,
+        notes: normalizedNotes,
+        updatedAt: updatedAt,
+      );
+
+      await repo.upsert(updatedEquipment, executor: txn);
+      await outbox.insert(
+        OutboxItem(
+          operationId: const Uuid().v4(),
+          entityType: 'EQUIPMENT',
+          entityId: updatedEquipment.id,
+          operationType: 'UPDATE',
+          payload: SyncPayloadMapper.equipment(updatedEquipment),
+          createdAt: updatedAt,
+        ),
+        executor: txn,
+      );
+    });
+
+    _ensureBindingCurrent(binding);
+    _requestSyncIfOnline(binding);
+
+    final equipments = await _load(binding);
+    _ensureBindingCurrent(binding);
+    state = AsyncData(equipments);
+  }
+
   Future<void> deleteEquipment(String id) async {
     final binding = _captureBinding(
       ref.read(authenticatedSessionKeyProvider),
@@ -182,3 +272,28 @@ final equipmentsProvider =
     AutoDisposeAsyncNotifierProvider<EquipmentsNotifier, List<EquipmentEntity>>(
   EquipmentsNotifier.new,
 );
+
+String _requiredEquipmentField(
+  String value, {
+  required String field,
+  required int maximumLength,
+}) {
+  final normalized = value.trim();
+  if (normalized.isEmpty || normalized.length > maximumLength) {
+    throw ArgumentError.value(value, field, 'Invalid Equipment field.');
+  }
+  return normalized;
+}
+
+String? _optionalEquipmentField(
+  String? value, {
+  required String field,
+  required int maximumLength,
+}) {
+  final normalized = value?.trim();
+  if (normalized == null || normalized.isEmpty) return null;
+  if (normalized.length > maximumLength) {
+    throw ArgumentError.value(value, field, 'Invalid Equipment field.');
+  }
+  return normalized;
+}

@@ -66,7 +66,10 @@ class EquipmentsPage extends ConsumerWidget {
             itemCount: equipments.length,
             itemBuilder: (context, index) {
               final eq = equipments[index];
-              return _EquipmentCard(equipment: eq);
+              return _EquipmentCard(
+                equipment: eq,
+                onEdit: () => _showEditEquipmentDialog(context, eq),
+              );
             },
           );
         },
@@ -204,6 +207,160 @@ class EquipmentsPage extends ConsumerWidget {
     );
   }
 
+  void _showEditEquipmentDialog(
+    BuildContext context,
+    EquipmentEntity equipment,
+  ) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _EditEquipmentDialog(equipment: equipment),
+    );
+  }
+
+  Widget _buildTextField(
+    TextEditingController controller,
+    String label,
+    IconData icon, {
+    int maxLines = 1,
+  }) {
+    return TextFormField(
+      controller: controller,
+      maxLines: maxLines,
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.white54),
+        prefixIcon: Icon(icon, color: const Color(0xFF38BDF8), size: 20),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFF334155)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+        ),
+        filled: true,
+        fillColor: const Color(0xFF0F172A),
+      ),
+    );
+  }
+}
+
+class _EditEquipmentDialog extends ConsumerStatefulWidget {
+  final EquipmentEntity equipment;
+
+  const _EditEquipmentDialog({required this.equipment});
+
+  @override
+  ConsumerState<_EditEquipmentDialog> createState() =>
+      _EditEquipmentDialogState();
+}
+
+class _EditEquipmentDialogState extends ConsumerState<_EditEquipmentDialog> {
+  late final TextEditingController _typeController;
+  late final TextEditingController _brandController;
+  late final TextEditingController _modelController;
+  late final TextEditingController _serialController;
+  late final TextEditingController _notesController;
+
+  @override
+  void initState() {
+    super.initState();
+    final equipment = widget.equipment;
+    _typeController = TextEditingController(text: equipment.type);
+    _brandController = TextEditingController(text: equipment.brand);
+    _modelController = TextEditingController(text: equipment.model);
+    _serialController = TextEditingController(text: equipment.serialNumber);
+    _notesController = TextEditingController(text: equipment.notes);
+  }
+
+  @override
+  void dispose() {
+    _typeController.dispose();
+    _brandController.dispose();
+    _modelController.dispose();
+    _serialController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1E293B),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text(
+        'Editar Equipamento',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildTextField(
+              _typeController,
+              'Tipo (ex: Smartphone, Notebook) *',
+              Icons.category,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              _brandController,
+              'Marca (ex: Apple, Dell) *',
+              Icons.branding_watermark,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(_modelController, 'Modelo *', Icons.devices),
+            const SizedBox(height: 12),
+            _buildTextField(
+              _serialController,
+              'Nº de Série / IMEI',
+              Icons.qr_code,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              _notesController,
+              'Observações',
+              Icons.note,
+              maxLines: 2,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text(
+            'Cancelar',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0284C7),
+          ),
+          onPressed: () async {
+            if (_typeController.text.trim().isEmpty ||
+                _brandController.text.trim().isEmpty ||
+                _modelController.text.trim().isEmpty) {
+              return;
+            }
+            await ref.read(equipmentsProvider.notifier).updateEquipment(
+                  id: widget.equipment.id,
+                  type: _typeController.text,
+                  brand: _brandController.text,
+                  model: _modelController.text,
+                  serialNumber: _serialController.text,
+                  notes: _notesController.text,
+                );
+            if (!mounted) return;
+            Navigator.pop(this.context);
+          },
+          child: const Text('Salvar', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTextField(
     TextEditingController controller,
     String label,
@@ -235,7 +392,12 @@ class EquipmentsPage extends ConsumerWidget {
 
 class _EquipmentCard extends ConsumerWidget {
   final EquipmentEntity equipment;
-  const _EquipmentCard({required this.equipment});
+  final VoidCallback onEdit;
+
+  const _EquipmentCard({
+    required this.equipment,
+    required this.onEdit,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -274,11 +436,22 @@ class _EquipmentCard extends ConsumerWidget {
                   style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
           ],
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          onPressed: () => ref
-              .read(equipmentsProvider.notifier)
-              .deleteEquipment(equipment.id),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (equipment.ownerType == EquipmentOwnerType.customer)
+              IconButton(
+                tooltip: 'Editar',
+                icon: const Icon(Icons.edit, color: Color(0xFF38BDF8)),
+                onPressed: onEdit,
+              ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              onPressed: () => ref
+                  .read(equipmentsProvider.notifier)
+                  .deleteEquipment(equipment.id),
+            ),
+          ],
         ),
       ),
     );
