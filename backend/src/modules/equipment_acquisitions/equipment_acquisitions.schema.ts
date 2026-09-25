@@ -1,75 +1,57 @@
 import {
+  AcquisitionSource,
   EquipmentConsentMethod,
   EquipmentPurpose,
 } from '@prisma/client';
+import { z } from 'zod';
 
 import {
-  z,
-} from 'zod';
+  DECIMAL_10_2_MAX_MINOR,
+  serviceOrderMoneyMinorSchema,
+} from '../../core/money/money.js';
 
-/**
- * A aquisição C4 representa somente equipamentos
- * destinados a revenda ou aproveitamento de peças.
- *
- * INTERNAL_USE existe no domínio, mas não pertence
- * ao fluxo C4.
- */
-export const createEquipmentAcquisitionSchema =
-  z.object({
-    equipmentId:
-      z.string()
-        .uuid(),
+const acquisitionPurposeSchema = z.nativeEnum(EquipmentPurpose).refine(
+  value => value === EquipmentPurpose.RESALE || value === EquipmentPurpose.PARTS_DONOR,
+  { message: 'Acquisition purpose must be RESALE or PARTS_DONOR' }
+);
 
-    serviceOrderId:
-      z.string()
-        .uuid()
-        .optional(),
+const offeredAmountMinorSchema = serviceOrderMoneyMinorSchema
+  .min(1)
+  .max(DECIMAL_10_2_MAX_MINOR);
 
-    purpose:
-      z.nativeEnum(
-        EquipmentPurpose
-      )
-        .refine(
-          (
-            value
-          ) =>
-            value ===
-              EquipmentPurpose.RESALE ||
-            value ===
-              EquipmentPurpose.PARTS_DONOR,
-          {
-            message:
-              'C4 acquisition purpose must be RESALE or PARTS_DONOR',
-          }
-        ),
+const commonCreateShape = {
+  equipmentId: z.string().uuid(),
+  purpose: acquisitionPurposeSchema,
+  offeredAmountMinor: offeredAmountMinorSchema.optional(),
+  notes: z.string().trim().max(5000).optional(),
+  clientPreAcquisitionId: z.string().uuid().optional(),
+};
 
-    offeredAmount:
-      z.number()
-        .positive()
-        .finite()
-        .optional(),
+export const createEquipmentAcquisitionSchema = z.object({
+  ...commonCreateShape,
+  source: z.literal(AcquisitionSource.SERVICE_ORDER),
+  serviceOrderId: z.string().uuid(),
+}).strict();
 
-    notes:
-      z.string()
-        .trim()
-        .max(5000)
-        .optional(),
-  });
+export const createDirectOfferSchema = z.object({
+  ...commonCreateShape,
+  source: z.literal(AcquisitionSource.DIRECT_OFFER),
+}).strict();
 
-export const authorizeEquipmentAcquisitionSchema =
-  z.object({
-    consentMethod:
-      z.nativeEnum(
-        EquipmentConsentMethod
-      ),
-  });
+export const authorizeEquipmentAcquisitionSchema = z.object({
+  consentMethod: z.nativeEnum(EquipmentConsentMethod).refine(
+    value => value !== EquipmentConsentMethod.IN_PERSON_ASSISTED,
+    { message: 'IN_PERSON_ASSISTED is exclusive to direct in-person authorization' }
+  ),
+}).strict();
 
-export type CreateEquipmentAcquisitionInput =
-  z.infer<
-    typeof createEquipmentAcquisitionSchema
-  >;
+export const authorizeInPersonSchema = z.object({
+  consentMethod: z.literal(EquipmentConsentMethod.IN_PERSON_ASSISTED),
+}).strict();
 
-export type AuthorizeEquipmentAcquisitionInput =
-  z.infer<
-    typeof authorizeEquipmentAcquisitionSchema
-  >;
+export const emptyAcquisitionMutationSchema = z.object({}).strict();
+
+export type CreateEquipmentAcquisitionInput = z.infer<typeof createEquipmentAcquisitionSchema>;
+export type CreateDirectOfferInput = z.infer<typeof createDirectOfferSchema>;
+export type AuthorizeEquipmentAcquisitionInput = z.infer<typeof authorizeEquipmentAcquisitionSchema>;
+export type AuthorizeInPersonInput = z.infer<typeof authorizeInPersonSchema>;

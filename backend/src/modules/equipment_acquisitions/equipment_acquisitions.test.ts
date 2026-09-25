@@ -18,10 +18,12 @@ import type {
 } from 'fastify';
 
 import {
+  AcquisitionSource,
   EquipmentAcquisitionStatus,
   EquipmentConsentMethod,
   EquipmentOwnerType,
   EquipmentPurpose,
+  IdempotencyStatus,
   Role,
   UserStatus,
 } from '@prisma/client';
@@ -33,6 +35,10 @@ import {
 import {
   prisma,
 } from '../../core/database/prisma.js';
+
+import {
+  computeCanonicalHash,
+} from '../../core/idempotency/canonical_json.js';
 
 /**
  * ============================================================
@@ -80,6 +86,12 @@ describe(
     const customerUserId =
       randomUUID();
 
+    const otherCustomerId =
+      randomUUID();
+
+    const otherCustomerUserId =
+      randomUUID();
+
     const adminPassword =
       'C4-Admin@123456';
 
@@ -95,11 +107,14 @@ describe(
     const customerEmail =
       `c4-customer-${runId}@assistailab.test`;
 
+    const otherCustomerEmail =
+      `c4-other-customer-${runId}@assistailab.test`;
+
     const equipmentIds =
       Array.from(
         {
           length:
-            6,
+            18,
         },
         () =>
           randomUUID()
@@ -109,7 +124,7 @@ describe(
       Array.from(
         {
           length:
-            6,
+            18,
         },
         () =>
           randomUUID()
@@ -126,6 +141,9 @@ describe(
       string;
 
     let customerToken:
+      string;
+
+    let otherCustomerToken:
       string;
 
     async function login(
@@ -165,9 +183,14 @@ describe(
           headers: {
             authorization:
               `Bearer ${adminAToken}`,
+            'x-operation-id':
+              randomUUID(),
           },
 
           payload: {
+            source:
+              AcquisitionSource.SERVICE_ORDER,
+
             equipmentId:
               equipmentIds[
                 equipmentIndex
@@ -180,8 +203,8 @@ describe(
 
             purpose,
 
-            offeredAmount:
-              350 +
+            offeredAmountMinor:
+              35000 +
               equipmentIndex,
 
             notes:
@@ -348,6 +371,14 @@ describe(
             },
           });
 
+        await prisma.customer.create({
+          data: {
+            id: otherCustomerId,
+            name: 'C4 Other Customer',
+            email: otherCustomerEmail,
+          },
+        });
+
         await prisma
           .user
           .create({
@@ -373,6 +404,18 @@ describe(
               customerId,
             },
           });
+
+        await prisma.user.create({
+          data: {
+            id: otherCustomerUserId,
+            name: 'C4 Other Customer',
+            email: otherCustomerEmail,
+            passwordHash: customerPasswordHash,
+            role: Role.CUSTOMER,
+            status: UserStatus.ACTIVE,
+            customerId: otherCustomerId,
+          },
+        });
 
         await prisma
           .customerOrganization
@@ -490,6 +533,11 @@ describe(
             customerPassword
           );
 
+        const otherCustomerLogin = await login(
+          otherCustomerEmail,
+          customerPassword
+        );
+
         assert.equal(
           adminALogin.statusCode,
           200
@@ -505,6 +553,8 @@ describe(
           200
         );
 
+        assert.equal(otherCustomerLogin.statusCode, 200);
+
         adminAToken =
           adminALogin
             .json()
@@ -519,6 +569,8 @@ describe(
           customerLogin
             .json()
             .token;
+
+        otherCustomerToken = otherCustomerLogin.json().token;
       }
     );
 
@@ -543,6 +595,14 @@ describe(
               ],
             },
           });
+
+        await prisma.operationIdempotency.deleteMany({
+          where: {
+            organizationId: {
+              in: [organizationAId, organizationBId],
+            },
+          },
+        });
 
         await prisma
           .serviceOrder
@@ -592,6 +652,7 @@ describe(
                   adminAId,
                   adminBId,
                   customerUserId,
+                  otherCustomerUserId,
                 ],
               },
             },
@@ -609,8 +670,9 @@ describe(
           .customer
           .deleteMany({
             where: {
-              id:
-                customerId,
+              id: {
+                in: [customerId, otherCustomerId],
+              },
             },
           });
 
@@ -723,6 +785,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${adminAToken}`,
+              'x-operation-id': randomUUID(),
             },
           });
 
@@ -817,6 +880,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${customerToken}`,
+              'x-operation-id': randomUUID(),
             },
 
             payload: {
@@ -944,6 +1008,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${customerToken}`,
+              'x-operation-id': randomUUID(),
             },
           });
 
@@ -961,6 +1026,17 @@ describe(
             .REJECTED
         );
 
+        const rejectAudit = await prisma.customerEvent.findFirst({
+          where: {
+            customerId,
+            organizationId: organizationAId,
+            title: 'Equipment acquisition REJECT',
+            metadata: { path: '$.acquisitionId', equals: proposal.id },
+          },
+        });
+        assert.ok(rejectAudit);
+        assert.equal((rejectAudit.metadata as any).actorUserId, customerUserId);
+
         /**
          * Organization não pode completar
          * uma proposta rejeitada.
@@ -976,6 +1052,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${adminAToken}`,
+              'x-operation-id': randomUUID(),
             },
           });
 
@@ -1030,6 +1107,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${customerToken}`,
+              'x-operation-id': randomUUID(),
             },
 
             payload: {
@@ -1055,6 +1133,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${adminAToken}`,
+              'x-operation-id': randomUUID(),
             },
           });
 
@@ -1167,6 +1246,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${customerToken}`,
+              'x-operation-id': randomUUID(),
             },
 
             payload: {
@@ -1192,6 +1272,7 @@ describe(
             headers: {
               authorization:
                 `Bearer ${adminAToken}`,
+              'x-operation-id': randomUUID(),
             },
           });
 
@@ -1244,6 +1325,407 @@ describe(
           equipmentFromB.statusCode,
           404
         );
+      }
+    );
+
+    test(
+      'P08-B validates explicit source, exact money, canonical idempotency and business correlation',
+      async () => {
+        const operationId = randomUUID();
+        const clientPreAcquisitionId = randomUUID();
+        const payload = {
+          source: AcquisitionSource.DIRECT_OFFER,
+          equipmentId: equipmentIds[9],
+          purpose: EquipmentPurpose.RESALE,
+          offeredAmountMinor: 125001,
+          notes: 'Direct offer intent',
+          clientPreAcquisitionId,
+        };
+        const headers = {
+          authorization: `Bearer ${adminAToken}`,
+          'x-operation-id': operationId,
+        };
+
+        const missingServiceOrder = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: {
+            source: AcquisitionSource.SERVICE_ORDER,
+            equipmentId: equipmentIds[17],
+            purpose: EquipmentPurpose.RESALE,
+          },
+        });
+        assert.equal(missingServiceOrder.statusCode, 400);
+
+        const serviceEndpointWithDirectSource = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: {
+            source: AcquisitionSource.DIRECT_OFFER,
+            equipmentId: equipmentIds[17],
+            serviceOrderId: serviceOrderIds[17],
+            purpose: EquipmentPurpose.RESALE,
+          },
+        });
+        assert.equal(serviceEndpointWithDirectSource.statusCode, 400);
+
+        const directWithServiceOrder = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: { ...payload, serviceOrderId: serviceOrderIds[9] },
+        });
+        assert.equal(directWithServiceOrder.statusCode, 400);
+
+        const missingOperationId = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}` },
+          payload,
+        });
+        assert.equal(missingOperationId.statusCode, 400);
+
+        const created = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers,
+          payload,
+        });
+        assert.equal(created.statusCode, 201);
+        const createdAcquisition = created.json().acquisition;
+        createdAcquisitionIds.push(createdAcquisition.id);
+        assert.equal(createdAcquisition.source, AcquisitionSource.DIRECT_OFFER);
+        assert.equal(createdAcquisition.serviceOrderId, null);
+        assert.equal(createdAcquisition.offeredAmountMinor, 125001);
+        assert.equal('offeredAmount' in createdAcquisition, false);
+        assert.equal('activeEquipmentGuard' in createdAcquisition, false);
+
+        const persisted = await prisma.equipmentAcquisition.findUniqueOrThrow({
+          where: { id: createdAcquisition.id },
+        });
+        assert.equal(persisted.offeredAmount?.toFixed(2), '1250.01');
+        assert.equal(persisted.createdByUserId, adminAId);
+        assert.equal(persisted.activeEquipmentGuard, equipmentIds[9]);
+
+        const replay = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers,
+          payload,
+        });
+        assert.equal(replay.statusCode, 201);
+        assert.equal(replay.json().acquisition.id, createdAcquisition.id);
+
+        const keyReuse = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers,
+          payload: { ...payload, notes: 'Different request' },
+        });
+        assert.equal(keyReuse.statusCode, 409);
+
+        const businessRetry = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload,
+        });
+        assert.equal(businessRetry.statusCode, 200);
+        assert.equal(businessRetry.json().acquisition.id, createdAcquisition.id);
+
+        const incompatibleIntent = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: { ...payload, equipmentId: equipmentIds[10] },
+        });
+        assert.equal(incompatibleIntent.statusCode, 409);
+
+        const createAudit = await prisma.customerEvent.findFirst({
+          where: {
+            customerId,
+            organizationId: organizationAId,
+            title: 'Equipment acquisition CREATE',
+            metadata: { path: '$.acquisitionId', equals: createdAcquisition.id },
+          },
+        });
+        assert.ok(createAudit);
+        assert.equal((createAudit.metadata as any).actorUserId, adminAId);
+      }
+    );
+
+    test(
+      'P08-B enforces one active acquisition across SO x SO, SO x DIRECT and DIRECT x DIRECT',
+      async () => {
+        const staffHeaders = () => ({
+          authorization: `Bearer ${adminAToken}`,
+          'x-operation-id': randomUUID(),
+        });
+        const servicePayload = (index: number) => ({
+          source: AcquisitionSource.SERVICE_ORDER,
+          equipmentId: equipmentIds[index],
+          serviceOrderId: serviceOrderIds[index],
+          purpose: EquipmentPurpose.RESALE,
+        });
+        const directPayload = (index: number) => ({
+          source: AcquisitionSource.DIRECT_OFFER,
+          equipmentId: equipmentIds[index],
+          purpose: EquipmentPurpose.RESALE,
+        });
+        const cases = [
+          {
+            index: 6,
+            calls: () => Promise.all([
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions', headers: staffHeaders(), payload: servicePayload(6) }),
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions', headers: staffHeaders(), payload: servicePayload(6) }),
+            ]),
+          },
+          {
+            index: 7,
+            calls: () => Promise.all([
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions', headers: staffHeaders(), payload: servicePayload(7) }),
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions/direct-offer', headers: staffHeaders(), payload: directPayload(7) }),
+            ]),
+          },
+          {
+            index: 8,
+            calls: () => Promise.all([
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions/direct-offer', headers: staffHeaders(), payload: directPayload(8) }),
+              app.inject({ method: 'POST', url: '/api/v1/equipment-acquisitions/direct-offer', headers: staffHeaders(), payload: directPayload(8) }),
+            ]),
+          },
+        ];
+
+        for (const concurrencyCase of cases) {
+          const responses = await concurrencyCase.calls();
+          assert.deepEqual(responses.map(response => response.statusCode).sort(), [201, 409]);
+          const activeCount = await prisma.equipmentAcquisition.count({
+            where: {
+              equipmentId: equipmentIds[concurrencyCase.index],
+              status: { in: [EquipmentAcquisitionStatus.PENDING, EquipmentAcquisitionStatus.AUTHORIZED] },
+            },
+          });
+          assert.equal(activeCount, 1);
+        }
+      }
+    );
+
+    test(
+      'P08-B scopes customer authorization and limits assisted consent to pending direct offers',
+      async () => {
+        const direct = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: {
+            source: AcquisitionSource.DIRECT_OFFER,
+            equipmentId: equipmentIds[10],
+            purpose: EquipmentPurpose.PARTS_DONOR,
+          },
+        });
+        assert.equal(direct.statusCode, 201);
+        const directId = direct.json().acquisition.id;
+
+        const wrongCustomer = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${directId}/authorize`,
+          headers: { authorization: `Bearer ${otherCustomerToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.CUSTOMER_APP },
+        });
+        assert.equal(wrongCustomer.statusCode, 404);
+
+        const assisted = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${directId}/authorize-in-person`,
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.IN_PERSON_ASSISTED },
+        });
+        assert.equal(assisted.statusCode, 200);
+        assert.equal(assisted.json().acquisition.status, EquipmentAcquisitionStatus.AUTHORIZED);
+
+        const persistedDirect = await prisma.equipmentAcquisition.findUniqueOrThrow({ where: { id: directId } });
+        assert.equal(persistedDirect.authorizedByUserId, adminAId);
+        assert.equal(persistedDirect.consentMethod, EquipmentConsentMethod.IN_PERSON_ASSISTED);
+
+        const serviceOrderProposal = await createProposal(11, EquipmentPurpose.RESALE);
+        const invalidAssisted = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${serviceOrderProposal.id}/authorize-in-person`,
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.IN_PERSON_ASSISTED },
+        });
+        assert.equal(invalidAssisted.statusCode, 409);
+
+        const customerProposal = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: {
+            source: AcquisitionSource.DIRECT_OFFER,
+            equipmentId: equipmentIds[12],
+            purpose: EquipmentPurpose.RESALE,
+          },
+        });
+        const customerProposalId = customerProposal.json().acquisition.id;
+        const forbiddenMethod = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${customerProposalId}/authorize`,
+          headers: { authorization: `Bearer ${customerToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.IN_PERSON_ASSISTED },
+        });
+        assert.equal(forbiddenMethod.statusCode, 400);
+
+        const correctCustomer = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${customerProposalId}/authorize`,
+          headers: { authorization: `Bearer ${customerToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.DIGITAL_SIGNATURE },
+        });
+        assert.equal(correctCustomer.statusCode, 200);
+        assert.equal(correctCustomer.json().acquisition.authorizedByUserId, customerUserId);
+      }
+    );
+
+    test(
+      'P08-B completes ownership atomically once under race and records reconstructable audit',
+      async () => {
+        const clientPreAcquisitionId = randomUUID();
+        const directPayload = {
+          source: AcquisitionSource.DIRECT_OFFER,
+          equipmentId: equipmentIds[13],
+          purpose: EquipmentPurpose.RESALE,
+          clientPreAcquisitionId,
+        };
+        const proposal = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: directPayload,
+        });
+        const acquisitionId = proposal.json().acquisition.id;
+        const authorize = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${acquisitionId}/authorize`,
+          headers: { authorization: `Bearer ${customerToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.SIGNED_DOCUMENT },
+        });
+        assert.equal(authorize.statusCode, 200);
+
+        const operationIds = [randomUUID(), randomUUID()];
+        const completions = await Promise.all(operationIds.map(currentOperationId => app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${acquisitionId}/complete`,
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': currentOperationId },
+        })));
+        assert.deepEqual(completions.map(response => response.statusCode).sort(), [200, 409]);
+
+        const successIndex = completions.findIndex(response => response.statusCode === 200);
+        const replay = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${acquisitionId}/complete`,
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': operationIds[successIndex] },
+        });
+        assert.equal(replay.statusCode, 200);
+
+        const [persistedAcquisition, equipment, auditEvents] = await Promise.all([
+          prisma.equipmentAcquisition.findUniqueOrThrow({ where: { id: acquisitionId } }),
+          prisma.equipment.findUniqueOrThrow({ where: { id: equipmentIds[13] } }),
+          prisma.customerEvent.findMany({
+            where: {
+              organizationId: organizationAId,
+              title: {
+                in: [
+                  'Equipment acquisition CREATE',
+                  'Equipment acquisition AUTHORIZE',
+                  'Equipment acquisition COMPLETE',
+                ],
+              },
+              metadata: { path: '$.acquisitionId', equals: acquisitionId },
+            },
+          }),
+        ]);
+        assert.equal(persistedAcquisition.status, EquipmentAcquisitionStatus.COMPLETED);
+        assert.equal(persistedAcquisition.completedByUserId, adminAId);
+        assert.equal(persistedAcquisition.activeEquipmentGuard, null);
+        assert.equal(equipment.ownerType, EquipmentOwnerType.ORGANIZATION);
+        assert.equal(equipment.organizationId, organizationAId);
+        assert.equal(equipment.customerId, null);
+        assert.deepEqual(
+          auditEvents.map(event => (event.metadata as any).action).sort(),
+          ['AUTHORIZE', 'COMPLETE', 'CREATE']
+        );
+        const completeAudit = auditEvents.find(
+          event => (event.metadata as any).action === 'COMPLETE'
+        );
+        assert.equal((completeAudit?.metadata as any).actorUserId, adminAId);
+
+        const businessRetryAfterCompletion = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+          payload: directPayload,
+        });
+        assert.equal(businessRetryAfterCompletion.statusCode, 200);
+        assert.equal(businessRetryAfterCompletion.json().acquisition.id, acquisitionId);
+
+        const terminalTransition = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${acquisitionId}/authorize`,
+          headers: { authorization: `Bearer ${customerToken}`, 'x-operation-id': randomUUID() },
+          payload: { consentMethod: EquipmentConsentMethod.CUSTOMER_APP },
+        });
+        assert.equal(terminalTransition.statusCode, 409);
+
+        const crossTenantComplete = await app.inject({
+          method: 'POST',
+          url: `/api/v1/equipment-acquisitions/${acquisitionId}/complete`,
+          headers: { authorization: `Bearer ${adminBToken}`, 'x-operation-id': randomUUID() },
+        });
+        assert.equal(crossTenantComplete.statusCode, 404);
+      }
+    );
+
+    test(
+      'P08-B reports canonical IN_PROGRESS for an unexpired operation reservation',
+      async () => {
+        const operationId = randomUUID();
+        const payload = {
+          source: AcquisitionSource.DIRECT_OFFER,
+          equipmentId: equipmentIds[14],
+          purpose: EquipmentPurpose.RESALE,
+        };
+        await prisma.operationIdempotency.create({
+          data: {
+            operationId,
+            userId: adminAId,
+            organizationId: organizationAId,
+            command: 'P08B_CREATE_DIRECT_OFFER',
+            endpoint: '/api/v1/equipment-acquisitions/direct-offer',
+            requestHash: computeCanonicalHash({
+              equipmentId: equipmentIds[14],
+              source: AcquisitionSource.DIRECT_OFFER,
+              serviceOrderId: null,
+              purpose: EquipmentPurpose.RESALE,
+              offeredAmountMinor: null,
+              notes: null,
+              clientPreAcquisitionId: null,
+            }),
+            status: IdempotencyStatus.PROCESSING,
+            processingExpiresAt: new Date(Date.now() + 60_000),
+            leaseToken: randomUUID(),
+          },
+        });
+
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/equipment-acquisitions/direct-offer',
+          headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': operationId },
+          payload,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(response.json().error, 'IDEMPOTENCY_IN_PROGRESS');
       }
     );
   }

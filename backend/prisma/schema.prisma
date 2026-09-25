@@ -213,11 +213,17 @@ enum EquipmentAcquisitionStatus {
   COMPLETED
 }
 
+enum AcquisitionSource {
+  SERVICE_ORDER
+  DIRECT_OFFER
+}
+
 enum EquipmentConsentMethod {
   CUSTOMER_APP
   QR_CODE
   DIGITAL_SIGNATURE
   SIGNED_DOCUMENT
+  IN_PERSON_ASSISTED
 }
 
 model User {
@@ -233,25 +239,28 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  customer             Customer?                   @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  memberships          Membership[]
-  devices              Device[]
-  sessions             Session[]
-  assignedOrders       ServiceOrder[]              @relation("TechnicianOrders")
-  statusHistoryChanges ServiceOrderStatusHistory[] @relation("UserStatusChanges")
-  createdAccessGrants  AccessGrant[]               @relation("AccessGrantCreator")
-  uploadedMedia        MediaAsset[]                @relation("MediaUploadedBy")
-  createdCampaigns     Campaign[]                  @relation("CampaignCreatedBy")
-  paymentsCreated       Payment[]                    @relation("PaymentCreatedBy")
-  paymentsConfirmed     Payment[]                    @relation("PaymentConfirmedBy")
-  paymentsCancelled     Payment[]                    @relation("PaymentCancelledBy")
-  quoteRevisionsCreated ServiceOrderQuoteRevision[]  @relation("QuoteRevisionCreatedBy")
-  quoteDecisions        CustomerQuoteDecision[]      @relation("QuoteDecisionBy")
-  receivablesCreated    Receivable[]                 @relation("ReceivableCreatedBy")
-  receivablesCancelled  Receivable[]                 @relation("ReceivableCancelledBy")
-  schedulesCreated      ReceivableSchedule[]         @relation("ReceivableScheduleCreatedBy")
-  allocationsCreated    PaymentAllocation[]          @relation("PaymentAllocationCreatedBy")
-  financialAuditEvents  FinancialAuditEvent[]        @relation("FinancialAuditActor")
+  customer               Customer?                   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  memberships            Membership[]
+  devices                Device[]
+  sessions               Session[]
+  assignedOrders         ServiceOrder[]              @relation("TechnicianOrders")
+  statusHistoryChanges   ServiceOrderStatusHistory[] @relation("UserStatusChanges")
+  createdAccessGrants    AccessGrant[]               @relation("AccessGrantCreator")
+  uploadedMedia          MediaAsset[]                @relation("MediaUploadedBy")
+  createdCampaigns       Campaign[]                  @relation("CampaignCreatedBy")
+  paymentsCreated        Payment[]                   @relation("PaymentCreatedBy")
+  paymentsConfirmed      Payment[]                   @relation("PaymentConfirmedBy")
+  paymentsCancelled      Payment[]                   @relation("PaymentCancelledBy")
+  quoteRevisionsCreated  ServiceOrderQuoteRevision[] @relation("QuoteRevisionCreatedBy")
+  quoteDecisions         CustomerQuoteDecision[]     @relation("QuoteDecisionBy")
+  receivablesCreated     Receivable[]                @relation("ReceivableCreatedBy")
+  receivablesCancelled   Receivable[]                @relation("ReceivableCancelledBy")
+  schedulesCreated       ReceivableSchedule[]        @relation("ReceivableScheduleCreatedBy")
+  allocationsCreated     PaymentAllocation[]         @relation("PaymentAllocationCreatedBy")
+  financialAuditEvents   FinancialAuditEvent[]       @relation("FinancialAuditActor")
+  acquisitionsCreated    EquipmentAcquisition[]      @relation("AcquisitionCreatedBy")
+  acquisitionsAuthorized EquipmentAcquisition[]      @relation("AcquisitionAuthorizedBy")
+  acquisitionsCompleted  EquipmentAcquisition[]      @relation("AcquisitionCompletedBy")
 
   @@index([status])
   @@index([role])
@@ -268,16 +277,16 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  memberships           Membership[]
-  customerOrganizations CustomerOrganization[]
-  devices               Device[]
-  accessGrants          AccessGrant[]
-  serviceOrders         ServiceOrder[]
-  customerEvents        CustomerEvent[]
-  campaigns             Campaign[]
-  mediaAssets           MediaAsset[]
-  aiAnalyses            AIAnalysis[]
-  customerFeedbacks     CustomerFeedback[]
+  memberships            Membership[]
+  customerOrganizations  CustomerOrganization[]
+  devices                Device[]
+  accessGrants           AccessGrant[]
+  serviceOrders          ServiceOrder[]
+  customerEvents         CustomerEvent[]
+  campaigns              Campaign[]
+  mediaAssets            MediaAsset[]
+  aiAnalyses             AIAnalysis[]
+  customerFeedbacks      CustomerFeedback[]
   ownedEquipments        Equipment[]
   equipmentAcquisitions  EquipmentAcquisition[]
   payments               Payment[]
@@ -331,10 +340,10 @@ model Customer {
   CustomerFeedback      CustomerFeedback[]
   MediaAsset            MediaAsset[]
   equipmentAcquisitions EquipmentAcquisition[]
-  quoteRevisions         ServiceOrderQuoteRevision[]
-  quoteDecisions         CustomerQuoteDecision[]
-  receivables            Receivable[]
-  paymentAllocations     PaymentAllocation[]
+  quoteRevisions        ServiceOrderQuoteRevision[]
+  quoteDecisions        CustomerQuoteDecision[]
+  receivables           Receivable[]
+  paymentAllocations    PaymentAllocation[]
 
   @@index([name])
   @@index([email])
@@ -431,11 +440,18 @@ model Equipment {
 }
 
 model EquipmentAcquisition {
-  id             String  @id @default(uuid())
-  equipmentId    String
-  customerId     String
-  organizationId String
-  serviceOrderId String?
+  id                     String            @id @default(uuid())
+  equipmentId            String
+  customerId             String
+  organizationId         String
+  serviceOrderId         String?
+  source                 AcquisitionSource
+  clientPreAcquisitionId String?
+
+  createdByUserId      String?
+  authorizedByUserId   String?
+  completedByUserId    String?
+  activeEquipmentGuard String? @unique(map: "equipment_acquisitions_one_active_per_equipment")
 
   purpose EquipmentPurpose
 
@@ -461,12 +477,20 @@ model EquipmentAcquisition {
   equipment    Equipment     @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
   customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  serviceOrder ServiceOrder? @relation(fields: [serviceOrderId], references: [id], onDelete: SetNull)
+  serviceOrder ServiceOrder? @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy    User?         @relation("AcquisitionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  authorizedBy User?         @relation("AcquisitionAuthorizedBy", fields: [authorizedByUserId], references: [id], onDelete: SetNull)
+  completedBy  User?         @relation("AcquisitionCompletedBy", fields: [completedByUserId], references: [id], onDelete: SetNull)
 
+  @@unique([organizationId, clientPreAcquisitionId])
   @@index([equipmentId])
   @@index([customerId])
   @@index([organizationId])
   @@index([serviceOrderId])
+  @@index([source])
+  @@index([createdByUserId])
+  @@index([authorizedByUserId])
+  @@index([completedByUserId])
   @@index([status])
   @@index([purpose])
   @@index([organizationId, status])
@@ -496,24 +520,24 @@ model ServiceOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization          Organization                @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  customer              Customer                    @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  equipment             Equipment                   @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
-  technician            User?                       @relation("TechnicianOrders", fields: [technicianId], references: [id], onDelete: SetNull)
-  statusHistory         ServiceOrderStatusHistory[]
-  items                 ServiceOrderItem[]
-  payments              Payment[]
-  customerEvents        CustomerEvent[]
-  mediaAssets                MediaAsset[]
-  CustomerFeedback           CustomerFeedback[]
-  equipmentAcquisitions      EquipmentAcquisition[]
-  quoteRevisions             ServiceOrderQuoteRevision[] @relation("ServiceOrderQuoteRevisions")
-  currentQuoteRevision       ServiceOrderQuoteRevision?  @relation("CurrentQuoteRevision", fields: [currentQuoteRevisionId], references: [id], onDelete: SetNull)
-  lastApprovedQuoteRevision  ServiceOrderQuoteRevision?  @relation("LastApprovedQuoteRevision", fields: [lastApprovedQuoteRevisionId], references: [id], onDelete: SetNull)
-  quoteDecisions             CustomerQuoteDecision[]
-  receivables                Receivable[]
-  paymentAllocations         PaymentAllocation[]
-  financialAuditEvents       FinancialAuditEvent[]
+  organization              Organization                @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer                  Customer                    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  equipment                 Equipment                   @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+  technician                User?                       @relation("TechnicianOrders", fields: [technicianId], references: [id], onDelete: SetNull)
+  statusHistory             ServiceOrderStatusHistory[]
+  items                     ServiceOrderItem[]
+  payments                  Payment[]
+  customerEvents            CustomerEvent[]
+  mediaAssets               MediaAsset[]
+  CustomerFeedback          CustomerFeedback[]
+  equipmentAcquisitions     EquipmentAcquisition[]
+  quoteRevisions            ServiceOrderQuoteRevision[] @relation("ServiceOrderQuoteRevisions")
+  currentQuoteRevision      ServiceOrderQuoteRevision?  @relation("CurrentQuoteRevision", fields: [currentQuoteRevisionId], references: [id], onDelete: SetNull)
+  lastApprovedQuoteRevision ServiceOrderQuoteRevision?  @relation("LastApprovedQuoteRevision", fields: [lastApprovedQuoteRevisionId], references: [id], onDelete: SetNull)
+  quoteDecisions            CustomerQuoteDecision[]
+  receivables               Receivable[]
+  paymentAllocations        PaymentAllocation[]
+  financialAuditEvents      FinancialAuditEvent[]
 
   @@index([organizationId])
   @@index([customerId])
@@ -581,11 +605,11 @@ model ServiceOrderItem {
 }
 
 model Payment {
-  id                String        @id @default(uuid())
+  id                String @id @default(uuid())
   organizationId    String
   serviceOrderId    String
   customerId        String
-  clientOperationId String        @unique
+  clientOperationId String @unique
 
   amount Decimal @db.Decimal(14, 2)
 
@@ -612,9 +636,9 @@ model Payment {
   customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Restrict)
   serviceOrder ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
 
-  createdBy   User? @relation("PaymentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  confirmedBy User? @relation("PaymentConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: Restrict)
-  cancelledBy User? @relation("PaymentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  createdBy   User?               @relation("PaymentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  confirmedBy User?               @relation("PaymentConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+  cancelledBy User?               @relation("PaymentCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
   allocations PaymentAllocation[]
 
   @@index([organizationId])
@@ -646,7 +670,7 @@ model ServiceOrderQuoteRevision {
   totalAmount Decimal @db.Decimal(14, 2)
 
   changeType   QuoteChangeType
-  changeReason String? @db.Text
+  changeReason String?         @db.Text
 
   quoteSnapshot Json
   quoteHash     String @db.Char(64)
@@ -681,7 +705,7 @@ model CustomerQuoteDecision {
   customerId      String
 
   decision QuoteDecision
-  reason   String? @db.Text
+  reason   String?       @db.Text
 
   decidedByUserId String
   decidedAt       DateTime @default(now())
@@ -718,17 +742,17 @@ model Receivable {
   createdByUserId    String
   cancelledAt        DateTime?
   cancelledByUserId  String?
-  cancellationReason String? @db.Text
+  cancellationReason String?   @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization        Organization                  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  customer            Customer                      @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  serviceOrder        ServiceOrder                  @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  sourceQuoteRevision ServiceOrderQuoteRevision     @relation(fields: [sourceQuoteRevisionId], references: [id], onDelete: Restrict)
-  createdBy           User                          @relation("ReceivableCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  cancelledBy         User?                         @relation("ReceivableCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer            Customer                  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  serviceOrder        ServiceOrder              @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  sourceQuoteRevision ServiceOrderQuoteRevision @relation(fields: [sourceQuoteRevisionId], references: [id], onDelete: Restrict)
+  createdBy           User                      @relation("ReceivableCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  cancelledBy         User?                     @relation("ReceivableCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
   schedules           ReceivableSchedule[]
   installments        ReceivableInstallment[]
   allocations         PaymentAllocation[]
@@ -774,9 +798,9 @@ model ReceivableInstallment {
 
   createdAt DateTime @default(now())
 
-  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  receivable   Receivable             @relation(fields: [receivableId], references: [id], onDelete: Restrict)
-  schedule     ReceivableSchedule     @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  receivable   Receivable          @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  schedule     ReceivableSchedule  @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
   allocations  PaymentAllocation[]
 
   @@unique([scheduleId, sequence])
@@ -838,9 +862,9 @@ model FinancialAuditEvent {
   occurredAt DateTime @default(now())
   metadata   Json?
 
-  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  serviceOrder ServiceOrder  @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
-  actor        User?         @relation("FinancialAuditActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  serviceOrder ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Restrict)
+  actor        User?        @relation("FinancialAuditActor", fields: [actorUserId], references: [id], onDelete: Restrict)
 
   @@unique([operationId, ordinal])
   @@index([organizationId])
