@@ -140,6 +140,8 @@ class SqliteDatabase {
       )
     ''');
 
+    await _createPreAcquisitionTable(db);
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS service_order_items (
         id TEXT PRIMARY KEY,
@@ -224,6 +226,42 @@ class SqliteDatabase {
         command_intents_unresolved_identity
       ON command_intents(command_type, target_id, payload_json)
       WHERE lifecycle_state IN ('PENDING', 'SENDING', 'UNKNOWN')
+    ''');
+  }
+
+  static Future<void> _createPreAcquisitionTable(
+    DatabaseExecutor db,
+  ) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pre_acquisitions (
+        id TEXT PRIMARY KEY,
+        equipment_id TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        service_order_id TEXT,
+        status TEXT NOT NULL CHECK (
+          status IN (
+            'PENDING_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED',
+            'CANCELLED'
+          )
+        ),
+        offered_amount_minor INTEGER CHECK (
+          offered_amount_minor IS NULL OR offered_amount_minor >= 0
+        ),
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        evaluation_deadline TEXT NOT NULL,
+        evaluated_at TEXT,
+        resolution_reason TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS pre_acquisitions_equipment
+      ON pre_acquisitions(equipment_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS pre_acquisitions_status_deadline
+      ON pre_acquisitions(status, evaluation_deadline)
     ''');
   }
 
@@ -330,6 +368,12 @@ class SqliteDatabase {
         await _createCommandIntentTable(txn);
         await _migrateV6ToV7(txn, requireLegacyTable: true);
       });
+
+  /// Idempotent additive schema migration for the local-only pre-acquisition
+  /// workflow. The baseline keeps schema version 7, while [_createTables]
+  /// applies this extension to new, upgraded and already-current databases.
+  static Future<void> ensurePreAcquisitionSchema(Database db) =>
+      db.transaction(_createPreAcquisitionTable);
 
   static Future<void> _migrateV5ToV6(DatabaseExecutor db) async {
     final serviceOrders = await _convertedRows(
@@ -676,6 +720,27 @@ class SqliteDatabase {
     if (columns.length != expectedColumns.length ||
         !columns.containsAll(expectedColumns)) {
       throw StateError('SQLite v7 command intent schema is incomplete.');
+    }
+    const expectedPreAcquisitionColumns = {
+      'id',
+      'equipment_id',
+      'customer_id',
+      'organization_id',
+      'service_order_id',
+      'status',
+      'offered_amount_minor',
+      'notes',
+      'created_at',
+      'evaluation_deadline',
+      'evaluated_at',
+      'resolution_reason',
+    };
+    final preAcquisitionColumns = await _columnNames(db, 'pre_acquisitions');
+    if (preAcquisitionColumns.length != expectedPreAcquisitionColumns.length ||
+        !preAcquisitionColumns.containsAll(expectedPreAcquisitionColumns)) {
+      throw StateError(
+        'SQLite v7 pre-acquisition extension is incomplete.',
+      );
     }
   }
 
