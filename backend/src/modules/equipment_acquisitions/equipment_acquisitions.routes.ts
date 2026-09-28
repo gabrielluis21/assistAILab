@@ -4,7 +4,9 @@ import {
 
 import {
   authorizeEquipmentAcquisitionHandler,
+  authorizeInPersonHandler,
   completeEquipmentAcquisitionHandler,
+  createDirectOfferHandler,
   createEquipmentAcquisitionHandler,
   getEquipmentAcquisitionHandler,
   listEquipmentAcquisitionsHandler,
@@ -72,6 +74,17 @@ export async function equipmentAcquisitionRoutes(
     createEquipmentAcquisitionHandler
   );
 
+  fastify.post(
+    '/direct-offer',
+    {
+      preValidation: [
+        auth,
+        adminOrTech,
+      ],
+    },
+    createDirectOfferHandler
+  );
+
   /**
    * Customer decide.
    */
@@ -95,6 +108,17 @@ export async function equipmentAcquisitionRoutes(
       ],
     },
     rejectEquipmentAcquisitionHandler
+  );
+
+  fastify.post(
+    '/:id/authorize-in-person',
+    {
+      preValidation: [
+        auth,
+        adminOrTech,
+      ],
+    },
+    authorizeInPersonHandler
   );
 
   /**
