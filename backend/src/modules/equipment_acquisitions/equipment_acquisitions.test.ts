@@ -1406,6 +1406,7 @@ describe(
           where: { id: createdAcquisition.id },
         });
         assert.equal(persisted.offeredAmount?.toFixed(2), '1250.01');
+        assert.equal(persisted.customerId, customerId);
         assert.equal(persisted.createdByUserId, adminAId);
         assert.equal(persisted.activeEquipmentGuard, equipmentIds[9]);
 
@@ -1434,6 +1435,29 @@ describe(
         });
         assert.equal(businessRetry.statusCode, 200);
         assert.equal(businessRetry.json().acquisition.id, createdAcquisition.id);
+
+        await prisma.equipment.update({
+          where: { id: equipmentIds[9] },
+          data: { customerId: otherCustomerId },
+        });
+        try {
+          const incompatibleCustomerIntent = await app.inject({
+            method: 'POST',
+            url: '/api/v1/equipment-acquisitions/direct-offer',
+            headers: { authorization: `Bearer ${adminAToken}`, 'x-operation-id': randomUUID() },
+            payload,
+          });
+          assert.equal(incompatibleCustomerIntent.statusCode, 409);
+          assert.equal(
+            incompatibleCustomerIntent.json().error,
+            'CLIENT_PRE_ACQUISITION_INTENT_CONFLICT'
+          );
+        } finally {
+          await prisma.equipment.update({
+            where: { id: equipmentIds[9] },
+            data: { customerId },
+          });
+        }
 
         const incompatibleIntent = await app.inject({
           method: 'POST',

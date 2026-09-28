@@ -291,6 +291,10 @@ export class EquipmentAcquisitionService {
         completeIdempotency(tx, identity, reservation.leaseToken, statusCode, { error });
 
       if (input.clientPreAcquisitionId) {
+        const incomingEquipment = await tx.equipment.findUnique({
+          where: { id: input.equipmentId },
+          select: { customerId: true, organizationId: true, ownerType: true },
+        });
         const correlated = await tx.equipmentAcquisition.findUnique({
           where: {
             organizationId_clientPreAcquisitionId: {
@@ -301,7 +305,19 @@ export class EquipmentAcquisitionService {
           include: acquisitionInclude,
         });
         if (correlated) {
-          if (correlated.equipmentId !== input.equipmentId || correlated.source !== source) {
+          const incomingCustomerId =
+            incomingEquipment?.ownerType === EquipmentOwnerType.CUSTOMER
+              ? incomingEquipment.customerId
+              : incomingEquipment?.ownerType === EquipmentOwnerType.ORGANIZATION &&
+                  incomingEquipment.organizationId === organizationId &&
+                  correlated.status === EquipmentAcquisitionStatus.COMPLETED
+                ? correlated.customerId
+                : null;
+          if (
+            correlated.equipmentId !== input.equipmentId ||
+            correlated.customerId !== incomingCustomerId ||
+            correlated.source !== source
+          ) {
             return fail(409, 'CLIENT_PRE_ACQUISITION_INTENT_CONFLICT');
           }
           return completeIdempotency(
