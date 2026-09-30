@@ -6,7 +6,6 @@ import 'equipment_acquisition_entity.dart';
 import 'equipment_acquisition_gateway.dart';
 import 'equipment_acquisition_repository.dart';
 import 'pre_acquisition_entity.dart';
-import 'pre_acquisition_repository.dart';
 
 const equipmentAcquisitionCreateCommandType = 'EQUIPMENT_ACQUISITION_CREATE';
 const equipmentAcquisitionAuthorizeCommandType =
@@ -29,30 +28,30 @@ final class EquipmentAcquisitionCommandExecutor {
   const EquipmentAcquisitionCommandExecutor({
     required this.gateway,
     required this.acquisitionRepository,
-    required this.preAcquisitionRepository,
     required this.intentRepository,
     required this.database,
     required this.isBindingCurrent,
     required this.operationIdFactory,
-    this.nowUtc,
   });
 
   final EquipmentAcquisitionGateway gateway;
   final EquipmentAcquisitionRepository acquisitionRepository;
-  final PreAcquisitionRepository preAcquisitionRepository;
   final CommandIntentRepository intentRepository;
   final Database database;
   final bool Function() isBindingCurrent;
   final String Function() operationIdFactory;
-  final DateTime Function()? nowUtc;
 
   Future<EquipmentAcquisitionEntity> createFromPreAcquisition({
     required PreAcquisitionEntity preAcquisition,
-    required EquipmentAcquisitionPurpose purpose,
   }) {
-    if (preAcquisition.status != PreAcquisitionStatus.pendingEvaluation) {
-      throw StateError('PreAcquisition is already resolved.');
+    if (preAcquisition.status != PreAcquisitionStatus.approved) {
+      throw StateError('PreAcquisition must be approved before CREATE.');
     }
+    final purpose = switch (preAcquisition.purpose) {
+      PreAcquisitionPurpose.resale => EquipmentAcquisitionPurpose.resale,
+      PreAcquisitionPurpose.partsDonor =>
+        EquipmentAcquisitionPurpose.partsDonor,
+    };
     final source = preAcquisition.serviceOrderId == null
         ? EquipmentAcquisitionSource.directOffer
         : EquipmentAcquisitionSource.serviceOrder;
@@ -98,34 +97,8 @@ final class EquipmentAcquisitionCommandExecutor {
           );
         }
       },
-      authoritativeCommit: (executor, authoritative) async {
-        await acquisitionRepository.upsert(
-          authoritative,
-          executor: executor,
-        );
-        final current = await preAcquisitionRepository.findById(
-          preAcquisition.id,
-          executor: executor,
-        );
-        if (current == null ||
-            current.equipmentId != preAcquisition.equipmentId ||
-            current.customerId != preAcquisition.customerId ||
-            current.organizationId != preAcquisition.organizationId ||
-            current.serviceOrderId != preAcquisition.serviceOrderId ||
-            current.status != PreAcquisitionStatus.pendingEvaluation) {
-          throw StateError(
-            'PreAcquisition changed before the authoritative commit.',
-          );
-        }
-        await preAcquisitionRepository.update(
-          current.copyWith(
-            status: PreAcquisitionStatus.approved,
-            evaluatedAt:
-                (nowUtc ?? DateTime.now).call().toUtc().toIso8601String(),
-          ),
-          executor: executor,
-        );
-      },
+      authoritativeCommit: (executor, authoritative) =>
+          acquisitionRepository.upsert(authoritative, executor: executor),
     );
   }
 

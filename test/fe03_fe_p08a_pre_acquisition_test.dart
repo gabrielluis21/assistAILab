@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:assistailab/core/database/auth_scoped_database_manager.dart';
 import 'package:assistailab/core/database/outbox_dao.dart';
+import 'package:assistailab/core/database/service_order_repository.dart';
 import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:assistailab/core/sync/sync_providers.dart';
 import 'package:assistailab/features/auth/application/auth_provider.dart';
@@ -16,6 +17,8 @@ import 'package:assistailab/features/equipment/pre_acquisition_entity.dart';
 import 'package:assistailab/features/equipment/pre_acquisition_repository.dart';
 import 'package:assistailab/features/equipment/pre_acquisitions_page.dart';
 import 'package:assistailab/features/equipment/pre_acquisitions_provider.dart';
+import 'package:assistailab/features/service_orders/service_order_entity.dart';
+import 'package:assistailab/features/service_orders/service_orders_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,6 +29,7 @@ const _scopeA =
     ProfessionalAuthScope(userId: 'user-a', organizationId: 'org-a');
 const _scopeB =
     ProfessionalAuthScope(userId: 'user-b', organizationId: 'org-b');
+const _serviceOrderId = '11111111-1111-4111-8111-111111111111';
 
 final _controlledSessionKey =
     StateProvider<AuthenticatedSessionKey?>((ref) => null);
@@ -93,6 +97,7 @@ void main() {
           'customer_id',
           'organization_id',
           'service_order_id',
+          'purpose',
           'status',
           'offered_amount_minor',
           'notes',
@@ -113,6 +118,28 @@ void main() {
         db.insert('pre_acquisitions', _rawPreAcquisition(status: 'INVALID')),
         throwsA(isA<DatabaseException>()),
       );
+      for (final invalidAmount in [0, -1, 10000000000]) {
+        await expectLater(
+          db.insert(
+            'pre_acquisitions',
+            _rawPreAcquisition(
+              status: 'PENDING_EVALUATION',
+              offeredAmountMinor: invalidAmount,
+            ),
+          ),
+          throwsA(isA<DatabaseException>()),
+        );
+      }
+      for (final validAmount in <int?>[null, 1, 9999999999]) {
+        await db.insert(
+          'pre_acquisitions',
+          _rawPreAcquisition(
+            id: 'pre-$validAmount',
+            status: 'PENDING_EVALUATION',
+            offeredAmountMinor: validAmount,
+          ),
+        );
+      }
       await expectLater(
         db.insert(
           'pre_acquisitions',
@@ -130,6 +157,7 @@ void main() {
     test('derives identity and atomically creates local record plus Outbox',
         () async {
       await _seedEquipment(handle.database);
+      final serviceOrder = await _seedServiceOrder(handle.database);
       final beforeEquipment = (await _findEquipment(handle.database)).toMap();
       final container = _container(sessionKey, failIfSyncRequested: true);
       addTearDown(container.dispose);
@@ -145,7 +173,8 @@ void main() {
           .read(preAcquisitionsProvider.notifier)
           .createPreAcquisition(
             equipmentId: 'equipment-1',
-            serviceOrderId: '  service-order-1  ',
+            serviceOrder: serviceOrder,
+            purpose: PreAcquisitionPurpose.partsDonor,
             offeredAmountMinor: 12500,
             notes: '  Avaliar carcaça  ',
             evaluationDeadline: DateTime.utc(2026, 10, 1),
@@ -158,7 +187,8 @@ void main() {
       expect(record.equipmentId, 'equipment-1');
       expect(record.customerId, 'customer-1');
       expect(record.organizationId, 'org-a');
-      expect(record.serviceOrderId, 'service-order-1');
+      expect(record.serviceOrderId, _serviceOrderId);
+      expect(record.purpose, PreAcquisitionPurpose.partsDonor);
       expect(record.status, PreAcquisitionStatus.pendingEvaluation);
       expect(record.offeredAmountMinor, 12500);
       expect(record.notes, 'Avaliar carcaça');
@@ -175,7 +205,8 @@ void main() {
         'equipmentId': 'equipment-1',
         'customerId': 'customer-1',
         'organizationId': 'org-a',
-        'serviceOrderId': 'service-order-1',
+        'serviceOrderId': _serviceOrderId,
+        'purpose': 'PARTS_DONOR',
         'status': 'PENDING_EVALUATION',
         'offeredAmountMinor': 12500,
         'notes': 'Avaliar carcaça',
@@ -207,7 +238,8 @@ void main() {
           .read(preAcquisitionsProvider.notifier)
           .createPreAcquisition(
             equipmentId: 'equipment-1',
-            serviceOrderId: ' ',
+            serviceOrder: null,
+            purpose: PreAcquisitionPurpose.resale,
             notes: '',
             evaluationDeadline: DateTime.utc(2020, 1, 1),
           );
@@ -225,7 +257,8 @@ void main() {
       expect((await handle.database.query('outbox')).length, 1);
     });
 
-    test('negative offered amount fails before any mutation', () async {
+    test('SERVICE_ORDER requires a persisted UUID in the same context',
+        () async {
       await _seedEquipment(handle.database);
       final container = _container(sessionKey);
       addTearDown(container.dispose);
@@ -234,11 +267,46 @@ void main() {
       await expectLater(
         container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
               equipmentId: 'equipment-1',
-              offeredAmountMinor: -1,
+              serviceOrder: _serviceOrder(id: 'free-text-id'),
+              purpose: PreAcquisitionPurpose.resale,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             ),
         throwsA(isA<ArgumentError>()),
       );
+      await ServiceOrderLocalDataSource().upsert(
+        _serviceOrder(equipmentId: 'another-equipment'),
+        executor: handle.database,
+      );
+      await expectLater(
+        container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
+              equipmentId: 'equipment-1',
+              serviceOrder: _serviceOrder(equipmentId: 'another-equipment'),
+              purpose: PreAcquisitionPurpose.resale,
+              evaluationDeadline: DateTime.utc(2026, 10, 1),
+            ),
+        throwsA(isA<StateError>()),
+      );
+      expect(await handle.database.query('pre_acquisitions'), isEmpty);
+      expect(await handle.database.query('outbox'), isEmpty);
+    });
+
+    test('out-of-range offered amounts fail before any mutation', () async {
+      await _seedEquipment(handle.database);
+      final container = _container(sessionKey);
+      addTearDown(container.dispose);
+      await container.read(preAcquisitionsProvider.future);
+
+      for (final amount in [-1, 0, 10000000000]) {
+        await expectLater(
+          container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
+                equipmentId: 'equipment-1',
+                purpose: PreAcquisitionPurpose.resale,
+                offeredAmountMinor: amount,
+                evaluationDeadline: DateTime.utc(2026, 10, 1),
+              ),
+          throwsA(isA<ArgumentError>()),
+        );
+      }
       expect(await handle.database.query('pre_acquisitions'), isEmpty);
       expect(await handle.database.query('outbox'), isEmpty);
     });
@@ -251,6 +319,7 @@ void main() {
       await expectLater(
         container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
               equipmentId: 'missing-equipment',
+              purpose: PreAcquisitionPurpose.resale,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             ),
         throwsA(isA<StateError>()),
@@ -276,6 +345,7 @@ void main() {
       await expectLater(
         container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
               equipmentId: 'equipment-1',
+              purpose: PreAcquisitionPurpose.resale,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             ),
         throwsA(isA<StateError>()),
@@ -297,6 +367,7 @@ void main() {
       await expectLater(
         container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
               equipmentId: 'equipment-1',
+              purpose: PreAcquisitionPurpose.resale,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             ),
         throwsA(isA<StateError>()),
@@ -319,6 +390,7 @@ void main() {
       await expectLater(
         container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
               equipmentId: 'equipment-1',
+              purpose: PreAcquisitionPurpose.resale,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             ),
         throwsA(isA<StateError>()),
@@ -346,6 +418,7 @@ void main() {
             .read(preAcquisitionsProvider.notifier)
             .createPreAcquisition(
               equipmentId: 'equipment-1',
+              purpose: PreAcquisitionPurpose.resale,
               offeredAmountMinor: 5000,
               evaluationDeadline: DateTime.utc(2026, 10, 1),
             );
@@ -402,6 +475,7 @@ void main() {
           .read(preAcquisitionsProvider.notifier)
           .createPreAcquisition(
             equipmentId: 'equipment-1',
+            purpose: PreAcquisitionPurpose.resale,
             evaluationDeadline: DateTime.utc(2026, 10, 1),
           );
       final id = (await PreAcquisitionLocalDataSource().listAll(
@@ -440,6 +514,7 @@ void main() {
       await normal.read(preAcquisitionsProvider.future);
       await normal.read(preAcquisitionsProvider.notifier).createPreAcquisition(
             equipmentId: 'equipment-1',
+            purpose: PreAcquisitionPurpose.resale,
             evaluationDeadline: DateTime.utc(2026, 10, 1),
           );
       final id = (await PreAcquisitionLocalDataSource().listAll(
@@ -499,6 +574,7 @@ void main() {
       final create =
           container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
                 equipmentId: 'equipment-1',
+                purpose: PreAcquisitionPurpose.resale,
                 evaluationDeadline: DateTime.utc(2026, 10, 1),
               );
       await entered.future;
@@ -536,6 +612,7 @@ void main() {
       final create =
           container.read(preAcquisitionsProvider.notifier).createPreAcquisition(
                 equipmentId: 'equipment-1',
+                purpose: PreAcquisitionPurpose.resale,
                 evaluationDeadline: DateTime.utc(2026, 10, 1),
               );
       await entered.future;
@@ -565,6 +642,8 @@ void main() {
         overrides: [
           preAcquisitionsProvider.overrideWith(() => notifier),
           equipmentsProvider.overrideWith(_RecordingEquipmentsNotifier.new),
+          serviceOrdersProvider
+              .overrideWith(_RecordingServiceOrdersNotifier.new),
         ],
         child: const MaterialApp(home: PreAcquisitionsPage()),
       ),
@@ -578,17 +657,32 @@ void main() {
     expect(find.text('Owner Type'), findsNothing);
     expect(find.text('Organization'), findsNothing);
 
+    await tester.tap(find.text('Oferta direta').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Ordem de Serviço existente').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OS #42').last);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byType(DropdownButtonFormField<PreAcquisitionPurpose>),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Revenda').last);
+    await tester.pumpAndSettle();
+
     final fields = find.byType(TextFormField);
-    expect(fields, findsNWidgets(3));
-    await tester.enterText(fields.at(0), 'service-order-1');
-    await tester.enterText(fields.at(1), '15000');
-    await tester.enterText(fields.at(2), 'Avaliação local');
+    expect(fields, findsNWidgets(2));
+    await tester.enterText(fields.at(0), '15000');
+    await tester.enterText(fields.at(1), 'Avaliação local');
     await tester.tap(find.text('Salvar localmente'));
     await tester.pumpAndSettle();
 
     expect(notifier.createCalls, 1);
     expect(notifier.equipmentId, 'equipment-customer');
-    expect(notifier.serviceOrderId, 'service-order-1');
+    expect(notifier.serviceOrder?.id, _serviceOrderId);
+    expect(notifier.purpose, PreAcquisitionPurpose.resale);
     expect(notifier.offeredAmountMinor, 15000);
     expect(notifier.notes, 'Avaliação local');
   });
@@ -670,16 +764,40 @@ Future<EquipmentEntity> _findEquipment(Database db) async {
   ))!;
 }
 
+Future<ServiceOrderEntity> _seedServiceOrder(Database db) async {
+  final order = _serviceOrder();
+  await ServiceOrderLocalDataSource().upsert(order, executor: db);
+  return order;
+}
+
+ServiceOrderEntity _serviceOrder({
+  String id = _serviceOrderId,
+  String equipmentId = 'equipment-1',
+  String customerId = 'customer-1',
+  int? friendlyId,
+}) =>
+    ServiceOrderEntity(
+      id: id,
+      friendlyId: friendlyId,
+      customerId: customerId,
+      equipmentId: equipmentId,
+      status: ServiceOrderStatusEnum.diagnostico,
+      problemDescription: 'Diagnóstico',
+      updatedAt: '2026-09-24T10:00:00.000Z',
+    );
+
 Map<String, Object?> _rawPreAcquisition({
+  String id = 'pre-1',
   required String status,
   int? offeredAmountMinor,
 }) {
   return {
-    'id': 'pre-1',
+    'id': id,
     'equipment_id': 'equipment-1',
     'customer_id': 'customer-1',
     'organization_id': 'org-a',
     'service_order_id': null,
+    'purpose': 'RESALE',
     'status': status,
     'offered_amount_minor': offeredAmountMinor,
     'notes': null,
@@ -781,7 +899,8 @@ final class _BlockingPreAcquisitionRepository
 final class _RecordingPreAcquisitionsNotifier extends PreAcquisitionsNotifier {
   int createCalls = 0;
   String? equipmentId;
-  String? serviceOrderId;
+  ServiceOrderEntity? serviceOrder;
+  PreAcquisitionPurpose? purpose;
   int? offeredAmountMinor;
   String? notes;
   DateTime? evaluationDeadline;
@@ -792,18 +911,30 @@ final class _RecordingPreAcquisitionsNotifier extends PreAcquisitionsNotifier {
   @override
   Future<void> createPreAcquisition({
     required String equipmentId,
-    String? serviceOrderId,
+    ServiceOrderEntity? serviceOrder,
+    required PreAcquisitionPurpose purpose,
     int? offeredAmountMinor,
     String? notes,
     required DateTime evaluationDeadline,
   }) async {
     createCalls++;
     this.equipmentId = equipmentId;
-    this.serviceOrderId = serviceOrderId;
+    this.serviceOrder = serviceOrder;
+    this.purpose = purpose;
     this.offeredAmountMinor = offeredAmountMinor;
     this.notes = notes;
     this.evaluationDeadline = evaluationDeadline;
   }
+}
+
+final class _RecordingServiceOrdersNotifier extends ServiceOrdersNotifier {
+  @override
+  Future<List<ServiceOrderEntity>> build() async => [
+        _serviceOrder(
+          equipmentId: 'equipment-customer',
+          friendlyId: 42,
+        ),
+      ];
 }
 
 final class _RecordingEquipmentsNotifier extends EquipmentsNotifier {

@@ -10,6 +10,7 @@ import '../auth/application/auth_provider.dart';
 import '../auth/application/session_api_client.dart';
 import '../auth/domain/entities/auth_scope.dart';
 import '../auth/domain/entities/session_state.dart';
+import '../service_orders/service_order_entity.dart';
 import 'equipment_acquisition_command_executor.dart';
 import 'equipment_acquisition_entity.dart';
 import 'equipment_acquisition_gateway.dart';
@@ -58,19 +59,28 @@ class PreAcquisitionsNotifier
 
   Future<void> createPreAcquisition({
     required String equipmentId,
-    String? serviceOrderId,
+    ServiceOrderEntity? serviceOrder,
+    required PreAcquisitionPurpose purpose,
     int? offeredAmountMinor,
     String? notes,
     required DateTime evaluationDeadline,
   }) async {
-    if (offeredAmountMinor != null && offeredAmountMinor < 0) {
+    if (offeredAmountMinor != null &&
+        (offeredAmountMinor < 1 || offeredAmountMinor > 9999999999)) {
       throw ArgumentError.value(
         offeredAmountMinor,
         'offeredAmountMinor',
-        'Must be zero or greater.',
+        'Must be between 1 and 9999999999.',
       );
     }
-    final normalizedServiceOrderId = _optionalText(serviceOrderId);
+    if (serviceOrder != null &&
+        !Uuid.isValidUUID(fromString: serviceOrder.id)) {
+      throw ArgumentError.value(
+        serviceOrder.id,
+        'serviceOrder.id',
+        'Must be an existing ServiceOrder UUID.',
+      );
+    }
     final normalizedNotes = _optionalText(notes);
     final binding = _captureBinding(
       ref.read(authenticatedSessionKeyProvider),
@@ -87,6 +97,18 @@ class PreAcquisitionsNotifier
       );
       _assertEligibleEquipment(equipment);
       final eligibleEquipment = equipment!;
+      if (serviceOrder != null) {
+        final persistedOrder = await ref
+            .read(equipmentAcquisitionServiceOrderRepositoryProvider)
+            .findById(serviceOrder.id, executor: txn);
+        if (persistedOrder == null ||
+            persistedOrder.equipmentId != eligibleEquipment.id ||
+            persistedOrder.customerId != eligibleEquipment.customerId) {
+          throw StateError(
+            'Selected ServiceOrder does not match the Equipment and Customer.',
+          );
+        }
+      }
 
       final createdAt = DateTime.now().toUtc().toIso8601String();
       final preAcquisition = PreAcquisitionEntity(
@@ -94,7 +116,8 @@ class PreAcquisitionsNotifier
         equipmentId: eligibleEquipment.id,
         customerId: eligibleEquipment.customerId!,
         organizationId: binding.organizationId,
-        serviceOrderId: normalizedServiceOrderId,
+        serviceOrderId: serviceOrder?.id,
+        purpose: purpose,
         status: PreAcquisitionStatus.pendingEvaluation,
         offeredAmountMinor: offeredAmountMinor,
         notes: normalizedNotes,
@@ -125,11 +148,11 @@ class PreAcquisitionsNotifier
     required PreAcquisitionStatus status,
     String? resolutionReason,
   }) async {
-    if (!status.isTerminal) {
+    if (status == PreAcquisitionStatus.pendingEvaluation) {
       throw ArgumentError.value(
         status,
         'status',
-        'Resolution must use a terminal status.',
+        'Resolution must leave PENDING_EVALUATION.',
       );
     }
     final binding = _captureBinding(
@@ -169,6 +192,7 @@ class PreAcquisitionsNotifier
         customerId: existing.customerId,
         organizationId: existing.organizationId,
         serviceOrderId: existing.serviceOrderId,
+        purpose: existing.purpose,
         status: status,
         offeredAmountMinor: existing.offeredAmountMinor,
         notes: existing.notes,
@@ -329,7 +353,6 @@ class EquipmentAcquisitionsNotifier
 
   Future<EquipmentAcquisitionEntity> createFromPreAcquisition({
     required String preAcquisitionId,
-    required EquipmentAcquisitionPurpose purpose,
   }) async {
     final binding = _captureProfessionalBinding();
     return _runCommand(binding, () async {
@@ -345,15 +368,16 @@ class EquipmentAcquisitionsNotifier
           'PreAcquisition is not available in the authenticated scope.',
         );
       }
-      if (preAcquisition.status != PreAcquisitionStatus.pendingEvaluation) {
-        throw StateError('PreAcquisition is already resolved.');
+      if (preAcquisition.status != PreAcquisitionStatus.approved) {
+        throw StateError('PreAcquisition must be approved before CREATE.');
       }
       if (preAcquisition.offeredAmountMinor != null &&
-          preAcquisition.offeredAmountMinor! < 1) {
+          (preAcquisition.offeredAmountMinor! < 1 ||
+              preAcquisition.offeredAmountMinor! > 9999999999)) {
         throw ArgumentError.value(
           preAcquisition.offeredAmountMinor,
           'offeredAmountMinor',
-          'An acquisition offer must be positive.',
+          'An acquisition offer must be between 1 and 9999999999.',
         );
       }
       normalizeEquipmentAcquisitionNotes(preAcquisition.notes);
@@ -386,7 +410,6 @@ class EquipmentAcquisitionsNotifier
 
       final authoritative = await _executor(binding).createFromPreAcquisition(
         preAcquisition: preAcquisition,
-        purpose: purpose,
       );
       _ensureBindingCurrent(binding);
       ref.invalidate(preAcquisitionsProvider);
@@ -443,7 +466,6 @@ class EquipmentAcquisitionsNotifier
       final authoritative =
           await _executor(binding).complete(acquisitionId: acquisitionId);
       _ensureBindingCurrent(binding);
-      ref.invalidate(equipmentsProvider);
       return authoritative;
     });
   }
@@ -561,7 +583,6 @@ class EquipmentAcquisitionsNotifier
       EquipmentAcquisitionCommandExecutor(
         gateway: ref.read(equipmentAcquisitionGatewayProvider),
         acquisitionRepository: ref.read(equipmentAcquisitionRepositoryProvider),
-        preAcquisitionRepository: ref.read(preAcquisitionRepositoryProvider),
         intentRepository:
             ref.read(equipmentAcquisitionCommandIntentRepositoryProvider),
         database: binding.databaseHandle.database,

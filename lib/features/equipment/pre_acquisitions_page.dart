@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/database/auth_scoped_database_manager.dart';
 import '../auth/domain/entities/auth_scope.dart';
+import '../service_orders/service_order_entity.dart';
+import '../service_orders/service_orders_provider.dart';
 import 'equipment_acquisition_entity.dart';
 import 'equipment_entity.dart';
 import 'equipments_provider.dart';
@@ -16,6 +18,7 @@ class PreAcquisitionsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final preAcquisitions = ref.watch(preAcquisitionsProvider);
     final equipments = ref.watch(equipmentsProvider);
+    final serviceOrders = ref.watch(serviceOrdersProvider);
     final equipmentById = {
       for (final equipment in equipments.value ?? const <EquipmentEntity>[])
         equipment.id: equipment,
@@ -94,6 +97,8 @@ class PreAcquisitionsPage extends ConsumerWidget {
                   context: context,
                   builder: (_) => _CreatePreAcquisitionDialog(
                     equipments: eligibleEquipments,
+                    serviceOrders:
+                        serviceOrders.value ?? const <ServiceOrderEntity>[],
                   ),
                 ),
         icon: const Icon(Icons.add, color: Colors.white),
@@ -194,9 +199,13 @@ class _SectionTitle extends StatelessWidget {
 }
 
 class _CreatePreAcquisitionDialog extends ConsumerStatefulWidget {
-  const _CreatePreAcquisitionDialog({required this.equipments});
+  const _CreatePreAcquisitionDialog({
+    required this.equipments,
+    required this.serviceOrders,
+  });
 
   final List<EquipmentEntity> equipments;
+  final List<ServiceOrderEntity> serviceOrders;
 
   @override
   ConsumerState<_CreatePreAcquisitionDialog> createState() =>
@@ -207,7 +216,9 @@ class _CreatePreAcquisitionDialogState
     extends ConsumerState<_CreatePreAcquisitionDialog> {
   late String _equipmentId;
   late DateTime _evaluationDeadline;
-  final _serviceOrderController = TextEditingController();
+  _PreAcquisitionSourceChoice _source = _PreAcquisitionSourceChoice.directOffer;
+  PreAcquisitionPurpose? _purpose;
+  String? _serviceOrderId;
   final _amountController = TextEditingController();
   final _notesController = TextEditingController();
 
@@ -220,7 +231,6 @@ class _CreatePreAcquisitionDialogState
 
   @override
   void dispose() {
-    _serviceOrderController.dispose();
     _amountController.dispose();
     _notesController.dispose();
     super.dispose();
@@ -228,6 +238,16 @@ class _CreatePreAcquisitionDialogState
 
   @override
   Widget build(BuildContext context) {
+    final equipment = widget.equipments.singleWhere(
+      (candidate) => candidate.id == _equipmentId,
+    );
+    final eligibleOrders = widget.serviceOrders
+        .where(
+          (order) =>
+              order.equipmentId == _equipmentId &&
+              order.customerId == equipment.customerId,
+        )
+        .toList(growable: false);
     return AlertDialog(
       backgroundColor: const Color(0xFF1E293B),
       title: const Text(
@@ -252,17 +272,81 @@ class _CreatePreAcquisitionDialogState
                   )
                   .toList(growable: false),
               onChanged: (value) {
-                if (value != null) setState(() => _equipmentId = value);
+                if (value != null) {
+                  setState(() {
+                    _equipmentId = value;
+                    _serviceOrderId = null;
+                  });
+                }
               },
             ),
             const SizedBox(height: 12),
-            TextFormField(
-              controller: _serviceOrderController,
+            DropdownButtonFormField<_PreAcquisitionSourceChoice>(
+              initialValue: _source,
+              dropdownColor: const Color(0xFF1E293B),
               style: const TextStyle(color: Colors.white),
-              decoration: _decoration(
-                'Service Order ID (opcional)',
-                Icons.receipt_long,
+              decoration: _decoration('Origem', Icons.call_split),
+              items: const [
+                DropdownMenuItem(
+                  value: _PreAcquisitionSourceChoice.directOffer,
+                  child: Text('Oferta direta'),
+                ),
+                DropdownMenuItem(
+                  value: _PreAcquisitionSourceChoice.serviceOrder,
+                  child: Text('Ordem de Serviço existente'),
+                ),
+              ],
+              onChanged: (value) => setState(() {
+                _source = value ?? _PreAcquisitionSourceChoice.directOffer;
+                _serviceOrderId = null;
+              }),
+            ),
+            const SizedBox(height: 12),
+            if (_source == _PreAcquisitionSourceChoice.serviceOrder) ...[
+              DropdownButtonFormField<String>(
+                initialValue: _serviceOrderId,
+                dropdownColor: const Color(0xFF1E293B),
+                style: const TextStyle(color: Colors.white),
+                decoration: _decoration(
+                  'Ordem de Serviço',
+                  Icons.receipt_long,
+                ),
+                items: eligibleOrders
+                    .map(
+                      (order) => DropdownMenuItem(
+                        value: order.id,
+                        child: Text(
+                          order.friendlyId == null
+                              ? order.id
+                              : 'OS #${order.friendlyId}',
+                        ),
+                      ),
+                    )
+                    .toList(growable: false),
+                onChanged: eligibleOrders.isEmpty
+                    ? null
+                    : (value) => setState(() => _serviceOrderId = value),
               ),
+              const SizedBox(height: 12),
+            ],
+            DropdownButtonFormField<PreAcquisitionPurpose>(
+              initialValue: _purpose,
+              dropdownColor: const Color(0xFF1E293B),
+              style: const TextStyle(color: Colors.white),
+              decoration: _decoration('Finalidade', Icons.recycling),
+              items: const [
+                DropdownMenuItem(
+                  value: PreAcquisitionPurpose.resale,
+                  child: Text('Revenda'),
+                ),
+                DropdownMenuItem(
+                  value: PreAcquisitionPurpose.partsDonor,
+                  child: Text('Doadora de peças'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value != null) setState(() => _purpose = value);
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
@@ -330,9 +414,21 @@ class _CreatePreAcquisitionDialogState
     final amountText = _amountController.text.trim();
     final amount = amountText.isEmpty ? null : int.tryParse(amountText);
     if (amountText.isNotEmpty && amount == null) return;
+    final serviceOrder = _source == _PreAcquisitionSourceChoice.serviceOrder
+        ? widget.serviceOrders
+            .where((order) => order.id == _serviceOrderId)
+            .firstOrNull
+        : null;
+    if (_source == _PreAcquisitionSourceChoice.serviceOrder &&
+        serviceOrder == null) {
+      return;
+    }
+    final purpose = _purpose;
+    if (purpose == null) return;
     await ref.read(preAcquisitionsProvider.notifier).createPreAcquisition(
           equipmentId: _equipmentId,
-          serviceOrderId: _serviceOrderController.text,
+          serviceOrder: serviceOrder,
+          purpose: purpose,
           offeredAmountMinor: amount,
           notes: _notesController.text,
           evaluationDeadline: _evaluationDeadline,
@@ -341,6 +437,8 @@ class _CreatePreAcquisitionDialogState
     Navigator.pop(context);
   }
 }
+
+enum _PreAcquisitionSourceChoice { serviceOrder, directOffer }
 
 class _PreAcquisitionCard extends ConsumerWidget {
   const _PreAcquisitionCard({
@@ -355,6 +453,7 @@ class _PreAcquisitionCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pending =
         preAcquisition.status == PreAcquisitionStatus.pendingEvaluation;
+    final approved = preAcquisition.status == PreAcquisitionStatus.approved;
     return Card(
       color: const Color(0xFF1E293B),
       margin: const EdgeInsets.only(bottom: 12),
@@ -382,49 +481,60 @@ class _PreAcquisitionCard extends ConsumerWidget {
                 'Oferta: ${preAcquisition.offeredAmountMinor} centavos',
                 style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
+            Text(
+              preAcquisition.purpose == PreAcquisitionPurpose.resale
+                  ? 'Finalidade: revenda'
+                  : 'Finalidade: doadora de peças',
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+            ),
           ],
         ),
-        trailing: pending
+        trailing: pending || approved
             ? PopupMenuButton<_PreAcquisitionAction>(
                 color: const Color(0xFF1E293B),
                 icon: const Icon(Icons.more_vert, color: Colors.white70),
                 onSelected: (action) => _applyAction(ref, action),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(
-                    value: _PreAcquisitionAction.createResale,
-                    child: Text(
-                      'Criar proposta para revenda',
-                      style: TextStyle(color: Colors.white),
+                itemBuilder: (_) => [
+                  if (approved)
+                    const PopupMenuItem(
+                      value: _PreAcquisitionAction.create,
+                      child: Text(
+                        'Criar aquisição',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: _PreAcquisitionAction.createPartsDonor,
-                    child: Text(
-                      'Criar proposta para peças',
-                      style: TextStyle(color: Colors.white),
+                  if (pending)
+                    const PopupMenuItem(
+                      value: _PreAcquisitionAction.approve,
+                      child: Text(
+                        'Aprovar',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: _PreAcquisitionAction.reject,
-                    child: Text(
-                      'Rejeitar',
-                      style: TextStyle(color: Colors.white),
+                  if (pending)
+                    const PopupMenuItem(
+                      value: _PreAcquisitionAction.reject,
+                      child: Text(
+                        'Rejeitar',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: _PreAcquisitionAction.expire,
-                    child: Text(
-                      'Marcar expirada',
-                      style: TextStyle(color: Colors.white),
+                  if (pending)
+                    const PopupMenuItem(
+                      value: _PreAcquisitionAction.expire,
+                      child: Text(
+                        'Marcar expirada',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: _PreAcquisitionAction.cancel,
-                    child: Text(
-                      'Cancelar',
-                      style: TextStyle(color: Colors.white),
+                  if (pending)
+                    const PopupMenuItem(
+                      value: _PreAcquisitionAction.cancel,
+                      child: Text(
+                        'Cancelar',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
                 ],
               )
             : null,
@@ -437,14 +547,12 @@ class _PreAcquisitionCard extends ConsumerWidget {
     _PreAcquisitionAction action,
   ) {
     return switch (action) {
-      _PreAcquisitionAction.createResale => _createAcquisition(
-          ref,
-          EquipmentAcquisitionPurpose.resale,
-        ),
-      _PreAcquisitionAction.createPartsDonor => _createAcquisition(
-          ref,
-          EquipmentAcquisitionPurpose.partsDonor,
-        ),
+      _PreAcquisitionAction.create => _createAcquisition(ref),
+      _PreAcquisitionAction.approve =>
+        ref.read(preAcquisitionsProvider.notifier).resolvePreAcquisition(
+              id: preAcquisition.id,
+              status: PreAcquisitionStatus.approved,
+            ),
       _PreAcquisitionAction.reject =>
         ref.read(preAcquisitionsProvider.notifier).resolvePreAcquisition(
               id: preAcquisition.id,
@@ -465,21 +573,19 @@ class _PreAcquisitionCard extends ConsumerWidget {
 
   Future<void> _createAcquisition(
     WidgetRef ref,
-    EquipmentAcquisitionPurpose purpose,
   ) async {
     await ref.read(equipmentAcquisitionsProvider.future);
     await ref
         .read(equipmentAcquisitionsProvider.notifier)
         .createFromPreAcquisition(
           preAcquisitionId: preAcquisition.id,
-          purpose: purpose,
         );
   }
 }
 
 enum _PreAcquisitionAction {
-  createResale,
-  createPartsDonor,
+  create,
+  approve,
   reject,
   expire,
   cancel,

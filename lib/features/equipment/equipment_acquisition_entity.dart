@@ -1,5 +1,4 @@
 import '../../core/domain/unsupported_domain_value_exception.dart';
-import 'equipment_entity.dart';
 
 enum EquipmentAcquisitionSource {
   serviceOrder('SERVICE_ORDER'),
@@ -118,7 +117,6 @@ final class EquipmentAcquisitionEntity {
     required this.notes,
     required this.createdAt,
     required this.updatedAt,
-    this.equipmentSnapshot,
   });
 
   final String id;
@@ -139,7 +137,6 @@ final class EquipmentAcquisitionEntity {
   final String? notes;
   final String createdAt;
   final String updatedAt;
-  final EquipmentAcquisitionEquipmentSnapshot? equipmentSnapshot;
 
   Map<String, Object?> toMap() => {
         'id': id,
@@ -210,15 +207,7 @@ final class EquipmentAcquisitionEntity {
         'Invalid acquisition clientPreAcquisitionId.',
       );
     }
-    final equipmentSnapshot = wire['equipment'] == null
-        ? null
-        : EquipmentAcquisitionEquipmentSnapshot.fromWire(
-            _requiredMap(wire['equipment'], 'equipment'),
-          );
     final equipmentId = _requiredText(wire['equipmentId'], 'equipmentId');
-    if (equipmentSnapshot != null && equipmentSnapshot.id != equipmentId) {
-      throw const FormatException('Acquisition equipment snapshot mismatch.');
-    }
     return EquipmentAcquisitionEntity(
       id: _requiredText(wire['id'], 'id'),
       equipmentId: equipmentId,
@@ -239,67 +228,6 @@ final class EquipmentAcquisitionEntity {
       notes: notes as String?,
       createdAt: _requiredDate(wire['createdAt'], 'createdAt'),
       updatedAt: _requiredDate(wire['updatedAt'], 'updatedAt'),
-      equipmentSnapshot: equipmentSnapshot,
-    );
-  }
-}
-
-final class EquipmentAcquisitionEquipmentSnapshot {
-  const EquipmentAcquisitionEquipmentSnapshot({
-    required this.id,
-    required this.customerId,
-    required this.organizationId,
-    required this.ownerType,
-    required this.organizationPurpose,
-    required this.type,
-    required this.brand,
-    required this.model,
-    required this.serialNumber,
-  });
-
-  final String id;
-  final String? customerId;
-  final String? organizationId;
-  final EquipmentOwnerType ownerType;
-  final EquipmentOrganizationPurpose? organizationPurpose;
-  final String type;
-  final String brand;
-  final String model;
-  final String? serialNumber;
-
-  factory EquipmentAcquisitionEquipmentSnapshot.fromWire(
-    Map<String, dynamic> wire,
-  ) {
-    final customerId = wire['customerId'];
-    final organizationId = wire['organizationId'];
-    final serialNumber = wire['serialNumber'];
-    if (customerId != null && customerId is! String ||
-        organizationId != null && organizationId is! String ||
-        serialNumber != null && serialNumber is! String) {
-      throw const FormatException('Invalid acquisition equipment snapshot.');
-    }
-    final ownerType = EquipmentOwnerType.fromDbValue(wire['ownerType']);
-    final purpose = EquipmentOrganizationPurpose.fromNullableDbValue(
-      wire['organizationPurpose'],
-    );
-    if (ownerType == EquipmentOwnerType.customer &&
-            (customerId == null || organizationId != null || purpose != null) ||
-        ownerType == EquipmentOwnerType.organization &&
-            (customerId != null || organizationId == null || purpose == null)) {
-      throw const FormatException(
-        'Inconsistent acquisition equipment ownership snapshot.',
-      );
-    }
-    return EquipmentAcquisitionEquipmentSnapshot(
-      id: _requiredText(wire['id'], 'equipment.id'),
-      customerId: customerId as String?,
-      organizationId: organizationId as String?,
-      ownerType: ownerType,
-      organizationPurpose: purpose,
-      type: _requiredText(wire['type'], 'equipment.type'),
-      brand: _requiredText(wire['brand'], 'equipment.brand'),
-      model: _requiredText(wire['model'], 'equipment.model'),
-      serialNumber: serialNumber as String?,
     );
   }
 }
@@ -345,13 +273,6 @@ int? _optionalPositiveMinor(Object? value) {
   if (value == null) return null;
   if (value is! int || value < 1 || value > 9999999999) {
     throw const FormatException('Invalid acquisition offeredAmountMinor.');
-  }
-  return value;
-}
-
-Map<String, dynamic> _requiredMap(Object? value, String field) {
-  if (value is! Map<String, dynamic>) {
-    throw FormatException('Invalid acquisition $field.');
   }
   return value;
 }

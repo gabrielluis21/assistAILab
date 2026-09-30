@@ -11,7 +11,6 @@ import 'package:assistailab/features/equipment/equipment_acquisition_command_exe
 import 'package:assistailab/features/equipment/equipment_acquisition_entity.dart';
 import 'package:assistailab/features/equipment/equipment_acquisition_gateway.dart';
 import 'package:assistailab/features/equipment/equipment_acquisition_repository.dart';
-import 'package:assistailab/features/equipment/equipment_entity.dart';
 import 'package:assistailab/features/equipment/pre_acquisition_entity.dart';
 import 'package:assistailab/features/equipment/pre_acquisition_repository.dart';
 import 'package:assistailab/features/equipment/pre_acquisitions_provider.dart';
@@ -68,6 +67,58 @@ void main() {
   });
 
   group('P08-C SQLite projection', () {
+    test('PreAcquisition purpose is required and round-trips both values',
+        () async {
+      final repository = PreAcquisitionLocalDataSource();
+      for (final purpose in PreAcquisitionPurpose.values) {
+        final record = _preAcquisition(
+          id: 'pre-${purpose.wireValue}',
+          purpose: purpose,
+        );
+        await repository.insert(record, executor: database);
+        expect(
+          (await repository.findById(record.id, executor: database))?.purpose,
+          purpose,
+        );
+      }
+      await expectLater(
+        database.insert(
+          'pre_acquisitions',
+          _preAcquisition(id: 'pre-without-purpose').toMap()..remove('purpose'),
+        ),
+        throwsA(anything),
+      );
+    });
+
+    test('PreAcquisition amount accepts null and frozen inclusive boundaries',
+        () async {
+      for (final entry in <(String, int?)>[
+        ('null', null),
+        ('minimum', 1),
+        ('maximum', 9999999999),
+      ]) {
+        await database.insert(
+          'pre_acquisitions',
+          _preAcquisition(id: 'pre-${entry.$1}').toMap()
+            ..['offered_amount_minor'] = entry.$2,
+        );
+      }
+      for (final entry in <(String, int)>[
+        ('zero', 0),
+        ('negative', -1),
+        ('overflow', 10000000000),
+      ]) {
+        await expectLater(
+          database.insert(
+            'pre_acquisitions',
+            _preAcquisition(id: 'pre-${entry.$1}').toMap()
+              ..['offered_amount_minor'] = entry.$2,
+          ),
+          throwsA(anything),
+        );
+      }
+    });
+
     test('enforces source correlation and backend enum boundaries', () async {
       final valid = _acquisition();
       await EquipmentAcquisitionLocalDataSource().upsert(
@@ -113,8 +164,7 @@ void main() {
       );
     });
 
-    test('authoritative completion updates Equipment ownership without Outbox',
-        () async {
+    test('repository upsert is isolated to equipment_acquisitions', () async {
       await database.insert('equipments', {
         'id': 'equipment-1',
         'customer_id': 'customer-1',
@@ -128,34 +178,14 @@ void main() {
         'notes': 'preserved',
         'updated_at': '2026-09-29T10:00:00.000Z',
       });
+      final before = await database.query('equipments');
       await EquipmentAcquisitionLocalDataSource().upsert(
-        _acquisition(
-          status: EquipmentAcquisitionStatus.completed,
-          equipmentSnapshot: const EquipmentAcquisitionEquipmentSnapshot(
-            id: 'equipment-1',
-            customerId: null,
-            organizationId: 'organization-1',
-            ownerType: EquipmentOwnerType.organization,
-            organizationPurpose: EquipmentOrganizationPurpose.resale,
-            type: 'Notebook',
-            brand: 'Brand',
-            model: 'Model',
-            serialNumber: null,
-          ),
-        ),
+        _acquisition(status: EquipmentAcquisitionStatus.completed),
         executor: database,
       );
 
-      final equipment =
-          (await database.query('equipments', where: 'id = ?', whereArgs: [
-        'equipment-1',
-      ]))
-              .single;
-      expect(equipment['owner_type'], 'ORGANIZATION');
-      expect(equipment['customer_id'], isNull);
-      expect(equipment['organization_id'], 'organization-1');
-      expect(equipment['organization_purpose'], 'RESALE');
-      expect(equipment['notes'], 'preserved');
+      expect(await database.query('equipments'), before);
+      expect((await database.query('equipment_acquisitions')).length, 1);
     });
   });
 
@@ -274,23 +304,56 @@ void main() {
   });
 
   group('P08-C shared CommandIntent lifecycle', () {
-    test('CREATE atomically commits projection and approves PreAcquisition',
+    test('PENDING_EVALUATION cannot skip approval and dispatch CREATE',
         () async {
-      final pre = _preAcquisition();
-      await PreAcquisitionLocalDataSource().insert(
-        pre,
+      final pre = _preAcquisition(
+        status: PreAcquisitionStatus.pendingEvaluation,
+      );
+      final gateway = _FakeGateway(createResult: _acquisition());
+
+      expect(
+        () => _executor(database, gateway).createFromPreAcquisition(
+          preAcquisition: pre,
+        ),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(gateway.operationIds, isEmpty);
+      expect(await database.query('command_intents'), isEmpty);
+    });
+
+    test('CREATE requires approved input and preserves PreAcquisition',
+        () async {
+      final repository = PreAcquisitionLocalDataSource();
+      final pending = _preAcquisition(
+        status: PreAcquisitionStatus.pendingEvaluation,
+      );
+      await repository.insert(pending, executor: database);
+      expect(
+        (await repository.findById(pending.id, executor: database))?.status,
+        PreAcquisitionStatus.pendingEvaluation,
+      );
+      await repository.update(
+        pending.copyWith(
+          status: PreAcquisitionStatus.approved,
+          evaluatedAt: '2026-09-29T12:00:00.000Z',
+        ),
         executor: database,
       );
+      final pre = (await repository.findById(
+        pending.id,
+        executor: database,
+      ))!;
       final gateway = _FakeGateway(createResult: _acquisition());
 
       final created =
           await _executor(database, gateway).createFromPreAcquisition(
         preAcquisition: pre,
-        purpose: EquipmentAcquisitionPurpose.resale,
       );
 
       expect(created.status, EquipmentAcquisitionStatus.pending);
       expect(gateway.createSources, [EquipmentAcquisitionSource.directOffer]);
+      expect(gateway.createPurposes, [EquipmentAcquisitionPurpose.resale]);
       expect(
         (await PreAcquisitionLocalDataSource().findById(
           pre.id,
@@ -315,18 +378,21 @@ void main() {
 
     test('SERVICE_ORDER source is derived only from the local correlation',
         () async {
-      final pre = _preAcquisition(serviceOrderId: 'service-order-1');
+      final pre = _preAcquisition(
+        serviceOrderId: 'service-order-1',
+        purpose: PreAcquisitionPurpose.partsDonor,
+      );
       await PreAcquisitionLocalDataSource().insert(pre, executor: database);
       final gateway = _FakeGateway(
         createResult: _acquisition(
           source: EquipmentAcquisitionSource.serviceOrder,
           serviceOrderId: 'service-order-1',
+          purpose: EquipmentAcquisitionPurpose.partsDonor,
         ),
       );
 
       await _executor(database, gateway).createFromPreAcquisition(
         preAcquisition: pre,
-        purpose: EquipmentAcquisitionPurpose.resale,
       );
 
       expect(
@@ -334,15 +400,14 @@ void main() {
         [EquipmentAcquisitionSource.serviceOrder],
       );
       expect(gateway.createServiceOrderIds, ['service-order-1']);
+      expect(gateway.createPurposes, [EquipmentAcquisitionPurpose.partsDonor]);
     });
 
-    test('unknown failure retries with the same operation id', () async {
+    test('lost response retries same operation and preserves all identities',
+        () async {
       final pre = _preAcquisition();
       await PreAcquisitionLocalDataSource().insert(pre, executor: database);
-      final gateway = _FakeGateway(
-        createResult: _acquisition(),
-        createErrors: [TimeoutException('lost response')],
-      );
+      final gateway = _ResponseLossGateway();
       var generated = 0;
       final executor = _executor(
         database,
@@ -353,7 +418,6 @@ void main() {
       await expectLater(
         executor.createFromPreAcquisition(
           preAcquisition: pre,
-          purpose: EquipmentAcquisitionPurpose.resale,
         ),
         throwsA(isA<TimeoutException>()),
       );
@@ -361,13 +425,27 @@ void main() {
         (await database.query('command_intents')).single['lifecycle_state'],
         'UNKNOWN',
       );
+      final intent = (await database.query('command_intents')).single;
+      final operationId = intent['operation_id']! as String;
+      final remoteAfterLoss = gateway.byOperationId[operationId]!;
+      expect(await database.query('equipment_acquisitions'), isEmpty);
+      expect(gateway.remoteCreateCount, 1);
+      expect(pre.id, isNot(operationId));
+      expect(remoteAfterLoss.id, isNot(pre.id));
+      expect(remoteAfterLoss.id, isNot(operationId));
 
-      await executor.createFromPreAcquisition(
+      final recovered = await executor.createFromPreAcquisition(
         preAcquisition: pre,
-        purpose: EquipmentAcquisitionPurpose.resale,
       );
       expect(gateway.operationIds, ['operation-1', 'operation-1']);
       expect(generated, 1);
+      expect(gateway.remoteCreateCount, 1);
+      expect(recovered.id, remoteAfterLoss.id);
+      expect(recovered.clientPreAcquisitionId, pre.id);
+      expect(
+        (await database.query('command_intents')).single['operation_id'],
+        operationId,
+      );
     });
 
     test('definitive rejection does not commit a local projection', () async {
@@ -386,7 +464,6 @@ void main() {
       await expectLater(
         _executor(database, gateway).createFromPreAcquisition(
           preAcquisition: pre,
-          purpose: EquipmentAcquisitionPurpose.resale,
         ),
         throwsA(isA<EquipmentAcquisitionCommandException>()),
       );
@@ -401,7 +478,7 @@ void main() {
           executor: database,
         ))
             ?.status,
-        PreAcquisitionStatus.pendingEvaluation,
+        PreAcquisitionStatus.approved,
       );
     });
 
@@ -471,6 +548,82 @@ void main() {
       expect(await database.query('command_intents'), isEmpty);
       expect(gateway.operationIds, isEmpty);
     });
+  });
+
+  group('P08-C backend exclusivity under real overlap', () {
+    for (final scenario in const <({
+      String name,
+      EquipmentAcquisitionSource first,
+      EquipmentAcquisitionSource second,
+    })>[
+      (
+        name: 'SERVICE_ORDER x SERVICE_ORDER',
+        first: EquipmentAcquisitionSource.serviceOrder,
+        second: EquipmentAcquisitionSource.serviceOrder,
+      ),
+      (
+        name: 'SERVICE_ORDER x DIRECT_OFFER',
+        first: EquipmentAcquisitionSource.serviceOrder,
+        second: EquipmentAcquisitionSource.directOffer,
+      ),
+      (
+        name: 'DIRECT_OFFER x DIRECT_OFFER',
+        first: EquipmentAcquisitionSource.directOffer,
+        second: EquipmentAcquisitionSource.directOffer,
+      ),
+    ]) {
+      test('${scenario.name} yields one authoritative active acquisition',
+          () async {
+        final first = _preAcquisition(
+          id: 'pre-first',
+          serviceOrderId:
+              scenario.first == EquipmentAcquisitionSource.serviceOrder
+                  ? '11111111-1111-4111-8111-111111111111'
+                  : null,
+        );
+        final second = _preAcquisition(
+          id: 'pre-second',
+          serviceOrderId:
+              scenario.second == EquipmentAcquisitionSource.serviceOrder
+                  ? '22222222-2222-4222-8222-222222222222'
+                  : null,
+        );
+        final gateway = _ExclusiveBackendGateway();
+        final firstFuture = _capture(
+          _executor(
+            database,
+            gateway,
+            operationIdFactory: () => 'operation-first',
+          ).createFromPreAcquisition(preAcquisition: first),
+        );
+        final secondFuture = _capture(
+          _executor(
+            database,
+            gateway,
+            operationIdFactory: () => 'operation-second',
+          ).createFromPreAcquisition(preAcquisition: second),
+        );
+
+        await gateway.waitUntilOverlapping();
+        gateway.release();
+        final results = await Future.wait([firstFuture, secondFuture]);
+
+        expect(gateway.maxInFlight, 2);
+        expect(gateway.remoteCreateCount, 1);
+        expect(
+          results.whereType<EquipmentAcquisitionEntity>().length,
+          1,
+        );
+        expect(
+          results
+              .whereType<EquipmentAcquisitionCommandException>()
+              .single
+              .errorCode,
+          'EQUIPMENT_ACTIVE_ACQUISITION_EXISTS',
+        );
+        expect((await database.query('equipment_acquisitions')).length, 1);
+      });
+    }
   });
 
   group('P08-C authenticated projection isolation', () {
@@ -567,25 +720,32 @@ EquipmentAcquisitionCommandExecutor _executor(
   return EquipmentAcquisitionCommandExecutor(
     gateway: gateway,
     acquisitionRepository: EquipmentAcquisitionLocalDataSource(),
-    preAcquisitionRepository: PreAcquisitionLocalDataSource(),
     intentRepository: CommandIntentLocalDataSource(
       nowUtc: () => DateTime.utc(2026, 9, 29),
     ),
     database: database,
     isBindingCurrent: isCurrent ?? () => true,
     operationIdFactory: operationIdFactory ?? () => 'operation-id',
-    nowUtc: () => DateTime.utc(2026, 9, 29, 12),
   );
 }
 
-PreAcquisitionEntity _preAcquisition({String? serviceOrderId}) =>
+PreAcquisitionEntity _preAcquisition({
+  String id = 'pre-1',
+  String equipmentId = 'equipment-1',
+  String customerId = 'customer-1',
+  String organizationId = 'organization-1',
+  String? serviceOrderId,
+  PreAcquisitionPurpose purpose = PreAcquisitionPurpose.resale,
+  PreAcquisitionStatus status = PreAcquisitionStatus.approved,
+}) =>
     PreAcquisitionEntity(
-      id: 'pre-1',
-      equipmentId: 'equipment-1',
-      customerId: 'customer-1',
-      organizationId: 'organization-1',
+      id: id,
+      equipmentId: equipmentId,
+      customerId: customerId,
+      organizationId: organizationId,
       serviceOrderId: serviceOrderId,
-      status: PreAcquisitionStatus.pendingEvaluation,
+      purpose: purpose,
+      status: status,
       offeredAmountMinor: 125001,
       notes: 'Proposta local',
       createdAt: '2026-09-29T10:00:00.000Z',
@@ -593,21 +753,26 @@ PreAcquisitionEntity _preAcquisition({String? serviceOrderId}) =>
     );
 
 EquipmentAcquisitionEntity _acquisition({
+  String id = 'acquisition-1',
+  String equipmentId = 'equipment-1',
+  String customerId = 'customer-1',
+  String organizationId = 'organization-1',
   EquipmentAcquisitionSource source = EquipmentAcquisitionSource.directOffer,
   String? serviceOrderId,
+  String clientPreAcquisitionId = 'pre-1',
+  EquipmentAcquisitionPurpose purpose = EquipmentAcquisitionPurpose.resale,
   EquipmentAcquisitionStatus status = EquipmentAcquisitionStatus.pending,
   EquipmentConsentMethod? consentMethod,
-  EquipmentAcquisitionEquipmentSnapshot? equipmentSnapshot,
 }) =>
     EquipmentAcquisitionEntity(
-      id: 'acquisition-1',
-      equipmentId: 'equipment-1',
-      customerId: 'customer-1',
-      organizationId: 'organization-1',
+      id: id,
+      equipmentId: equipmentId,
+      customerId: customerId,
+      organizationId: organizationId,
       serviceOrderId: serviceOrderId,
       source: source,
-      clientPreAcquisitionId: 'pre-1',
-      purpose: EquipmentAcquisitionPurpose.resale,
+      clientPreAcquisitionId: clientPreAcquisitionId,
+      purpose: purpose,
       status: status,
       offeredAmountMinor: 125001,
       consentMethod: consentMethod,
@@ -625,7 +790,6 @@ EquipmentAcquisitionEntity _acquisition({
       notes: 'Proposta local',
       createdAt: '2026-09-29T10:30:00.000Z',
       updatedAt: '2026-09-29T10:30:00.000Z',
-      equipmentSnapshot: equipmentSnapshot,
     );
 
 Map<String, Object?> _wire({
@@ -658,6 +822,171 @@ Map<String, Object?> _wire({
       'updatedAt': '2026-09-29T10:30:00.000Z',
     };
 
+Future<Object> _capture(Future<EquipmentAcquisitionEntity> future) async {
+  try {
+    return await future;
+  } catch (error) {
+    return error;
+  }
+}
+
+final class _ResponseLossGateway implements EquipmentAcquisitionGateway {
+  final Map<String, EquipmentAcquisitionEntity> byOperationId = {};
+  final List<String> operationIds = [];
+  int remoteCreateCount = 0;
+  bool _loseNextResponse = true;
+
+  @override
+  Future<EquipmentAcquisitionEntity> create({
+    required String operationId,
+    required EquipmentAcquisitionSource source,
+    required String equipmentId,
+    required String? serviceOrderId,
+    required EquipmentAcquisitionPurpose purpose,
+    required int? offeredAmountMinor,
+    required String? notes,
+    required String clientPreAcquisitionId,
+  }) async {
+    operationIds.add(operationId);
+    final authoritative = byOperationId.putIfAbsent(operationId, () {
+      remoteCreateCount++;
+      return _acquisition(
+        id: 'remote-acquisition-$remoteCreateCount',
+        equipmentId: equipmentId,
+        source: source,
+        serviceOrderId: serviceOrderId,
+        clientPreAcquisitionId: clientPreAcquisitionId,
+        purpose: purpose,
+      );
+    });
+    if (_loseNextResponse) {
+      _loseNextResponse = false;
+      throw TimeoutException('response lost after backend commit');
+    }
+    return authoritative;
+  }
+
+  @override
+  Future<List<EquipmentAcquisitionEntity>> listAll() async =>
+      byOperationId.values.toList(growable: false);
+
+  @override
+  Future<EquipmentAcquisitionEntity> authorize({
+    required String operationId,
+    required String acquisitionId,
+    required EquipmentConsentMethod consentMethod,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> reject({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> authorizeInPerson({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> complete({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+}
+
+final class _ExclusiveBackendGateway implements EquipmentAcquisitionGateway {
+  final Completer<void> _overlapping = Completer<void>();
+  final Completer<void> _release = Completer<void>();
+  final Map<String, EquipmentAcquisitionEntity> _activeByEquipment = {};
+  int _entered = 0;
+  int _inFlight = 0;
+  int maxInFlight = 0;
+  int remoteCreateCount = 0;
+
+  Future<void> waitUntilOverlapping() =>
+      _overlapping.future.timeout(const Duration(seconds: 5));
+
+  void release() => _release.complete();
+
+  @override
+  Future<EquipmentAcquisitionEntity> create({
+    required String operationId,
+    required EquipmentAcquisitionSource source,
+    required String equipmentId,
+    required String? serviceOrderId,
+    required EquipmentAcquisitionPurpose purpose,
+    required int? offeredAmountMinor,
+    required String? notes,
+    required String clientPreAcquisitionId,
+  }) async {
+    _entered++;
+    _inFlight++;
+    if (_inFlight > maxInFlight) maxInFlight = _inFlight;
+    if (_entered == 2) _overlapping.complete();
+    await _release.future;
+    try {
+      if (_activeByEquipment.containsKey(equipmentId)) {
+        throw const EquipmentAcquisitionCommandException(
+          409,
+          'EQUIPMENT_ACTIVE_ACQUISITION_EXISTS',
+        );
+      }
+      remoteCreateCount++;
+      final acquisition = _acquisition(
+        id: 'remote-$remoteCreateCount',
+        equipmentId: equipmentId,
+        source: source,
+        serviceOrderId: serviceOrderId,
+        clientPreAcquisitionId: clientPreAcquisitionId,
+        purpose: purpose,
+      );
+      _activeByEquipment[equipmentId] = acquisition;
+      return acquisition;
+    } finally {
+      _inFlight--;
+    }
+  }
+
+  @override
+  Future<List<EquipmentAcquisitionEntity>> listAll() async =>
+      _activeByEquipment.values.toList(growable: false);
+
+  @override
+  Future<EquipmentAcquisitionEntity> authorize({
+    required String operationId,
+    required String acquisitionId,
+    required EquipmentConsentMethod consentMethod,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> reject({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> authorizeInPerson({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EquipmentAcquisitionEntity> complete({
+    required String operationId,
+    required String acquisitionId,
+  }) =>
+      throw UnimplementedError();
+}
+
 final class _FakeGateway implements EquipmentAcquisitionGateway {
   _FakeGateway({
     required this.createResult,
@@ -669,6 +998,7 @@ final class _FakeGateway implements EquipmentAcquisitionGateway {
   final List<String> operationIds = [];
   final List<EquipmentAcquisitionSource> createSources = [];
   final List<String?> createServiceOrderIds = [];
+  final List<EquipmentAcquisitionPurpose> createPurposes = [];
 
   @override
   Future<List<EquipmentAcquisitionEntity>> listAll() async => [createResult];
@@ -687,6 +1017,7 @@ final class _FakeGateway implements EquipmentAcquisitionGateway {
     operationIds.add(operationId);
     createSources.add(source);
     createServiceOrderIds.add(serviceOrderId);
+    createPurposes.add(purpose);
     if (createErrors.isNotEmpty) throw createErrors.removeAt(0);
     return createResult;
   }

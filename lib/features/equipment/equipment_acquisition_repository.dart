@@ -86,41 +86,6 @@ final class EquipmentAcquisitionLocalDataSource
       acquisition.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
-    final equipment = acquisition.equipmentSnapshot;
-    if (equipment != null) {
-      final existing = await db.query(
-        'equipments',
-        columns: ['id'],
-        where: 'id = ?',
-        whereArgs: [equipment.id],
-        limit: 1,
-      );
-      final projection = <String, Object?>{
-        'customer_id': equipment.customerId,
-        'organization_id': equipment.organizationId,
-        'owner_type': equipment.ownerType.wireValue,
-        'organization_purpose': equipment.organizationPurpose?.wireValue,
-        'type': equipment.type,
-        'brand': equipment.brand,
-        'model': equipment.model,
-        'serial_number': equipment.serialNumber,
-        'updated_at': acquisition.updatedAt,
-      };
-      if (existing.isEmpty) {
-        await db.insert('equipments', {
-          'id': equipment.id,
-          ...projection,
-          'notes': null,
-        });
-      } else {
-        await db.update(
-          'equipments',
-          projection,
-          where: 'id = ?',
-          whereArgs: [equipment.id],
-        );
-      }
-    }
   }
 
   @override

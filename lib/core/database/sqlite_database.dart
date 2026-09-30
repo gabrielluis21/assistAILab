@@ -233,6 +233,20 @@ class SqliteDatabase {
   static Future<void> _createPreAcquisitionTable(
     DatabaseExecutor db,
   ) async {
+    if (await _tableExists(db, 'pre_acquisitions')) {
+      final columns = await _columnNames(db, 'pre_acquisitions');
+      if (!columns.contains('purpose')) {
+        final countRows =
+            await db.rawQuery('SELECT COUNT(*) FROM pre_acquisitions');
+        final count = countRows.single.values.single as int;
+        if (count != 0) {
+          throw StateError(
+            'Legacy PreAcquisition rows require an explicit purpose migration.',
+          );
+        }
+        await db.execute('DROP TABLE pre_acquisitions');
+      }
+    }
     await db.execute('''
       CREATE TABLE IF NOT EXISTS pre_acquisitions (
         id TEXT PRIMARY KEY,
@@ -240,6 +254,9 @@ class SqliteDatabase {
         customer_id TEXT NOT NULL,
         organization_id TEXT NOT NULL,
         service_order_id TEXT,
+        purpose TEXT NOT NULL CHECK (
+          purpose IN ('RESALE', 'PARTS_DONOR')
+        ),
         status TEXT NOT NULL CHECK (
           status IN (
             'PENDING_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED',
@@ -247,7 +264,9 @@ class SqliteDatabase {
           )
         ),
         offered_amount_minor INTEGER CHECK (
-          offered_amount_minor IS NULL OR offered_amount_minor >= 0
+          offered_amount_minor IS NULL OR (
+            offered_amount_minor >= 1 AND offered_amount_minor <= 9999999999
+          )
         ),
         notes TEXT,
         created_at TEXT NOT NULL,
@@ -795,6 +814,7 @@ class SqliteDatabase {
       'customer_id',
       'organization_id',
       'service_order_id',
+      'purpose',
       'status',
       'offered_amount_minor',
       'notes',

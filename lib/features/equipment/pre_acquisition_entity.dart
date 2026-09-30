@@ -11,7 +11,13 @@ enum PreAcquisitionStatus {
 
   final String wireValue;
 
-  bool get isTerminal => this != PreAcquisitionStatus.pendingEvaluation;
+  bool get isTerminal => switch (this) {
+        PreAcquisitionStatus.rejected ||
+        PreAcquisitionStatus.expired ||
+        PreAcquisitionStatus.cancelled =>
+          true,
+        _ => false,
+      };
 
   static PreAcquisitionStatus fromDbValue(Object? value) {
     for (final status in PreAcquisitionStatus.values) {
@@ -24,12 +30,31 @@ enum PreAcquisitionStatus {
   }
 }
 
+enum PreAcquisitionPurpose {
+  resale('RESALE'),
+  partsDonor('PARTS_DONOR');
+
+  const PreAcquisitionPurpose(this.wireValue);
+
+  final String wireValue;
+
+  static PreAcquisitionPurpose fromDbValue(Object? value) => switch (value) {
+        'RESALE' => PreAcquisitionPurpose.resale,
+        'PARTS_DONOR' => PreAcquisitionPurpose.partsDonor,
+        _ => throw UnsupportedDomainValueException(
+            field: 'PreAcquisition.purpose',
+            receivedValue: value,
+          ),
+      };
+}
+
 class PreAcquisitionEntity {
   final String id;
   final String equipmentId;
   final String customerId;
   final String organizationId;
   final String? serviceOrderId;
+  final PreAcquisitionPurpose purpose;
   final PreAcquisitionStatus status;
   final int? offeredAmountMinor;
   final String? notes;
@@ -44,6 +69,7 @@ class PreAcquisitionEntity {
     required this.customerId,
     required this.organizationId,
     this.serviceOrderId,
+    required this.purpose,
     required this.status,
     this.offeredAmountMinor,
     this.notes,
@@ -64,6 +90,7 @@ class PreAcquisitionEntity {
       customerId: customerId,
       organizationId: organizationId,
       serviceOrderId: serviceOrderId,
+      purpose: purpose,
       status: status ?? this.status,
       offeredAmountMinor: offeredAmountMinor,
       notes: notes,
@@ -81,6 +108,7 @@ class PreAcquisitionEntity {
       'customer_id': customerId,
       'organization_id': organizationId,
       'service_order_id': serviceOrderId,
+      'purpose': purpose.wireValue,
       'status': status.wireValue,
       'offered_amount_minor': offeredAmountMinor,
       'notes': notes,
@@ -97,6 +125,7 @@ class PreAcquisitionEntity {
       'customerId': customerId,
       'organizationId': organizationId,
       'serviceOrderId': serviceOrderId,
+      'purpose': purpose.wireValue,
       'status': status.wireValue,
       'offeredAmountMinor': offeredAmountMinor,
       'notes': notes,
@@ -108,14 +137,24 @@ class PreAcquisitionEntity {
   }
 
   factory PreAcquisitionEntity.fromMap(Map<String, Object?> map) {
+    final offeredAmountMinor = map['offered_amount_minor'];
+    if (offeredAmountMinor != null &&
+        (offeredAmountMinor is! int ||
+            offeredAmountMinor < 1 ||
+            offeredAmountMinor > 9999999999)) {
+      throw const FormatException(
+        'Invalid PreAcquisition.offeredAmountMinor.',
+      );
+    }
     return PreAcquisitionEntity(
       id: map['id'] as String,
       equipmentId: map['equipment_id'] as String,
       customerId: map['customer_id'] as String,
       organizationId: map['organization_id'] as String,
       serviceOrderId: map['service_order_id'] as String?,
+      purpose: PreAcquisitionPurpose.fromDbValue(map['purpose']),
       status: PreAcquisitionStatus.fromDbValue(map['status']),
-      offeredAmountMinor: map['offered_amount_minor'] as int?,
+      offeredAmountMinor: offeredAmountMinor as int?,
       notes: map['notes'] as String?,
       createdAt: map['created_at'] as String,
       evaluationDeadline: map['evaluation_deadline'] as String,
