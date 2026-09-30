@@ -53,6 +53,27 @@ class PreAcquisitionEntity {
     this.resolutionReason,
   });
 
+  PreAcquisitionEntity copyWith({
+    PreAcquisitionStatus? status,
+    String? evaluatedAt,
+    String? resolutionReason,
+  }) {
+    return PreAcquisitionEntity(
+      id: id,
+      equipmentId: equipmentId,
+      customerId: customerId,
+      organizationId: organizationId,
+      serviceOrderId: serviceOrderId,
+      status: status ?? this.status,
+      offeredAmountMinor: offeredAmountMinor,
+      notes: notes,
+      createdAt: createdAt,
+      evaluationDeadline: evaluationDeadline,
+      evaluatedAt: evaluatedAt ?? this.evaluatedAt,
+      resolutionReason: resolutionReason ?? this.resolutionReason,
+    );
+  }
+
   Map<String, Object?> toMap() {
     return {
       'id': id,
