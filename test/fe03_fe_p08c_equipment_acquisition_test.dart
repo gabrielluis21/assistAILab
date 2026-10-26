@@ -403,30 +403,50 @@ void main() {
       expect(gateway.createPurposes, [EquipmentAcquisitionPurpose.partsDonor]);
     });
 
-    test('lost response retries same operation and preserves all identities',
+    test('C06 recovery across executor recreation preserves all identities',
         () async {
-      final pre = _preAcquisition();
-      await PreAcquisitionLocalDataSource().insert(pre, executor: database);
-      final gateway = _ResponseLossGateway();
-      var generated = 0;
-      final executor = _executor(
-        database,
-        gateway,
-        operationIdFactory: () => 'operation-${++generated}',
+      final preRepository = PreAcquisitionLocalDataSource();
+      final acquisitionRepository = EquipmentAcquisitionLocalDataSource();
+      final intentRepository = CommandIntentLocalDataSource(
+        nowUtc: () => DateTime.utc(2026, 9, 29),
       );
 
+      final pre = _preAcquisition();
+      await preRepository.insert(pre, executor: database);
+      final gateway = _ResponseLossGateway();
+
+      // 1. Criar o Executor A.
+      var generatedA = 0;
+      final executorA = EquipmentAcquisitionCommandExecutor(
+        gateway: gateway,
+        acquisitionRepository: acquisitionRepository,
+        intentRepository: intentRepository,
+        database: database,
+        isBindingCurrent: () => true,
+        operationIdFactory: () => 'operation-a-${++generatedA}',
+      );
+
+      // 2. Iniciar EQUIPMENT_ACQUISITION_CREATE.
+      // 3. Simular o backend criando a aquisição.
+      // 4. Simular a perda da resposta após a criação remota.
       await expectLater(
-        executor.createFromPreAcquisition(
+        executorA.createFromPreAcquisition(
           preAcquisition: pre,
         ),
         throwsA(isA<TimeoutException>()),
       );
-      expect(
-        (await database.query('command_intents')).single['lifecycle_state'],
-        'UNKNOWN',
-      );
-      final intent = (await database.query('command_intents')).single;
+
+      // 5. Confirmar que o CommandIntent persiste como UNKNOWN no SQLite.
+      final intentsAfterLoss = await database.query('command_intents');
+      expect(intentsAfterLoss.length, 1);
+      final intent = intentsAfterLoss.single;
+      expect(intent['command_type'], equipmentAcquisitionCreateCommandType);
+      expect(intent['lifecycle_state'], 'UNKNOWN');
+
       final operationId = intent['operation_id']! as String;
+      expect(operationId, 'operation-a-1');
+      expect(generatedA, 1);
+
       final remoteAfterLoss = gateway.byOperationId[operationId]!;
       expect(await database.query('equipment_acquisitions'), isEmpty);
       expect(gateway.remoteCreateCount, 1);
@@ -434,18 +454,51 @@ void main() {
       expect(remoteAfterLoss.id, isNot(pre.id));
       expect(remoteAfterLoss.id, isNot(operationId));
 
-      final recovered = await executor.createFromPreAcquisition(
+      // 6. Abandonar o Executor A.
+      // 7. Criar um Executor B novo, utilizando o mesmo banco SQLite e os mesmos repositórios persistentes.
+      var generatedB = 0;
+      final executorB = EquipmentAcquisitionCommandExecutor(
+        gateway: gateway,
+        acquisitionRepository: acquisitionRepository,
+        intentRepository: intentRepository,
+        database: database,
+        isBindingCurrent: () => true,
+        operationIdFactory: () => 'operation-b-${++generatedB}',
+      );
+
+      // 8. Executar o mecanismo existente de recuperação de operações interrompidas.
+      await intentRepository.recoverInterruptedSending(
+        ownedCommandTypes: equipmentAcquisitionOwnedCommandTypes,
+        executor: database,
+      );
+      final recovered = await executorB.createFromPreAcquisition(
         preAcquisition: pre,
       );
-      expect(gateway.operationIds, ['operation-1', 'operation-1']);
-      expect(generated, 1);
-      expect(gateway.remoteCreateCount, 1);
+
+      // 9. Confirmar que a recuperação utiliza o mesmo X-Operation-Id.
+      expect(gateway.operationIds, ['operation-a-1', 'operation-a-1']);
+      expect(generatedB, 0);
+
+      // 10. Confirmar que a aquisição remota recuperada possui o mesmo EquipmentAcquisition.id.
       expect(recovered.id, remoteAfterLoss.id);
       expect(recovered.clientPreAcquisitionId, pre.id);
       expect(
-        (await database.query('command_intents')).single['operation_id'],
-        operationId,
+        (await acquisitionRepository.findById(
+          recovered.id,
+          executor: database,
+        ))
+            ?.id,
+        remoteAfterLoss.id,
       );
+
+      // 11. Confirmar que o CommandIntent termina em COMPLETED.
+      final intentsAfterRecovery = await database.query('command_intents');
+      expect(intentsAfterRecovery.length, 1);
+      expect(intentsAfterRecovery.single['lifecycle_state'], 'COMPLETED');
+      expect(intentsAfterRecovery.single['operation_id'], operationId);
+
+      // 12. Confirmar remoteCreateCount == 1.
+      expect(gateway.remoteCreateCount, 1);
     });
 
     test('definitive rejection does not commit a local projection', () async {
