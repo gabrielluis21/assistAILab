@@ -141,6 +141,7 @@ class SqliteDatabase {
     ''');
 
     await _createPreAcquisitionTable(db);
+    await _createEquipmentAcquisitionTable(db);
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS service_order_items (
@@ -232,6 +233,20 @@ class SqliteDatabase {
   static Future<void> _createPreAcquisitionTable(
     DatabaseExecutor db,
   ) async {
+    if (await _tableExists(db, 'pre_acquisitions')) {
+      final columns = await _columnNames(db, 'pre_acquisitions');
+      if (!columns.contains('purpose')) {
+        final countRows =
+            await db.rawQuery('SELECT COUNT(*) FROM pre_acquisitions');
+        final count = countRows.single.values.single as int;
+        if (count != 0) {
+          throw StateError(
+            'Legacy PreAcquisition rows require an explicit purpose migration.',
+          );
+        }
+        await db.execute('DROP TABLE pre_acquisitions');
+      }
+    }
     await db.execute('''
       CREATE TABLE IF NOT EXISTS pre_acquisitions (
         id TEXT PRIMARY KEY,
@@ -239,6 +254,9 @@ class SqliteDatabase {
         customer_id TEXT NOT NULL,
         organization_id TEXT NOT NULL,
         service_order_id TEXT,
+        purpose TEXT NOT NULL CHECK (
+          purpose IN ('RESALE', 'PARTS_DONOR')
+        ),
         status TEXT NOT NULL CHECK (
           status IN (
             'PENDING_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED',
@@ -246,7 +264,9 @@ class SqliteDatabase {
           )
         ),
         offered_amount_minor INTEGER CHECK (
-          offered_amount_minor IS NULL OR offered_amount_minor >= 0
+          offered_amount_minor IS NULL OR (
+            offered_amount_minor >= 1 AND offered_amount_minor <= 9999999999
+          )
         ),
         notes TEXT,
         created_at TEXT NOT NULL,
@@ -262,6 +282,68 @@ class SqliteDatabase {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS pre_acquisitions_status_deadline
       ON pre_acquisitions(status, evaluation_deadline)
+    ''');
+  }
+
+  static Future<void> _createEquipmentAcquisitionTable(
+    DatabaseExecutor db,
+  ) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS equipment_acquisitions (
+        id TEXT PRIMARY KEY,
+        equipment_id TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        service_order_id TEXT,
+        source TEXT NOT NULL CHECK (
+          source IN ('SERVICE_ORDER', 'DIRECT_OFFER')
+        ),
+        client_pre_acquisition_id TEXT,
+        purpose TEXT NOT NULL CHECK (
+          purpose IN ('RESALE', 'PARTS_DONOR')
+        ),
+        status TEXT NOT NULL CHECK (
+          status IN (
+            'PENDING', 'AUTHORIZED', 'REJECTED', 'CANCELLED', 'COMPLETED'
+          )
+        ),
+        offered_amount_minor INTEGER CHECK (
+          offered_amount_minor IS NULL OR (
+            offered_amount_minor >= 1 AND offered_amount_minor <= 9999999999
+          )
+        ),
+        consent_method TEXT CHECK (
+          consent_method IS NULL OR consent_method IN (
+            'CUSTOMER_APP', 'QR_CODE', 'DIGITAL_SIGNATURE',
+            'SIGNED_DOCUMENT', 'IN_PERSON_ASSISTED'
+          )
+        ),
+        authorized_at TEXT,
+        rejected_at TEXT,
+        cancelled_at TEXT,
+        completed_at TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (source = 'SERVICE_ORDER' AND service_order_id IS NOT NULL) OR
+          (source = 'DIRECT_OFFER' AND service_order_id IS NULL)
+        )
+      )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS
+        equipment_acquisitions_client_pre_acquisition
+      ON equipment_acquisitions(client_pre_acquisition_id)
+      WHERE client_pre_acquisition_id IS NOT NULL
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS equipment_acquisitions_equipment
+      ON equipment_acquisitions(equipment_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS equipment_acquisitions_scope_status
+      ON equipment_acquisitions(organization_id, customer_id, status)
     ''');
   }
 
@@ -374,6 +456,11 @@ class SqliteDatabase {
   /// applies this extension to new, upgraded and already-current databases.
   static Future<void> ensurePreAcquisitionSchema(Database db) =>
       db.transaction(_createPreAcquisitionTable);
+
+  /// Idempotent additive projection schema for the P08-C command workflow.
+  /// Idempotency remains exclusively in the shared `command_intents` table.
+  static Future<void> ensureEquipmentAcquisitionSchema(Database db) =>
+      db.transaction(_createEquipmentAcquisitionTable);
 
   static Future<void> _migrateV5ToV6(DatabaseExecutor db) async {
     final serviceOrders = await _convertedRows(
@@ -727,6 +814,7 @@ class SqliteDatabase {
       'customer_id',
       'organization_id',
       'service_order_id',
+      'purpose',
       'status',
       'offered_amount_minor',
       'notes',
@@ -740,6 +828,36 @@ class SqliteDatabase {
         !preAcquisitionColumns.containsAll(expectedPreAcquisitionColumns)) {
       throw StateError(
         'SQLite v7 pre-acquisition extension is incomplete.',
+      );
+    }
+    const expectedEquipmentAcquisitionColumns = {
+      'id',
+      'equipment_id',
+      'customer_id',
+      'organization_id',
+      'service_order_id',
+      'source',
+      'client_pre_acquisition_id',
+      'purpose',
+      'status',
+      'offered_amount_minor',
+      'consent_method',
+      'authorized_at',
+      'rejected_at',
+      'cancelled_at',
+      'completed_at',
+      'notes',
+      'created_at',
+      'updated_at',
+    };
+    final equipmentAcquisitionColumns =
+        await _columnNames(db, 'equipment_acquisitions');
+    if (equipmentAcquisitionColumns.length !=
+            expectedEquipmentAcquisitionColumns.length ||
+        !equipmentAcquisitionColumns
+            .containsAll(expectedEquipmentAcquisitionColumns)) {
+      throw StateError(
+        'SQLite v7 equipment-acquisition extension is incomplete.',
       );
     }
   }
