@@ -180,7 +180,7 @@ class BackgroundSyncCoordinator {
       if (!_isBoundContextCurrent(operationGeneration, handle)) return;
       if (recovered > 0) {
         debugPrint(
-          'BackgroundSyncCoordinator: Recovered $recovered stale PROCESSING entries to FAILED.',
+          'BackgroundSyncCoordinator: Quarantined $recovered stale PROCESSING entries as REQUIRES_ATTENTION.',
         );
       }
     } catch (error) {

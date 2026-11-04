@@ -397,9 +397,8 @@ abstract final class SyncProjectionApplier {
 /// Central policy for remote projection application while local mutations are
 /// still authoritative in the Outbox.
 ///
-/// `status <> SYNCED` intentionally preserves the existing Service Order
-/// behavior, including FAILED/CONFLICT/REQUIRES_ATTENTION as unresolved. The
-/// policy does not pick a winner or remove/mutate Outbox rows.
+/// Only terminal states whose local consequences are safe release projection
+/// protection. Unknown states remain protected by default.
 final class _ProjectionPendingMutationPolicy {
   final Set<String> customerIds;
   final Set<String> equipmentIds;
@@ -457,8 +456,8 @@ final class _ProjectionPendingMutationPolicy {
       'outbox',
       columns: ['entity_type', 'entity_id', 'payload'],
       where:
-          'status <> ? AND UPPER(entity_type) IN (${List.filled(includedTypes.length, '?').join(',')})',
-      whereArgs: ['SYNCED', ...includedTypes],
+          "status NOT IN ('SYNCED', 'SUPERSEDED', 'DISCARDED') AND UPPER(entity_type) IN (${List.filled(includedTypes.length, '?').join(',')})",
+      whereArgs: includedTypes,
     );
     final customerIds = <String>{};
     final equipmentIds = <String>{};

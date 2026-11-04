@@ -1,6 +1,38 @@
 import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 import 'sqlite_database.dart';
+
+enum OutboxStatus {
+  pending('PENDING'),
+  processing('PROCESSING'),
+  failedTransient('FAILED_TRANSIENT'),
+  failedFatal('FAILED_FATAL'),
+  requiresAttention('REQUIRES_ATTENTION'),
+  conflict('CONFLICT'),
+  superseded('SUPERSEDED'),
+  discarded('DISCARDED'),
+  synced('SYNCED');
+
+  const OutboxStatus(this.value);
+  final String value;
+}
+
+enum RemoteDisposition {
+  unsent('UNSENT'),
+  ambiguous('AMBIGUOUS'),
+  confirmed('CONFIRMED');
+
+  const RemoteDisposition(this.value);
+  final String value;
+}
+
+final class OutboxTransitionException implements Exception {
+  final String message;
+  const OutboxTransitionException(this.message);
+  @override
+  String toString() => message;
+}
 
 class OutboxItem {
   final String operationId;
@@ -16,8 +48,8 @@ class OutboxItem {
   final String? nextRetryAt;
   final String? lastError;
   final String status;
-  // Process state: PENDING, PROCESSING, SYNCED, FAILED, CONFLICT,
-  // or REQUIRES_ATTENTION. It is never a domain/business status.
+  final RemoteDisposition remoteDisposition;
+  // Process state is deliberately separate from domain/business state.
 
   OutboxItem({
     required this.operationId,
@@ -33,6 +65,7 @@ class OutboxItem {
     this.nextRetryAt,
     this.lastError,
     this.status = 'PENDING',
+    this.remoteDisposition = RemoteDisposition.unsent,
   });
 
   /// Formats outbox item for SQLite table persistence (snake_case + json-encoded payload string)
@@ -51,6 +84,7 @@ class OutboxItem {
       'next_retry_at': nextRetryAt,
       'last_error': lastError,
       'status': status,
+      'remote_disposition': remoteDisposition.value,
     };
   }
 
@@ -83,6 +117,10 @@ class OutboxItem {
       nextRetryAt: map['next_retry_at'],
       lastError: map['last_error'],
       status: map['status'],
+      remoteDisposition: RemoteDisposition.values.firstWhere(
+        (value) => value.value == map['remote_disposition'],
+        orElse: () => RemoteDisposition.ambiguous,
+      ),
     );
   }
 }
@@ -93,7 +131,7 @@ class OutboxDao {
     await db.insert(
       'outbox',
       item.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      conflictAlgorithm: ConflictAlgorithm.abort,
     );
   }
 
@@ -106,56 +144,120 @@ class OutboxDao {
     final maps = await db.query(
       'outbox',
       where:
-          '(status = ? OR status = ?) AND (next_retry_at IS NULL OR next_retry_at <= ?)',
-      whereArgs: ['PENDING', 'FAILED', nowIso],
+          "status IN ('PENDING', 'FAILED_TRANSIENT') AND remote_disposition IN ('UNSENT', 'CONFIRMED') AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+      whereArgs: [nowIso],
       orderBy: 'created_at ASC',
       limit: limit,
     );
     return maps.map((m) => OutboxItem.fromMap(m)).toList();
   }
 
-  Future<void> updateStatus(
-    String operationId,
-    String status, {
+  Future<void> transition({
+    required String operationId,
+    required String fromStatus,
+    required RemoteDisposition fromDisposition,
+    required String toStatus,
+    required RemoteDisposition toDisposition,
     int? attemptCount,
     String? lastAttemptAt,
     String? nextRetryAt,
     String? lastError,
     DatabaseExecutor? executor,
   }) async {
+    final allowed =
+        switch ((fromStatus, fromDisposition, toStatus, toDisposition)) {
+      (
+        'PENDING',
+        RemoteDisposition.unsent,
+        'PROCESSING',
+        RemoteDisposition.ambiguous
+      ) ||
+      (
+        'FAILED_TRANSIENT',
+        RemoteDisposition.confirmed,
+        'PROCESSING',
+        RemoteDisposition.ambiguous
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'SYNCED',
+        RemoteDisposition.confirmed
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'CONFLICT',
+        RemoteDisposition.confirmed
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'FAILED_FATAL',
+        RemoteDisposition.confirmed
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'FAILED_TRANSIENT',
+        RemoteDisposition.confirmed
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.ambiguous
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.confirmed
+      ) ||
+      (
+        'PENDING',
+        RemoteDisposition.unsent,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.unsent
+      ) ||
+      (
+        'FAILED_TRANSIENT',
+        RemoteDisposition.confirmed,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.unsent
+      ) =>
+        true,
+      _ => false,
+    };
+    if (!allowed) {
+      throw OutboxTransitionException(
+        'Unauthorized Outbox transition: $fromStatus/${fromDisposition.value} -> $toStatus/${toDisposition.value}.',
+      );
+    }
     final db = executor ?? await SqliteDatabase.instance;
-    final data = <String, dynamic>{'status': status};
-    if (attemptCount != null) {
-      data['attempt_count'] = attemptCount;
-    }
-    if (lastAttemptAt != null) {
-      data['last_attempt_at'] = lastAttemptAt;
-    }
-    if (nextRetryAt != null) {
-      data['next_retry_at'] = nextRetryAt;
-    }
-    if (lastError != null) {
-      data['last_error'] = lastError;
-    }
-    await db.update(
+    final values = <String, Object?>{
+      'status': toStatus,
+      'remote_disposition': toDisposition.value,
+      if (attemptCount != null) 'attempt_count': attemptCount,
+      if (lastAttemptAt != null) 'last_attempt_at': lastAttemptAt,
+      if (nextRetryAt != null) 'next_retry_at': nextRetryAt,
+      if (lastError != null) 'last_error': lastError,
+    };
+    final changed = await db.update(
       'outbox',
-      data,
-      where: 'operation_id = ?',
-      whereArgs: [operationId],
+      values,
+      where: 'operation_id = ? AND status = ? AND remote_disposition = ?',
+      whereArgs: [operationId, fromStatus, fromDisposition.value],
     );
-  }
-
-  Future<void> delete(String operationId, {DatabaseExecutor? executor}) async {
-    final db = executor ?? await SqliteDatabase.instance;
-    await db.delete(
-      'outbox',
-      where: 'operation_id = ?',
-      whereArgs: [operationId],
-    );
+    if (changed != 1) {
+      throw OutboxTransitionException(
+        'Outbox transition compare-and-set failed for $operationId.',
+      );
+    }
   }
 
   /// Recovers entries stuck in PROCESSING state for more than [timeout] (default 5 minutes)
-  /// by transitioning them to FAILED so they can be diagnosed and retried.
+  /// by quarantining them because the remote result may be ambiguous.
   Future<int> recoverProcessingEntries({
     Duration timeout = const Duration(minutes: 5),
     DatabaseExecutor? executor,
@@ -165,10 +267,12 @@ class OutboxDao {
     return db.update(
       'outbox',
       {
-        'status': 'FAILED',
+        'status': 'REQUIRES_ATTENTION',
+        'remote_disposition': 'AMBIGUOUS',
         'last_error': 'Operation timeout: stuck in PROCESSING for > 5 minutes',
       },
-      where: 'status = ? AND (last_attempt_at IS NULL OR last_attempt_at <= ?)',
+      where:
+          "status = ? AND remote_disposition = 'AMBIGUOUS' AND (last_attempt_at IS NULL OR last_attempt_at <= ?)",
       whereArgs: ['PROCESSING', cutoff],
     );
   }
@@ -177,12 +281,238 @@ class OutboxDao {
   Future<int> getPendingCount({DatabaseExecutor? executor}) async {
     final db = executor ?? await SqliteDatabase.instance;
     final res = await db.rawQuery(
-      'SELECT COUNT(*) as count FROM outbox WHERE status IN (?, ?, ?)',
-      ['PENDING', 'PROCESSING', 'FAILED'],
+      "SELECT COUNT(*) as count FROM outbox WHERE status IN ('PENDING', 'PROCESSING', 'FAILED_TRANSIENT', 'REQUIRES_ATTENTION')",
     );
     if (res.isNotEmpty) {
       return (res.first['count'] as num?)?.toInt() ?? 0;
     }
     return 0;
+  }
+
+  /// Supersedes one known local operation and writes its replacement atomically.
+  Future<String> supersede({
+    required String oldOperationId,
+    required String entityType,
+    required String entityId,
+    required String oldStatus,
+    required RemoteDisposition oldDisposition,
+    required OutboxItem replacement,
+    required String entityTable,
+    required Map<String, Object?> localUpdate,
+    Database? database,
+  }) async {
+    final db = database ?? await SqliteDatabase.instance;
+    const allowedTables = {
+      'customers',
+      'equipments',
+      'service_orders',
+      'service_order_items',
+      'pre_acquisitions',
+    };
+    if (!allowedTables.contains(entityTable)) {
+      throw ArgumentError.value(entityTable, 'entityTable');
+    }
+    if (replacement.entityType != entityType ||
+        replacement.entityId != entityId ||
+        replacement.remoteDisposition != RemoteDisposition.unsent ||
+        replacement.status != OutboxStatus.pending.value) {
+      throw const OutboxTransitionException(
+          'Replacement identity or state is invalid.');
+    }
+    if (oldStatus == OutboxStatus.processing.value ||
+        oldDisposition == RemoteDisposition.ambiguous) {
+      throw const OutboxTransitionException(
+          'Processing or ambiguous operation cannot be superseded.');
+    }
+    if (!{
+      OutboxStatus.pending.value,
+      OutboxStatus.failedTransient.value,
+      OutboxStatus.failedFatal.value,
+    }.contains(oldStatus)) {
+      throw const OutboxTransitionException(
+          'Operation state cannot be superseded.');
+    }
+    if ((oldStatus == OutboxStatus.pending.value &&
+            oldDisposition != RemoteDisposition.unsent) ||
+        (oldStatus != OutboxStatus.pending.value &&
+            oldDisposition != RemoteDisposition.confirmed)) {
+      throw const OutboxTransitionException(
+        'Operation state and remote disposition are incompatible for supersede.',
+      );
+    }
+
+    final newOperationId = const Uuid().v4();
+    final newItem = OutboxItem(
+      operationId: newOperationId,
+      deviceId: replacement.deviceId,
+      userId: replacement.userId,
+      entityType: replacement.entityType,
+      entityId: replacement.entityId,
+      operationType: replacement.operationType,
+      payload: replacement.payload,
+      createdAt: replacement.createdAt,
+      attemptCount: 0,
+      status: OutboxStatus.pending.value,
+      remoteDisposition: RemoteDisposition.unsent,
+    );
+
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: [oldOperationId],
+        limit: 1,
+      );
+      if (existing.length != 1 ||
+          existing.single['entity_type'] != entityType ||
+          existing.single['entity_id'] != entityId ||
+          existing.single['status'] != oldStatus ||
+          existing.single['remote_disposition'] != oldDisposition.value) {
+        throw const OutboxTransitionException(
+            'Old operation no longer matches the expected identity and state.');
+      }
+      final changed = await txn.update(
+        'outbox',
+        {'status': OutboxStatus.superseded.value},
+        where:
+            'operation_id = ? AND entity_type = ? AND entity_id = ? AND status = ? AND remote_disposition = ?',
+        whereArgs: [
+          oldOperationId,
+          entityType,
+          entityId,
+          oldStatus,
+          oldDisposition.value
+        ],
+      );
+      if (changed != 1) {
+        throw const OutboxTransitionException(
+            'Supersede compare-and-set failed.');
+      }
+      await txn.insert('outbox', newItem.toMap());
+      final updated = await txn.update(
+        entityTable,
+        localUpdate,
+        where: 'id = ?',
+        whereArgs: [entityId],
+      );
+      if (updated != 1) {
+        throw const OutboxTransitionException(
+            'Local entity update failed during supersede.');
+      }
+    });
+    return newOperationId;
+  }
+
+  /// Discards a local CREATE only after validating every operation and known
+  /// dependent row in the same transaction as the physical entity deletion.
+  Future<void> discardCreate({
+    required String entityType,
+    required String entityId,
+    required String entityTable,
+    Database? database,
+  }) async {
+    final db = database ?? await SqliteDatabase.instance;
+    const entityTables = {
+      'CUSTOMER': 'customers',
+      'EQUIPMENT': 'equipments',
+      'SERVICE_ORDER': 'service_orders',
+      'SERVICE_ORDER_ITEM': 'service_order_items',
+      'PRE_ACQUISITION': 'pre_acquisitions',
+    };
+    if (entityTables[entityType] != entityTable) {
+      throw ArgumentError('Entity type/table pair is not allowed.');
+    }
+    await db.transaction((txn) async {
+      final operations = await txn.query(
+        'outbox',
+        where: 'entity_type = ? AND entity_id = ?',
+        whereArgs: [entityType, entityId],
+      );
+      if (operations.isEmpty) {
+        throw const OutboxTransitionException(
+            'CREATE operation history is missing.');
+      }
+      final eligibleOperations = <Map<String, Object?>>[];
+      for (final row in operations) {
+        final status = row['status'];
+        final disposition = row['remote_disposition'];
+        final operationType = row['operation_type'];
+        if (status == OutboxStatus.superseded.value ||
+            status == OutboxStatus.discarded.value) {
+          continue;
+        }
+        final discardable = operationType == 'CREATE' &&
+            ((status == 'PENDING' && disposition == 'UNSENT') ||
+                (status == 'FAILED_FATAL' && disposition == 'CONFIRMED'));
+        if (!discardable) {
+          throw const OutboxTransitionException(
+              'Entity has an operation that vetoes CREATE discard.');
+        }
+        eligibleOperations.add(row);
+      }
+      if (eligibleOperations.isEmpty) {
+        throw const OutboxTransitionException(
+          'No active CREATE operation can authorize entity discard.',
+        );
+      }
+      await _assertNoDependents(txn, entityType, entityId);
+      for (final row in eligibleOperations) {
+        final changed = await txn.update(
+          'outbox',
+          {'status': OutboxStatus.discarded.value},
+          where: 'operation_id = ? AND status = ? AND remote_disposition = ?',
+          whereArgs: [
+            row['operation_id'],
+            row['status'],
+            row['remote_disposition']
+          ],
+        );
+        if (changed != 1) {
+          throw const OutboxTransitionException(
+              'CREATE discard compare-and-set failed.');
+        }
+      }
+      final deleted = await txn.delete(
+        entityTable,
+        where: 'id = ?',
+        whereArgs: [entityId],
+      );
+      if (deleted != 1) {
+        throw const OutboxTransitionException(
+            'Local entity deletion failed during CREATE discard.');
+      }
+    });
+  }
+
+  Future<void> _assertNoDependents(
+    DatabaseExecutor txn,
+    String entityType,
+    String entityId,
+  ) async {
+    final checks = switch (entityType) {
+      'CUSTOMER' => const [
+          ('equipments', 'customer_id'),
+          ('service_orders', 'customer_id'),
+        ],
+      'EQUIPMENT' => const [
+          ('service_orders', 'equipment_id'),
+          ('pre_acquisitions', 'equipment_id'),
+        ],
+      'SERVICE_ORDER' => const [('service_order_items', 'service_order_id')],
+      _ => const <(String, String)>[],
+    };
+    for (final (table, column) in checks) {
+      final rows = await txn.query(
+        table,
+        columns: ['id'],
+        where: '$column = ?',
+        whereArgs: [entityId],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        throw OutboxTransitionException(
+            '$entityType has dependent rows in $table.');
+      }
+    }
   }
 }

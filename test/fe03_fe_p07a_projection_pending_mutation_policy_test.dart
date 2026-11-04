@@ -512,6 +512,7 @@ Future<void> _createSchema(Database db) async {
       last_attempt_at TEXT,
       next_retry_at TEXT,
       last_error TEXT,
+      remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
       status TEXT NOT NULL
     )
   ''');

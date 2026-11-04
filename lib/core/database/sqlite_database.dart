@@ -12,7 +12,7 @@ import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
 class SqliteDatabase {
-  static const schemaVersion = 7;
+  static const schemaVersion = 8;
 
   /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
   ///
@@ -63,13 +63,17 @@ class SqliteDatabase {
         if (oldVersion < 7) {
           await _migrateV6ToV7(db, requireLegacyTable: oldVersion >= 6);
         }
+
+        if (oldVersion < 8) {
+          await _migrateV7ToV8(db);
+        }
       },
       onOpen: (db) async {
         await _createTables(db);
 
         // Compatibilidade defensiva para instalações antigas que
         // já estavam marcadas como v4 com schema físico incompleto.
-        await _verifyV7Schema(db);
+        await _verifyV8Schema(db);
       },
     );
   }
@@ -89,6 +93,7 @@ class SqliteDatabase {
         last_attempt_at TEXT,
         next_retry_at TEXT,
         last_error TEXT,
+        remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
         status TEXT NOT NULL
       )
     ''');
@@ -424,6 +429,81 @@ class SqliteDatabase {
     }
   }
 
+  /// v7 -> v8 adds an explicit remote outcome marker. Legacy outcomes are
+  /// classified conservatively: any operation that may have reached the API
+  /// remains AMBIGUOUS and cannot re-enter automatic push.
+  static Future<void> _migrateV7ToV8(DatabaseExecutor db) async {
+    final columns = await _columnNames(db, 'outbox');
+    if (!columns.contains('remote_disposition')) {
+      await db.execute(
+        "ALTER TABLE outbox ADD COLUMN remote_disposition TEXT NOT NULL DEFAULT 'UNSENT'",
+      );
+    }
+
+    final rows = await db.query('outbox');
+    for (final row in rows) {
+      final status = (row['status'] as String? ?? '').toUpperCase();
+      final type = (row['entity_type'] as String? ?? '').toUpperCase();
+      final error = (row['last_error'] as String?) ?? '';
+      if ({'FAILED_TRANSIENT', 'FAILED_FATAL', 'SUPERSEDED', 'DISCARDED'}
+          .contains(status)) {
+        continue;
+      }
+      final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
+      final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
+      var disposition = 'AMBIGUOUS';
+      var newStatus = status;
+
+      switch (status) {
+        case 'SYNCED':
+          disposition = 'CONFIRMED';
+          break;
+        case 'PENDING':
+          if (!hasAttemptEvidence) {
+            disposition = 'UNSENT';
+          } else {
+            newStatus = 'REQUIRES_ATTENTION';
+          }
+          break;
+        case 'PROCESSING':
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'FAILED':
+          // Legacy FAILED is produced after a push attempt. Missing retry
+          // metadata cannot prove that the server did not apply the operation.
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'CONFLICT':
+          // Keep CONFLICT as a compatibility state for an explicit remote
+          // rejection; its remote outcome is known and must not be replayed.
+          disposition = 'CONFIRMED';
+          break;
+        case 'REQUIRES_ATTENTION':
+          if (type == 'PRE_ACQUISITION' ||
+              ((type == 'PART' || type == 'PAYMENT') &&
+                  (error.contains('PART_TENANCY_REQUIRED') ||
+                      error.contains('FINANCE_COMMAND_REQUIRED')))) {
+            disposition = 'UNSENT';
+          } else if (error.startsWith(
+            'FE02B_LEGACY_MONEY_RECONCILIATION_REQUIRED',
+          )) {
+            disposition = 'AMBIGUOUS';
+          }
+          break;
+        default:
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+      }
+
+      await db.update(
+        'outbox',
+        {'status': newStatus, 'remote_disposition': disposition},
+        where: 'operation_id = ?',
+        whereArgs: [row['operation_id']],
+      );
+    }
+  }
+
   static Future<void> _ensureServiceOrderOrganizationColumn(
     Database db,
   ) async {
@@ -450,6 +530,10 @@ class SqliteDatabase {
         await _createCommandIntentTable(txn);
         await _migrateV6ToV7(txn, requireLegacyTable: true);
       });
+
+  /// Transactional v7 -> v8 migration entry point for deterministic tests.
+  static Future<void> migrateV7ToV8(Database db) =>
+      db.transaction(_migrateV7ToV8);
 
   /// Idempotent additive schema migration for the local-only pre-acquisition
   /// workflow. The baseline keeps schema version 7, while [_createTables]
@@ -789,7 +873,7 @@ class SqliteDatabase {
     }
   }
 
-  static Future<void> _verifyV7Schema(Database db) async {
+  static Future<void> _verifyV8Schema(Database db) async {
     await _verifyV6Schema(db);
     if (await _tableExists(db, 'payment_command_intents')) {
       throw StateError('Legacy Payment command authority remains in v7.');
@@ -807,6 +891,9 @@ class SqliteDatabase {
     if (columns.length != expectedColumns.length ||
         !columns.containsAll(expectedColumns)) {
       throw StateError('SQLite v7 command intent schema is incomplete.');
+    }
+    if (!(await _columnNames(db, 'outbox')).contains('remote_disposition')) {
+      throw StateError('SQLite v8 Outbox schema is incomplete.');
     }
     const expectedPreAcquisitionColumns = {
       'id',

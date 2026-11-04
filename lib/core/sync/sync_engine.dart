@@ -218,10 +218,14 @@ class SyncEngine {
   DateTime calculateNextRetryAt(int attemptCount) {
     const baseDelaySeconds = 2;
     const maxDelaySeconds = 300; // 5 minutes max
-    final expDelay = baseDelaySeconds * pow(2, attemptCount).toInt();
+    final expDelay = attemptCount >= 8
+        ? maxDelaySeconds
+        : baseDelaySeconds * pow(2, attemptCount).toInt();
     final cappedDelay = min(expDelay, maxDelaySeconds);
     final jitter = Random().nextInt(3); // 0-2 seconds jitter
-    return DateTime.now().add(Duration(seconds: cappedDelay + jitter));
+    return DateTime.now().add(
+      Duration(seconds: min(maxDelaySeconds, cappedDelay + jitter)),
+    );
   }
 
   /// Executes push for pending outbox entries in batches.
@@ -262,9 +266,12 @@ class SyncEngine {
     for (final entry in rawPendingEntries) {
       final type = entry.entityType.toUpperCase();
       if (type == 'PAYMENT' || type == 'PART') {
-        await outboxDao.updateStatus(
-          entry.operationId,
-          'REQUIRES_ATTENTION',
+        await outboxDao.transition(
+          operationId: entry.operationId,
+          fromStatus: entry.status,
+          fromDisposition: entry.remoteDisposition,
+          toStatus: 'REQUIRES_ATTENTION',
+          toDisposition: RemoteDisposition.unsent,
           lastError: type == 'PAYMENT'
               ? 'FINANCE_COMMAND_REQUIRED'
               : 'PART_TENANCY_REQUIRED',
@@ -288,16 +295,23 @@ class SyncEngine {
       'entries': pendingEntries.map((e) => e.toApiPayload()).toList(),
     };
 
-    // 5. Only then mark entries PROCESSING
+    // Persist ambiguity before network I/O: any interruption after this point
+    // must not silently replay an operation whose remote result is unknown.
     final nowIso = DateTime.now().toIso8601String();
-    for (final item in pendingEntries) {
-      await outboxDao.updateStatus(
-        item.operationId,
-        'PROCESSING',
-        lastAttemptAt: nowIso,
-        executor: targetDb,
-      );
-    }
+    await targetDb.transaction((txn) async {
+      for (final item in pendingEntries) {
+        await outboxDao.transition(
+          operationId: item.operationId,
+          fromStatus: item.status,
+          fromDisposition: item.remoteDisposition,
+          toStatus: 'PROCESSING',
+          toDisposition: RemoteDisposition.ambiguous,
+          attemptCount: item.attemptCount + 1,
+          lastAttemptAt: nowIso,
+          executor: txn,
+        );
+      }
+    });
 
     if (!lease.isStillValid) {
       return const SyncPushSummary();
@@ -328,59 +342,91 @@ class SyncEngine {
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
         final results = body['results'] as List<dynamic>? ?? [];
+        final knownIds =
+            pendingEntries.map((entry) => entry.operationId).toSet();
+        final completedIds = <String>{};
 
         for (final res in results) {
-          final opId = res['operationId'] as String;
+          if (res is! Map<String, dynamic>) continue;
+          final rawOpId = res['operationId'];
+          if (rawOpId is! String ||
+              !knownIds.contains(rawOpId) ||
+              !completedIds.add(rawOpId)) {
+            continue;
+          }
+          final opId = rawOpId;
           final status = res['status'] as String;
           final error = res['error'] as String?;
 
           if (status == 'SYNCED') {
-            await outboxDao.updateStatus(
-              opId,
-              'SYNCED',
+            await outboxDao.transition(
+              operationId: opId,
+              fromStatus: 'PROCESSING',
+              fromDisposition: RemoteDisposition.ambiguous,
+              toStatus: 'SYNCED',
+              toDisposition: RemoteDisposition.confirmed,
               executor: targetDb,
             );
             synced++;
           } else {
-            final existing =
-                pendingEntries.firstWhere((e) => e.operationId == opId);
-            final newAttempts = existing.attemptCount + 1;
-            final nextRetry =
-                calculateNextRetryAt(newAttempts).toIso8601String();
-            final finalStatus = status == 'CONFLICT' ? 'CONFLICT' : 'FAILED';
-
+            final finalStatus =
+                status == 'CONFLICT' ? 'CONFLICT' : 'FAILED_FATAL';
+            await outboxDao.transition(
+              operationId: opId,
+              fromStatus: 'PROCESSING',
+              fromDisposition: RemoteDisposition.ambiguous,
+              toStatus: finalStatus,
+              toDisposition: RemoteDisposition.confirmed,
+              nextRetryAt: null,
+              lastError: error ?? 'Sync rejected by server',
+              executor: targetDb,
+            );
             if (status == 'CONFLICT') {
               conflict++;
             } else {
               failed++;
             }
-
-            await outboxDao.updateStatus(
-              opId,
-              finalStatus,
-              attemptCount: newAttempts,
-              lastAttemptAt: DateTime.now().toIso8601String(),
-              nextRetryAt: nextRetry,
-              lastError: error ?? 'Sync rejected by server',
-              executor: targetDb,
-            );
           }
         }
+        // Missing or malformed result entries remain ambiguous and are
+        // quarantined for reconciliation; they are never implicitly retried.
+        for (final item in pendingEntries.where(
+          (entry) => !completedIds.contains(entry.operationId),
+        )) {
+          await outboxDao.transition(
+            operationId: item.operationId,
+            fromStatus: 'PROCESSING',
+            fromDisposition: RemoteDisposition.ambiguous,
+            toStatus: 'REQUIRES_ATTENTION',
+            toDisposition: RemoteDisposition.ambiguous,
+            lastError: 'SYNC_RESULT_MISSING',
+            executor: targetDb,
+          );
+        }
       } else {
-        // HTTP Server or Auth Error - apply backoff to all batch entries
-        failed += pendingEntries.length;
+        final transient = response.statusCode == 429;
+        final ambiguous =
+            response.statusCode == 408 || response.statusCode >= 500;
         for (final item in pendingEntries) {
-          final newAttempts = item.attemptCount + 1;
-          final nextRetry = calculateNextRetryAt(newAttempts).toIso8601String();
-          await outboxDao.updateStatus(
-            item.operationId,
-            'FAILED',
-            attemptCount: newAttempts,
-            lastAttemptAt: DateTime.now().toIso8601String(),
-            nextRetryAt: nextRetry,
+          await outboxDao.transition(
+            operationId: item.operationId,
+            fromStatus: 'PROCESSING',
+            fromDisposition: RemoteDisposition.ambiguous,
+            toStatus: ambiguous
+                ? 'REQUIRES_ATTENTION'
+                : transient
+                    ? 'FAILED_TRANSIENT'
+                    : 'REQUIRES_ATTENTION',
+            toDisposition: ambiguous
+                ? RemoteDisposition.ambiguous
+                : RemoteDisposition.confirmed,
+            nextRetryAt: transient
+                ? calculateNextRetryAt(item.attemptCount + 1).toIso8601String()
+                : null,
             lastError: 'HTTP ${response.statusCode}: ${response.body}',
             executor: targetDb,
           );
+          if (!ambiguous) failed++;
         }
         throw SyncHttpException(
           statusCode: response.statusCode,
@@ -389,18 +435,21 @@ class SyncEngine {
         );
       }
     } catch (e) {
-      // Network or timeout exception - schedule retries safely
-      if (synced == 0 && failed == 0 && conflict == 0) {
-        failed += pendingEntries.length;
-        for (final item in pendingEntries) {
-          final newAttempts = item.attemptCount + 1;
-          final nextRetry = calculateNextRetryAt(newAttempts).toIso8601String();
-          await outboxDao.updateStatus(
-            item.operationId,
-            'FAILED',
-            attemptCount: newAttempts,
-            lastAttemptAt: DateTime.now().toIso8601String(),
-            nextRetryAt: nextRetry,
+      for (final item in pendingEntries) {
+        final current = await targetDb.query(
+          'outbox',
+          columns: ['status', 'remote_disposition'],
+          where: 'operation_id = ?',
+          whereArgs: [item.operationId],
+          limit: 1,
+        );
+        if (current.length == 1 && current.single['status'] == 'PROCESSING') {
+          await outboxDao.transition(
+            operationId: item.operationId,
+            fromStatus: 'PROCESSING',
+            fromDisposition: RemoteDisposition.ambiguous,
+            toStatus: 'REQUIRES_ATTENTION',
+            toDisposition: RemoteDisposition.ambiguous,
             lastError: e.toString(),
             executor: targetDb,
           );

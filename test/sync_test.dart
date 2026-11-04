@@ -424,6 +424,131 @@ void main() {
   });
 
   group('SyncEngine Retry, Backoff & Atomic Cursor Tests', () {
+    test('confirmed 429 retries the same operation id and payload', () async {
+      final db = await SqliteDatabase.instance;
+      const operationId = '429-retry-operation';
+      const payload = {'name': 'Retry safely'};
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'retry-customer',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode(payload),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 'PENDING',
+        'attempt_count': 0,
+      });
+      var pushCalls = 0;
+      final sentEntries = <Map<String, dynamic>>[];
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path == '/sync/push') {
+          pushCalls++;
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          sentEntries.add(Map<String, dynamic>.from(body['entries'].single));
+          if (pushCalls == 1) {
+            return http.Response('rate limited', 429);
+          }
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {'operationId': operationId, 'status': 'SYNCED'},
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response('unexpected', 404);
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+      );
+
+      await expectLater(
+        engine.pushPendingOutbox(lease: _testLease(db)),
+        throwsA(isA<SyncHttpException>()),
+      );
+      final retryRow = (await db.query(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      ))
+          .single;
+      expect(retryRow['status'], 'FAILED_TRANSIENT');
+      expect(retryRow['remote_disposition'], 'CONFIRMED');
+      expect(retryRow['attempt_count'], 1);
+      expect(jsonDecode(retryRow['payload'] as String), payload);
+      expect(
+          DateTime.parse(retryRow['next_retry_at'] as String), isA<DateTime>());
+
+      await db.update(
+        'outbox',
+        {
+          'next_retry_at': DateTime.now()
+              .subtract(const Duration(seconds: 1))
+              .toIso8601String()
+        },
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      );
+      final result = await engine.pushPendingOutbox(lease: _testLease(db));
+      expect(result.syncedCount, 1);
+      expect(pushCalls, 2);
+      expect(sentEntries.map((entry) => entry['operationId']),
+          [operationId, operationId]);
+      expect(sentEntries.map((entry) => entry['payload']), [payload, payload]);
+      await db.delete('outbox',
+          where: 'operation_id = ?', whereArgs: [operationId]);
+    });
+
+    test('transport ambiguity is quarantined and excluded from automatic retry',
+        () async {
+      final db = await SqliteDatabase.instance;
+      const operationId = 'ambiguous-operation';
+      const payload = {'name': 'Never duplicate blindly'};
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'ambiguous-customer',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode(payload),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 'PENDING',
+        'attempt_count': 0,
+      });
+      var pushCalls = 0;
+      final client = MockHttpClientWithCustomResponses((request) async {
+        if (request.url.path == '/sync/push') {
+          pushCalls++;
+          throw const SocketException('response lost');
+        }
+        return http.Response('unexpected', 404);
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://test.api', client: client),
+      );
+
+      await expectLater(
+        engine.pushPendingOutbox(lease: _testLease(db)),
+        throwsA(isA<SocketException>()),
+      );
+      final row = (await db.query(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      ))
+          .single;
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 1);
+      expect(jsonDecode(row['payload'] as String), payload);
+
+      final nextCycle = await engine.pushPendingOutbox(lease: _testLease(db));
+      expect(nextCycle.totalProcessed, 0);
+      expect(pushCalls, 1);
+      await db.delete('outbox',
+          where: 'operation_id = ?', whereArgs: [operationId]);
+    });
+
     test(
       'calculateNextRetryAt grows exponentially and respects max boundary',
       () {
@@ -512,8 +637,8 @@ void main() {
         );
 
         // attempt 8:
-        // exponential value exceeds the maximum,
-        // so it must be capped at 300s + 0..2s jitter.
+        // exponential value exceeds the maximum; jitter never exceeds the
+        // configured 300-second maximum.
         expect(
           retry8.isAfter(
             beforeRetry8.add(
@@ -525,9 +650,7 @@ void main() {
 
         expect(
           retry8.isBefore(
-            afterRetry8.add(
-              const Duration(seconds: 303),
-            ),
+            afterRetry8.add(const Duration(seconds: 301)),
           ),
           isTrue,
         );
@@ -1063,6 +1186,7 @@ void main() {
             'operation_type': 'CREATE',
             'payload': '{}',
             'status': 'PROCESSING',
+            'remote_disposition': 'AMBIGUOUS',
             'attempt_count': 1,
             'created_at': DateTime.now().toIso8601String(),
             'last_attempt_at': DateTime.now().toIso8601String(),
@@ -1128,6 +1252,7 @@ void main() {
             'operation_type': 'CREATE',
             'payload': '{}',
             'status': 'PROCESSING',
+            'remote_disposition': 'AMBIGUOUS',
             'attempt_count': 1,
             'created_at': DateTime.now().toIso8601String(),
             'last_attempt_at': staleTime,
@@ -1160,7 +1285,7 @@ void main() {
 
         expect(
           rows.first['status'],
-          equals('FAILED'),
+          equals('REQUIRES_ATTENTION'),
         );
 
         await db.delete(
@@ -1280,6 +1405,7 @@ void main() {
           'outbox',
           {
             'status': 'PROCESSING',
+            'remote_disposition': 'AMBIGUOUS',
             'last_attempt_at': nowTime.toIso8601String(),
           },
           where: 'operation_id = ?',
@@ -1341,7 +1467,7 @@ void main() {
 
         expect(
           checkAged.first['status'],
-          equals('FAILED'),
+          equals('REQUIRES_ATTENTION'),
         );
 
         await db.delete(
@@ -1764,7 +1890,7 @@ void main() {
       final rows = await db
           .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
       expect(rows.isNotEmpty, isTrue);
-      expect(rows.first['status'], equals('FAILED'));
+      expect(rows.first['status'], equals('FAILED_FATAL'));
       expect(rows.first['last_error'],
           equals('SERVICE_ORDER requires customerId'));
       expect(rows.first['attempt_count'], equals(1));
