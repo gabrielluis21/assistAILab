@@ -424,7 +424,8 @@ void main() {
   });
 
   group('SyncEngine Retry, Backoff & Atomic Cursor Tests', () {
-    test('confirmed 429 retries the same operation id and payload', () async {
+    test('HTTP 429 is ambiguous and preserves the operation for reconciliation',
+        () async {
       final db = await SqliteDatabase.instance;
       const operationId = '429-retry-operation';
       const payload = {'name': 'Retry safely'};
@@ -473,29 +474,194 @@ void main() {
         whereArgs: [operationId],
       ))
           .single;
-      expect(retryRow['status'], 'FAILED_TRANSIENT');
-      expect(retryRow['remote_disposition'], 'CONFIRMED');
+      expect(retryRow['status'], 'REQUIRES_ATTENTION');
+      expect(retryRow['remote_disposition'], 'AMBIGUOUS');
       expect(retryRow['attempt_count'], 1);
       expect(jsonDecode(retryRow['payload'] as String), payload);
-      expect(
-          DateTime.parse(retryRow['next_retry_at'] as String), isA<DateTime>());
+      expect(retryRow['operation_id'], operationId);
+      expect(pushCalls, 1);
+      final result = await engine.pushPendingOutbox(lease: _testLease(db));
+      expect(result.totalProcessed, 0);
+      expect(pushCalls, 1);
+      expect(sentEntries.single['operationId'], operationId);
+      expect(sentEntries.single['payload'], payload);
+      await db.delete('outbox',
+          where: 'operation_id = ?', whereArgs: [operationId]);
+    });
 
-      await db.update(
+    test('all batch-level HTTP errors remain ambiguous per operation',
+        () async {
+      for (final statusCode in [429, 400, 401, 403, 409, 408, 500]) {
+        final db = await SqliteDatabase.instance;
+        final operationId =
+            'http-$statusCode-${DateTime.now().microsecondsSinceEpoch}';
+        await db.insert('outbox', {
+          'operation_id': operationId,
+          'entity_type': 'CUSTOMER',
+          'entity_id': 'customer-$statusCode',
+          'operation_type': 'CREATE',
+          'payload': jsonEncode({'name': 'Keep original payload'}),
+          'created_at': DateTime.now().toIso8601String(),
+          'status': 'PENDING',
+          'attempt_count': 0,
+        });
+        var pushCalls = 0;
+        final engine = SyncEngine(
+          apiClient: ApiClient(
+            baseUrl: 'http://test.api',
+            client: MockHttpClientWithCustomResponses((request) async {
+              if (request.url.path == '/sync/push') {
+                pushCalls++;
+                return http.Response('batch-level rejection', statusCode);
+              }
+              return http.Response('unexpected', 404);
+            }),
+          ),
+        );
+
+        await expectLater(
+          engine.pushPendingOutbox(lease: _testLease(db)),
+          throwsA(isA<SyncHttpException>()),
+        );
+        final row = (await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [operationId],
+        ))
+            .single;
+        expect(row['status'], 'REQUIRES_ATTENTION', reason: '$statusCode');
+        expect(row['remote_disposition'], 'AMBIGUOUS', reason: '$statusCode');
+        expect(row['operation_id'], operationId);
+        expect(jsonDecode(row['payload'] as String),
+            {'name': 'Keep original payload'});
+        expect(pushCalls, 1);
+        expect(
+            (await engine.pushPendingOutbox(lease: _testLease(db)))
+                .totalProcessed,
+            0);
+        expect(pushCalls, 1);
+        await db.delete('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]);
+      }
+    });
+
+    test('idempotency conflicts stay ambiguous for each error code', () async {
+      const codes = [
+        'IDEMPOTENCY_OPERATION_IN_PROGRESS',
+        'IDEMPOTENCY_KEY_REUSE',
+        'LEGACY_OPERATION_RECONCILIATION_REQUIRED',
+        'IDEMPOTENCY_STATE_CONFLICT',
+      ];
+      final db = await SqliteDatabase.instance;
+      for (final code in codes) {
+        final operationId = 'conflict-$code';
+        await db.insert('outbox', {
+          'operation_id': operationId,
+          'entity_type': 'CUSTOMER',
+          'entity_id': operationId,
+          'operation_type': 'CREATE',
+          'payload': jsonEncode({'name': code}),
+          'created_at': DateTime.now().toIso8601String(),
+          'status': 'PENDING',
+          'attempt_count': 0,
+        });
+        final engine = SyncEngine(
+          apiClient: ApiClient(
+            baseUrl: 'http://test.api',
+            client: MockHttpClientWithCustomResponses((request) async {
+              if (request.url.path == '/sync/push') {
+                return http.Response(
+                    jsonEncode({
+                      'results': [
+                        {
+                          'operationId': operationId,
+                          'status': 'CONFLICT',
+                          'error': code
+                        },
+                      ],
+                    }),
+                    200);
+              }
+              return http.Response('unexpected', 404);
+            }),
+          ),
+        );
+
+        final summary = await engine.pushPendingOutbox(lease: _testLease(db));
+        expect(summary.conflictCount, 1, reason: code);
+        final row = (await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [operationId],
+        ))
+            .single;
+        expect(row['status'], 'CONFLICT', reason: code);
+        expect(row['remote_disposition'], 'AMBIGUOUS', reason: code);
+        expect(row['last_error'], code);
+        await db.delete('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]);
+      }
+    });
+
+    test('unknown per-operation status is quarantined', () async {
+      final db = await SqliteDatabase.instance;
+      const operationId = 'unknown-sync-status';
+      await db.insert('customers', {
+        'id': 'unknown-status-customer',
+        'name': 'Local entity',
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'unknown-status-customer',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode({'name': 'Unknown status'}),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 'PENDING',
+        'attempt_count': 0,
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(
+          baseUrl: 'http://test.api',
+          client: MockHttpClientWithCustomResponses((request) async {
+            if (request.url.path == '/sync/push') {
+              return http.Response(
+                  jsonEncode({
+                    'results': [
+                      {
+                        'operationId': operationId,
+                        'status': 'REQUIRES_RECONCILIATION',
+                      },
+                    ],
+                  }),
+                  200);
+            }
+            return http.Response('unexpected', 404);
+          }),
+        ),
+      );
+
+      await engine.pushPendingOutbox(lease: _testLease(db));
+      final row = (await db.query(
         'outbox',
-        {
-          'next_retry_at': DateTime.now()
-              .subtract(const Duration(seconds: 1))
-              .toIso8601String()
-        },
         where: 'operation_id = ?',
         whereArgs: [operationId],
+      ))
+          .single;
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(await OutboxDao().getPendingEntries(executor: db), isEmpty);
+      await expectLater(
+        OutboxDao().discardCreate(
+          entityType: 'CUSTOMER',
+          entityId: 'unknown-status-customer',
+          entityTable: 'customers',
+          database: db,
+        ),
+        throwsA(isA<OutboxTransitionException>()),
       );
-      final result = await engine.pushPendingOutbox(lease: _testLease(db));
-      expect(result.syncedCount, 1);
-      expect(pushCalls, 2);
-      expect(sentEntries.map((entry) => entry['operationId']),
-          [operationId, operationId]);
-      expect(sentEntries.map((entry) => entry['payload']), [payload, payload]);
+      expect((await db.query('customers')).single['name'], 'Local entity');
       await db.delete('outbox',
           where: 'operation_id = ?', whereArgs: [operationId]);
     });
@@ -545,6 +711,59 @@ void main() {
       final nextCycle = await engine.pushPendingOutbox(lease: _testLease(db));
       expect(nextCycle.totalProcessed, 0);
       expect(pushCalls, 1);
+      await db.delete('outbox',
+          where: 'operation_id = ?', whereArgs: [operationId]);
+    });
+
+    test('timeout after send preserves operation identity and payload',
+        () async {
+      final db = await SqliteDatabase.instance;
+      const operationId = 'timeout-after-send';
+      const payload = {'name': 'Keep this exact operation'};
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'timeout-customer',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode(payload),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 'PENDING',
+        'attempt_count': 0,
+      });
+      var sentOperationId = '';
+      Map<String, dynamic>? sentPayload;
+      final engine = SyncEngine(
+        apiClient: ApiClient(
+          baseUrl: 'http://test.api',
+          client: MockHttpClientWithCustomResponses((request) async {
+            if (request.url.path == '/sync/push') {
+              final body = jsonDecode(request.body) as Map<String, dynamic>;
+              final entry = Map<String, dynamic>.from(body['entries'].single);
+              sentOperationId = entry['operationId'] as String;
+              sentPayload = Map<String, dynamic>.from(entry['payload']);
+              throw TimeoutException('response timeout');
+            }
+            return http.Response('unexpected', 404);
+          }),
+        ),
+      );
+
+      await expectLater(
+        engine.pushPendingOutbox(lease: _testLease(db)),
+        throwsA(isA<TimeoutException>()),
+      );
+      final row = (await db.query(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      ))
+          .single;
+      expect(sentOperationId, operationId);
+      expect(sentPayload, payload);
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['operation_id'], operationId);
+      expect(jsonDecode(row['payload'] as String), payload);
       await db.delete('outbox',
           where: 'operation_id = ?', whereArgs: [operationId]);
     });
@@ -1933,5 +2152,91 @@ void main() {
         .single;
     expect(row['status'], 'REQUIRES_ATTENTION');
     expect(row['last_error'], 'FINANCE_COMMAND_REQUIRED');
+    expect(row['remote_disposition'], 'UNSENT');
+    expect(row['attempt_count'], 0);
+  });
+
+  test('local-only PreAcquisition stays UNSENT and is not pushed', () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    const operationId = 'local-only-pre-acquisition';
+    await db.insert('outbox', {
+      'operation_id': operationId,
+      'entity_type': 'PRE_ACQUISITION',
+      'entity_id': 'pre-acquisition-1',
+      'operation_type': 'CREATE',
+      'payload': jsonEncode({'purpose': 'RESALE'}),
+      'status': 'PENDING',
+      'attempt_count': 0,
+      'created_at': '2026-01-01T00:00:00.000Z',
+    });
+    var httpCalled = false;
+    final engine = SyncEngine(
+      apiClient: ApiClient(
+        baseUrl: 'http://test.api',
+        client: MockHttpClientWithCustomResponses((request) async {
+          httpCalled = true;
+          return http.Response('unexpected', 500);
+        }),
+      ),
+    );
+
+    await engine.pushPendingOutbox(lease: _testLease(db));
+    final row = (await db.query(
+      'outbox',
+      where: 'operation_id = ?',
+      whereArgs: [operationId],
+    ))
+        .single;
+    expect(httpCalled, isFalse);
+    expect(row['status'], 'REQUIRES_ATTENTION');
+    expect(row['remote_disposition'], 'UNSENT');
+    expect(row['last_error'], 'PRE_ACQUISITION_LOCAL_ONLY');
+    await db
+        .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
+  });
+
+  test('PART and PAYMENT after a prior 429 cannot be downgraded to UNSENT',
+      () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    for (final type in ['PART', 'PAYMENT']) {
+      final operationId = 'after-429-$type';
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': type,
+        'entity_id': 'entity-$type',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode({'value': type}),
+        'status': 'FAILED_TRANSIENT',
+        'remote_disposition': 'CONFIRMED',
+        'attempt_count': 1,
+        'last_attempt_at': '2026-11-01T12:00:00.000Z',
+        'created_at': '2026-11-01T12:00:00.000Z',
+      });
+      var httpCalled = false;
+      final engine = SyncEngine(
+        apiClient: ApiClient(
+          baseUrl: 'http://test.api',
+          client: MockHttpClientWithCustomResponses((request) async {
+            httpCalled = true;
+            return http.Response('unexpected', 500);
+          }),
+        ),
+      );
+
+      await engine.pushPendingOutbox(lease: _testLease(db));
+      final row = (await db.query(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      ))
+          .single;
+      expect(httpCalled, isFalse, reason: type);
+      expect(row['status'], 'REQUIRES_ATTENTION', reason: type);
+      expect(row['remote_disposition'], 'AMBIGUOUS', reason: type);
+      expect(row['attempt_count'], 1, reason: type);
+      expect(row['last_attempt_at'], '2026-11-01T12:00:00.000Z', reason: type);
+      await db.delete('outbox',
+          where: 'operation_id = ?', whereArgs: [operationId]);
+    }
   });
 }

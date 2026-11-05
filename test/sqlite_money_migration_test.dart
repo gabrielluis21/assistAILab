@@ -10,8 +10,8 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  test('schema target is v8', () {
-    expect(SqliteDatabase.schemaVersion, 8);
+  test('schema target is v9', () {
+    expect(SqliteDatabase.schemaVersion, 9);
   });
 
   test('v5 migration persists exact integers and removes REAL authority',

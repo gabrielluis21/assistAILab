@@ -456,7 +456,7 @@ final class _ProjectionPendingMutationPolicy {
       'outbox',
       columns: ['entity_type', 'entity_id', 'payload'],
       where:
-          "status NOT IN ('SYNCED', 'SUPERSEDED', 'DISCARDED') AND UPPER(entity_type) IN (${List.filled(includedTypes.length, '?').join(',')})",
+          "NOT (status = 'SYNCED' AND remote_disposition = 'CONFIRMED') AND NOT (status IN ('SUPERSEDED', 'DISCARDED') AND remote_disposition IN ('UNSENT', 'CONFIRMED')) AND UPPER(entity_type) IN (${List.filled(includedTypes.length, '?').join(',')})",
       whereArgs: includedTypes,
     );
     final customerIds = <String>{};

@@ -67,7 +67,7 @@ void main() {
         'CUSTOMER',
         'customer-history',
         status: 'SUPERSEDED',
-        disposition: 'AMBIGUOUS',
+        disposition: 'CONFIRMED',
       );
       await _operation(db, 'current-create', 'CUSTOMER', 'customer-history');
       await dao.discardCreate(
@@ -78,7 +78,7 @@ void main() {
       );
       final history = await db.query('outbox', orderBy: 'operation_id');
       expect(history.map((row) => row['status']), ['DISCARDED', 'SUPERSEDED']);
-      expect(history.last['remote_disposition'], 'AMBIGUOUS');
+      expect(history.last['remote_disposition'], 'CONFIRMED');
     });
 
     for (final veto in [
@@ -89,6 +89,8 @@ void main() {
       (status: 'PENDING', disposition: 'UNSENT', op: 'UPDATE'),
       (status: 'PENDING', disposition: 'UNSENT', op: 'DELETE'),
       (status: 'FAILED_TRANSIENT', disposition: 'CONFIRMED', op: 'CREATE'),
+      (status: 'SUPERSEDED', disposition: 'AMBIGUOUS', op: 'CREATE'),
+      (status: 'DISCARDED', disposition: 'AMBIGUOUS', op: 'CREATE'),
     ]) {
       test('vetoes ${veto.status}/${veto.disposition}/${veto.op}', () async {
         await db.insert('customers', {'id': 'customer-1', 'name': 'Local'});
@@ -133,6 +135,124 @@ void main() {
       expect(await db.query('customers'), hasLength(1));
     });
 
+    test('vetoes real acquisition references and rolls back the outbox',
+        () async {
+      final references = [
+        (
+          entityType: 'CUSTOMER',
+          entityId: 'customer-1',
+          table: 'customers',
+          dependentColumn: 'customer_id',
+          dependentValue: 'customer-1'
+        ),
+        (
+          entityType: 'EQUIPMENT',
+          entityId: 'equipment-1',
+          table: 'equipments',
+          dependentColumn: 'equipment_id',
+          dependentValue: 'equipment-1'
+        ),
+        (
+          entityType: 'SERVICE_ORDER',
+          entityId: 'order-1',
+          table: 'service_orders',
+          dependentColumn: 'service_order_id',
+          dependentValue: 'order-1'
+        ),
+        (
+          entityType: 'PRE_ACQUISITION',
+          entityId: 'pre-1',
+          table: 'pre_acquisitions',
+          dependentColumn: 'client_pre_acquisition_id',
+          dependentValue: 'pre-1'
+        ),
+      ];
+      for (final ref in references) {
+        await db.delete('outbox');
+        await db.delete('equipment_acquisitions');
+        await db.delete(ref.table);
+        final entityValues = switch (ref.entityType) {
+          'CUSTOMER' => {'id': ref.entityId, 'name': 'Local'},
+          'EQUIPMENT' => {'id': ref.entityId, 'customer_id': 'customer-1'},
+          'SERVICE_ORDER' => {
+              'id': ref.entityId,
+              'equipment_id': 'equipment-1',
+            },
+          _ => {
+              'id': ref.entityId,
+              'equipment_id': 'equipment-1',
+              'customer_id': 'customer-1',
+              'organization_id': 'org-1',
+              'purpose': 'RESALE',
+              'status': 'PENDING_EVALUATION',
+              'created_at': '2026-01-01T00:00:00Z',
+              'evaluation_deadline': '2026-02-01T00:00:00Z',
+            },
+        };
+        await db.insert(ref.table, entityValues);
+        await db.insert('equipment_acquisitions', {
+          'id': 'acquisition-1',
+          'equipment_id': 'equipment-1',
+          'customer_id': 'customer-1',
+          'organization_id': 'org-1',
+          'source': ref.entityType == 'SERVICE_ORDER'
+              ? 'SERVICE_ORDER'
+              : 'DIRECT_OFFER',
+          'purpose': 'RESALE',
+          'status': 'PENDING',
+          'created_at': '2026-01-01T00:00:00Z',
+          'updated_at': '2026-01-01T00:00:00Z',
+          ref.dependentColumn: ref.dependentValue,
+        });
+        await _operation(
+          db,
+          'create-${ref.entityType}',
+          ref.entityType,
+          ref.entityId,
+        );
+
+        await expectLater(
+          dao.discardCreate(
+            entityType: ref.entityType,
+            entityId: ref.entityId,
+            entityTable: ref.table,
+            database: db,
+          ),
+          throwsA(isA<OutboxTransitionException>()),
+        );
+        expect((await db.query('outbox')).single['status'], 'PENDING');
+        expect(await db.query(ref.table), hasLength(1));
+      }
+    });
+
+    test('CUSTOMER remains when a PreAcquisition references its customer',
+        () async {
+      await db.insert('customers', {'id': 'customer-1', 'name': 'Local'});
+      await db.insert('pre_acquisitions', {
+        'id': 'pre-1',
+        'equipment_id': 'equipment-1',
+        'customer_id': 'customer-1',
+        'organization_id': 'org-1',
+        'purpose': 'RESALE',
+        'status': 'PENDING_EVALUATION',
+        'created_at': '2026-01-01T00:00:00Z',
+        'evaluation_deadline': '2026-02-01T00:00:00Z',
+      });
+      await _operation(db, 'customer-create', 'CUSTOMER', 'customer-1');
+
+      await expectLater(
+        dao.discardCreate(
+          entityType: 'CUSTOMER',
+          entityId: 'customer-1',
+          entityTable: 'customers',
+          database: db,
+        ),
+        throwsA(isA<OutboxTransitionException>()),
+      );
+      expect((await db.query('outbox')).single['status'], 'PENDING');
+      expect(await db.query('customers'), hasLength(1));
+    });
+
     test('vetoes Equipment with ServiceOrder or PreAcquisition dependents',
         () async {
       for (final table in ['service_orders', 'pre_acquisitions']) {
@@ -141,10 +261,23 @@ void main() {
         await db.delete('service_orders');
         await db.delete('pre_acquisitions');
         await db.insert('equipments', {'id': 'equipment-1'});
-        await db.insert(table, {
-          'id': 'dependent-1',
-          'equipment_id': 'equipment-1',
-        });
+        if (table == 'pre_acquisitions') {
+          await db.insert('pre_acquisitions', {
+            'id': 'dependent-1',
+            'equipment_id': 'equipment-1',
+            'customer_id': 'customer-1',
+            'organization_id': 'org-1',
+            'purpose': 'RESALE',
+            'status': 'PENDING_EVALUATION',
+            'created_at': '2026-01-01T00:00:00Z',
+            'evaluation_deadline': '2026-02-01T00:00:00Z',
+          });
+        } else {
+          await db.insert(table, {
+            'id': 'dependent-1',
+            'equipment_id': 'equipment-1',
+          });
+        }
         await _operation(db, 'equipment-create', 'EQUIPMENT', 'equipment-1');
         await expectLater(
           dao.discardCreate(
@@ -245,6 +378,30 @@ void main() {
       expect((await db.query('customers')).single['name'], 'Before');
     });
 
+    test('rejects a mismatched entity type and table before writing', () async {
+      await db.insert('customers', {'id': 'customer-1', 'name': 'Before'});
+      await db.insert('equipments', {'id': 'customer-1'});
+      await _operation(db, 'old-op', 'CUSTOMER', 'customer-1');
+
+      await expectLater(
+        dao.supersede(
+          oldOperationId: 'old-op',
+          entityType: 'CUSTOMER',
+          entityId: 'customer-1',
+          oldStatus: 'PENDING',
+          oldDisposition: RemoteDisposition.unsent,
+          replacement: _item('placeholder', 'CUSTOMER', 'customer-1'),
+          entityTable: 'equipments',
+          localUpdate: {'model': 'Corrupted'},
+          database: db,
+        ),
+        throwsArgumentError,
+      );
+      expect((await db.query('customers')).single['name'], 'Before');
+      expect((await db.query('equipments')).single['model'], isNull);
+      expect((await db.query('outbox')).single['status'], 'PENDING');
+    });
+
     test(
         'rolls back old state and replacement when entity update affects zero rows',
         () async {
@@ -314,8 +471,22 @@ Future<void> _schema(Database db) async {
       'CREATE TABLE equipments (id TEXT PRIMARY KEY, customer_id TEXT)');
   await db.execute(
       'CREATE TABLE service_orders (id TEXT PRIMARY KEY, customer_id TEXT, equipment_id TEXT)');
-  await db.execute(
-      'CREATE TABLE pre_acquisitions (id TEXT PRIMARY KEY, equipment_id TEXT)');
+  await db.execute('''CREATE TABLE pre_acquisitions (
+        id TEXT PRIMARY KEY, equipment_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL, service_order_id TEXT, purpose TEXT NOT NULL,
+        status TEXT NOT NULL, offered_amount_minor INTEGER, notes TEXT,
+        created_at TEXT NOT NULL, evaluation_deadline TEXT NOT NULL,
+        evaluated_at TEXT, resolution_reason TEXT)''');
+  await db.execute('''CREATE TABLE equipment_acquisitions (
+    id TEXT PRIMARY KEY, equipment_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+    organization_id TEXT NOT NULL, service_order_id TEXT, source TEXT NOT NULL CHECK (
+      source IN ('SERVICE_ORDER', 'DIRECT_OFFER')),
+    client_pre_acquisition_id TEXT, purpose TEXT NOT NULL, status TEXT NOT NULL,
+    offered_amount_minor INTEGER, consent_method TEXT, authorized_at TEXT,
+    rejected_at TEXT, cancelled_at TEXT, completed_at TEXT, notes TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    CHECK ((source = 'SERVICE_ORDER' AND service_order_id IS NOT NULL) OR
+      (source = 'DIRECT_OFFER' AND service_order_id IS NULL)))''');
   await db.execute(
       'CREATE TABLE service_order_items (id TEXT PRIMARY KEY, service_order_id TEXT)');
 }

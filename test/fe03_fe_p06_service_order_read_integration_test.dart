@@ -704,6 +704,7 @@ Future<void> _insertOutbox(
     'payload': jsonEncode(payload),
     'created_at': '2026-09-23T10:02:00.000Z',
     'status': status,
+    'remote_disposition': status == 'SYNCED' ? 'CONFIRMED' : 'UNSENT',
   });
 }
 

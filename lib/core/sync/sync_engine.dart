@@ -8,6 +8,13 @@ import '../database/outbox_dao.dart';
 import 'sync_lease.dart';
 import 'sync_projection_applier.dart';
 
+const Set<String> _unresolvedSyncConflictCodes = {
+  'IDEMPOTENCY_OPERATION_IN_PROGRESS',
+  'IDEMPOTENCY_KEY_REUSE',
+  'LEGACY_OPERATION_RECONCILIATION_REQUIRED',
+  'IDEMPOTENCY_STATE_CONFLICT',
+};
+
 /// HTTP response failure returned by a Sync endpoint.
 final class SyncHttpException implements Exception {
   final int statusCode;
@@ -265,16 +272,24 @@ class SyncEngine {
     final pendingEntries = <OutboxItem>[];
     for (final entry in rawPendingEntries) {
       final type = entry.entityType.toUpperCase();
-      if (type == 'PAYMENT' || type == 'PART') {
+      if (type == 'PAYMENT' || type == 'PART' || type == 'PRE_ACQUISITION') {
+        final canProveUnsent =
+            entry.remoteDisposition == RemoteDisposition.unsent &&
+                entry.attemptCount == 0 &&
+                entry.lastAttemptAt == null;
         await outboxDao.transition(
           operationId: entry.operationId,
           fromStatus: entry.status,
           fromDisposition: entry.remoteDisposition,
           toStatus: 'REQUIRES_ATTENTION',
-          toDisposition: RemoteDisposition.unsent,
-          lastError: type == 'PAYMENT'
-              ? 'FINANCE_COMMAND_REQUIRED'
-              : 'PART_TENANCY_REQUIRED',
+          toDisposition: canProveUnsent
+              ? RemoteDisposition.unsent
+              : RemoteDisposition.ambiguous,
+          lastError: switch (type) {
+            'PAYMENT' => 'FINANCE_COMMAND_REQUIRED',
+            'PART' => 'PART_TENANCY_REQUIRED',
+            _ => 'PRE_ACQUISITION_LOCAL_ONLY',
+          },
           executor: targetDb,
         );
       } else {
@@ -355,10 +370,10 @@ class SyncEngine {
             continue;
           }
           final opId = rawOpId;
-          final status = res['status'] as String;
-          final error = res['error'] as String?;
+          final status = res['status'];
+          final error = res['error'];
 
-          if (status == 'SYNCED') {
+          if (status == 'SYNCED' && error == null) {
             await outboxDao.transition(
               operationId: opId,
               fromStatus: 'PROCESSING',
@@ -368,24 +383,49 @@ class SyncEngine {
               executor: targetDb,
             );
             synced++;
-          } else {
-            final finalStatus =
-                status == 'CONFLICT' ? 'CONFLICT' : 'FAILED_FATAL';
+          } else if (status == 'FAILED' &&
+              (error is String && error.isNotEmpty)) {
             await outboxDao.transition(
               operationId: opId,
               fromStatus: 'PROCESSING',
               fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: finalStatus,
+              toStatus: 'FAILED_FATAL',
               toDisposition: RemoteDisposition.confirmed,
               nextRetryAt: null,
-              lastError: error ?? 'Sync rejected by server',
+              lastError: error,
               executor: targetDb,
             );
-            if (status == 'CONFLICT') {
+            failed++;
+          } else if (status == 'CONFLICT' &&
+              (error is String && error.isNotEmpty)) {
+            // These explicit codes cover every unresolved idempotency result
+            // in the current backend contract. Unknown conflict codes remain
+            // quarantined below; none is promoted to CONFIRMED by status alone.
+            final unresolved = _unresolvedSyncConflictCodes.contains(error);
+            await outboxDao.transition(
+              operationId: opId,
+              fromStatus: 'PROCESSING',
+              fromDisposition: RemoteDisposition.ambiguous,
+              toStatus: unresolved ? 'CONFLICT' : 'REQUIRES_ATTENTION',
+              toDisposition: RemoteDisposition.ambiguous,
+              lastError: unresolved ? error : 'SYNC_CONFLICT_UNKNOWN:$error',
+              executor: targetDb,
+            );
+            if (unresolved) {
               conflict++;
             } else {
               failed++;
             }
+          } else {
+            await outboxDao.transition(
+              operationId: opId,
+              fromStatus: 'PROCESSING',
+              fromDisposition: RemoteDisposition.ambiguous,
+              toStatus: 'REQUIRES_ATTENTION',
+              toDisposition: RemoteDisposition.ambiguous,
+              lastError: 'SYNC_RESULT_UNKNOWN',
+              executor: targetDb,
+            );
           }
         }
         // Missing or malformed result entries remain ambiguous and are
@@ -404,29 +444,22 @@ class SyncEngine {
           );
         }
       } else {
-        final transient = response.statusCode == 429;
-        final ambiguous =
-            response.statusCode == 408 || response.statusCode >= 500;
+        // Batch HTTP classification rationale: backend 400 body validation,
+        // 401 authentication, and 403/409 bootstrap-proof failures are request
+        // level; the handler reports entry outcomes inside HTTP 200 `results`.
+        // The Sync route has no 429 handler, while 408/5xx may follow applied
+        // work. Since a client cannot prove the response source or bind a
+        // batch status to every operation, every non-200 remains ambiguous.
         for (final item in pendingEntries) {
           await outboxDao.transition(
             operationId: item.operationId,
             fromStatus: 'PROCESSING',
             fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: ambiguous
-                ? 'REQUIRES_ATTENTION'
-                : transient
-                    ? 'FAILED_TRANSIENT'
-                    : 'REQUIRES_ATTENTION',
-            toDisposition: ambiguous
-                ? RemoteDisposition.ambiguous
-                : RemoteDisposition.confirmed,
-            nextRetryAt: transient
-                ? calculateNextRetryAt(item.attemptCount + 1).toIso8601String()
-                : null,
+            toStatus: 'REQUIRES_ATTENTION',
+            toDisposition: RemoteDisposition.ambiguous,
             lastError: 'HTTP ${response.statusCode}: ${response.body}',
             executor: targetDb,
           );
-          if (!ambiguous) failed++;
         }
         throw SyncHttpException(
           statusCode: response.statusCode,

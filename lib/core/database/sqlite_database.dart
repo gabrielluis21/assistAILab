@@ -12,7 +12,7 @@ import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
 class SqliteDatabase {
-  static const schemaVersion = 8;
+  static const schemaVersion = 9;
 
   /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
   ///
@@ -67,13 +67,19 @@ class SqliteDatabase {
         if (oldVersion < 8) {
           await _migrateV7ToV8(db);
         }
+
+        // v8 clients could persist request-level failures and idempotency
+        // conflicts as CONFIRMED. Reclassify those rows before enabling v9.
+        if (oldVersion >= 8 && oldVersion < 9) {
+          await _migrateV8ToV9(db);
+        }
       },
       onOpen: (db) async {
         await _createTables(db);
 
         // Compatibilidade defensiva para instalações antigas que
         // já estavam marcadas como v4 com schema físico incompleto.
-        await _verifyV8Schema(db);
+        await _verifyV9Schema(db);
       },
     );
   }
@@ -434,21 +440,18 @@ class SqliteDatabase {
   /// remains AMBIGUOUS and cannot re-enter automatic push.
   static Future<void> _migrateV7ToV8(DatabaseExecutor db) async {
     final columns = await _columnNames(db, 'outbox');
-    if (!columns.contains('remote_disposition')) {
-      await db.execute(
-        "ALTER TABLE outbox ADD COLUMN remote_disposition TEXT NOT NULL DEFAULT 'UNSENT'",
-      );
-    }
+    // A present column means this migration already ran. Avoid reinterpreting
+    // rows whose dispositions were established by later Sync responses.
+    if (columns.contains('remote_disposition')) return;
+    await db.execute(
+      "ALTER TABLE outbox ADD COLUMN remote_disposition TEXT NOT NULL DEFAULT 'AMBIGUOUS'",
+    );
 
     final rows = await db.query('outbox');
     for (final row in rows) {
       final status = (row['status'] as String? ?? '').toUpperCase();
       final type = (row['entity_type'] as String? ?? '').toUpperCase();
       final error = (row['last_error'] as String?) ?? '';
-      if ({'FAILED_TRANSIENT', 'FAILED_FATAL', 'SUPERSEDED', 'DISCARDED'}
-          .contains(status)) {
-        continue;
-      }
       final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
       final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
       var disposition = 'AMBIGUOUS';
@@ -474,15 +477,28 @@ class SqliteDatabase {
           newStatus = 'REQUIRES_ATTENTION';
           break;
         case 'CONFLICT':
-          // Keep CONFLICT as a compatibility state for an explicit remote
-          // rejection; its remote outcome is known and must not be replayed.
-          disposition = 'CONFIRMED';
+          // v7 did not retain enough error detail to distinguish a domain
+          // rejection from an unresolved idempotency reservation.
+          disposition = 'AMBIGUOUS';
+          break;
+        case 'FAILED_TRANSIENT':
+        case 'FAILED_FATAL':
+          // Legacy status names did not prove whether the whole request or
+          // the individual operation was rejected.
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'SUPERSEDED':
+        case 'DISCARDED':
+          // Keep the history state, but do not treat it as safe without the
+          // disposition that v7 did not persist.
           break;
         case 'REQUIRES_ATTENTION':
-          if (type == 'PRE_ACQUISITION' ||
-              ((type == 'PART' || type == 'PAYMENT') &&
-                  (error.contains('PART_TENANCY_REQUIRED') ||
-                      error.contains('FINANCE_COMMAND_REQUIRED')))) {
+          final preSendMarker =
+              (type == 'PART' && error == 'PART_TENANCY_REQUIRED') ||
+                  (type == 'PAYMENT' && error == 'FINANCE_COMMAND_REQUIRED') ||
+                  (type == 'PRE_ACQUISITION' &&
+                      error == 'PRE_ACQUISITION_LOCAL_ONLY');
+          if (!hasAttemptEvidence && preSendMarker) {
             disposition = 'UNSENT';
           } else if (error.startsWith(
             'FE02B_LEGACY_MONEY_RECONCILIATION_REQUIRED',
@@ -501,6 +517,74 @@ class SqliteDatabase {
         where: 'operation_id = ?',
         whereArgs: [row['operation_id']],
       );
+    }
+  }
+
+  /// v8 -> v9 removes false certainty written by the audited v8 Sync engine.
+  static Future<void> _migrateV8ToV9(DatabaseExecutor db) async {
+    final rows = await db.query('outbox');
+    for (final row in rows) {
+      final status = (row['status'] as String? ?? '').toUpperCase();
+      final disposition =
+          (row['remote_disposition'] as String? ?? '').toUpperCase();
+      final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
+      final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
+      var newStatus = status;
+      var newDisposition = disposition;
+
+      if (status == 'SYNCED' && disposition == 'CONFIRMED') continue;
+      final isHistoricalTerminal =
+          status == 'SUPERSEDED' || status == 'DISCARDED';
+      if (isHistoricalTerminal) {
+        if (disposition == 'UNSENT' || disposition == 'CONFIRMED') continue;
+        if (disposition != 'AMBIGUOUS') {
+          await db.update(
+            'outbox',
+            {'remote_disposition': 'AMBIGUOUS'},
+            where: 'operation_id = ?',
+            whereArgs: [row['operation_id']],
+          );
+        }
+        continue;
+      }
+      if (status == 'PENDING' &&
+          disposition == 'UNSENT' &&
+          !hasAttemptEvidence) {
+        continue;
+      }
+
+      if (status == 'PROCESSING' ||
+          status == 'FAILED_TRANSIENT' ||
+          status == 'FAILED_FATAL' ||
+          status == 'CONFLICT' ||
+          status == 'SYNCED' ||
+          disposition == 'AMBIGUOUS' ||
+          disposition == 'CONFIRMED' &&
+              (status == 'REQUIRES_ATTENTION' || status == 'PENDING')) {
+        if (status != 'SUPERSEDED' && status != 'DISCARDED') {
+          newStatus = status == 'CONFLICT' ? 'CONFLICT' : 'REQUIRES_ATTENTION';
+        }
+        newDisposition = 'AMBIGUOUS';
+      } else if (hasAttemptEvidence) {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'REQUIRES_ATTENTION' && disposition == 'UNSENT') {
+        // v8 used UNSENT for P08 solely from entity type. No v8 marker proves
+        // that a prior request was never transmitted.
+        newDisposition = 'AMBIGUOUS';
+      } else if (disposition != 'UNSENT' && disposition != 'CONFIRMED') {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      }
+
+      if (newStatus != status || newDisposition != disposition) {
+        await db.update(
+          'outbox',
+          {'status': newStatus, 'remote_disposition': newDisposition},
+          where: 'operation_id = ?',
+          whereArgs: [row['operation_id']],
+        );
+      }
     }
   }
 
@@ -534,6 +618,10 @@ class SqliteDatabase {
   /// Transactional v7 -> v8 migration entry point for deterministic tests.
   static Future<void> migrateV7ToV8(Database db) =>
       db.transaction(_migrateV7ToV8);
+
+  /// Transactional v8 -> v9 correction entry point for deterministic tests.
+  static Future<void> migrateV8ToV9(Database db) =>
+      db.transaction(_migrateV8ToV9);
 
   /// Idempotent additive schema migration for the local-only pre-acquisition
   /// workflow. The baseline keeps schema version 7, while [_createTables]
@@ -873,7 +961,7 @@ class SqliteDatabase {
     }
   }
 
-  static Future<void> _verifyV8Schema(Database db) async {
+  static Future<void> _verifyV9Schema(Database db) async {
     await _verifyV6Schema(db);
     if (await _tableExists(db, 'payment_command_intents')) {
       throw StateError('Legacy Payment command authority remains in v7.');
@@ -893,7 +981,7 @@ class SqliteDatabase {
       throw StateError('SQLite v7 command intent schema is incomplete.');
     }
     if (!(await _columnNames(db, 'outbox')).contains('remote_disposition')) {
-      throw StateError('SQLite v8 Outbox schema is incomplete.');
+      throw StateError('SQLite v9 Outbox schema is incomplete.');
     }
     const expectedPreAcquisitionColumns = {
       'id',

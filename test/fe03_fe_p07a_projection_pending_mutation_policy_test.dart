@@ -313,7 +313,7 @@ void main() {
 
       await db.update(
         'outbox',
-        {'status': 'SYNCED'},
+        {'status': 'SYNCED', 'remote_disposition': 'CONFIRMED'},
         where: 'operation_id = ?',
         whereArgs: ['customer-op'],
       );
@@ -324,6 +324,61 @@ void main() {
 
       expect(await _customerName(db, 'customer-1'), 'Server confirmed');
       expect(await _outboxStatus(db, 'customer-op'), 'SYNCED');
+    });
+
+    test('ambiguous SUPERSEDED and DISCARDED history remains protected',
+        () async {
+      for (final status in ['SUPERSEDED', 'DISCARDED']) {
+        final entityId = 'customer-$status';
+        final operationId = 'operation-$status';
+        await _insertCustomer(db, id: entityId, name: 'Local $status');
+        await _insertOutbox(
+          db,
+          operationId: operationId,
+          entityType: 'CUSTOMER',
+          entityId: entityId,
+          status: status,
+          disposition: 'AMBIGUOUS',
+        );
+
+        await SyncProjectionApplier.replaceBootstrap(db, [
+          _customerRecord(entityId, 'Remote stale $status'),
+        ]);
+        expect(await _customerName(db, entityId), 'Local $status');
+        await expectLater(
+          SyncProjectionApplier.applyChange(
+            db,
+            _updateChange(_customerRecord(entityId, 'Remote stale $status')),
+          ),
+          throwsA(_pendingMutationException),
+        );
+        expect(await _outboxStatus(db, operationId), status);
+      }
+    });
+
+    test('safe terminal history releases projection protection', () async {
+      const safeCases = [
+        (status: 'SYNCED', disposition: 'CONFIRMED'),
+        (status: 'SUPERSEDED', disposition: 'UNSENT'),
+        (status: 'DISCARDED', disposition: 'CONFIRMED'),
+      ];
+      for (final item in safeCases) {
+        final entityId = 'customer-${item.status}';
+        await _insertCustomer(db, id: entityId, name: 'Local');
+        await _insertOutbox(
+          db,
+          operationId: 'operation-${item.status}',
+          entityType: 'CUSTOMER',
+          entityId: entityId,
+          status: item.status,
+          disposition: item.disposition,
+        );
+        await SyncProjectionApplier.applyChange(
+          db,
+          _updateChange(_customerRecord(entityId, 'Remote converged')),
+        );
+        expect(await _customerName(db, entityId), 'Remote converged');
+      }
     });
 
     test('pending change rolls back the complete pull page and cursor',
@@ -616,6 +671,7 @@ Future<void> _insertOutbox(
   String operationType = 'UPDATE',
   Map<String, dynamic> payload = const {},
   String status = 'PENDING',
+  String disposition = 'UNSENT',
 }) {
   return db.insert('outbox', {
     'operation_id': operationId,
@@ -626,6 +682,7 @@ Future<void> _insertOutbox(
     'created_at': '2026-09-23T12:00:00.000Z',
     'attempt_count': 0,
     'status': status,
+    'remote_disposition': disposition,
   });
 }
 

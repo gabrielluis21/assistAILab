@@ -3,6 +3,14 @@ import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 import 'sqlite_database.dart';
 
+const Map<String, String> _outboxEntityTables = {
+  'CUSTOMER': 'customers',
+  'EQUIPMENT': 'equipments',
+  'SERVICE_ORDER': 'service_orders',
+  'SERVICE_ORDER_ITEM': 'service_order_items',
+  'PRE_ACQUISITION': 'pre_acquisitions',
+};
+
 enum OutboxStatus {
   pending('PENDING'),
   processing('PROCESSING'),
@@ -144,7 +152,7 @@ class OutboxDao {
     final maps = await db.query(
       'outbox',
       where:
-          "status IN ('PENDING', 'FAILED_TRANSIENT') AND remote_disposition IN ('UNSENT', 'CONFIRMED') AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+          "status IN ('PENDING', 'FAILED_TRANSIENT') AND remote_disposition = 'UNSENT' AND (next_retry_at IS NULL OR next_retry_at <= ?)",
       whereArgs: [nowIso],
       orderBy: 'created_at ASC',
       limit: limit,
@@ -174,7 +182,7 @@ class OutboxDao {
       ) ||
       (
         'FAILED_TRANSIENT',
-        RemoteDisposition.confirmed,
+        RemoteDisposition.unsent,
         'PROCESSING',
         RemoteDisposition.ambiguous
       ) ||
@@ -188,18 +196,12 @@ class OutboxDao {
         'PROCESSING',
         RemoteDisposition.ambiguous,
         'CONFLICT',
-        RemoteDisposition.confirmed
+        RemoteDisposition.ambiguous
       ) ||
       (
         'PROCESSING',
         RemoteDisposition.ambiguous,
         'FAILED_FATAL',
-        RemoteDisposition.confirmed
-      ) ||
-      (
-        'PROCESSING',
-        RemoteDisposition.ambiguous,
-        'FAILED_TRANSIENT',
         RemoteDisposition.confirmed
       ) ||
       (
@@ -224,7 +226,7 @@ class OutboxDao {
         'FAILED_TRANSIENT',
         RemoteDisposition.confirmed,
         'REQUIRES_ATTENTION',
-        RemoteDisposition.unsent
+        RemoteDisposition.ambiguous
       ) =>
         true,
       _ => false,
@@ -302,15 +304,8 @@ class OutboxDao {
     Database? database,
   }) async {
     final db = database ?? await SqliteDatabase.instance;
-    const allowedTables = {
-      'customers',
-      'equipments',
-      'service_orders',
-      'service_order_items',
-      'pre_acquisitions',
-    };
-    if (!allowedTables.contains(entityTable)) {
-      throw ArgumentError.value(entityTable, 'entityTable');
+    if (_outboxEntityTables[entityType] != entityTable) {
+      throw ArgumentError('Entity type/table pair is not allowed.');
     }
     if (replacement.entityType != entityType ||
         replacement.entityId != entityId ||
@@ -412,14 +407,7 @@ class OutboxDao {
     Database? database,
   }) async {
     final db = database ?? await SqliteDatabase.instance;
-    const entityTables = {
-      'CUSTOMER': 'customers',
-      'EQUIPMENT': 'equipments',
-      'SERVICE_ORDER': 'service_orders',
-      'SERVICE_ORDER_ITEM': 'service_order_items',
-      'PRE_ACQUISITION': 'pre_acquisitions',
-    };
-    if (entityTables[entityType] != entityTable) {
+    if (_outboxEntityTables[entityType] != entityTable) {
       throw ArgumentError('Entity type/table pair is not allowed.');
     }
     await db.transaction((txn) async {
@@ -437,8 +425,11 @@ class OutboxDao {
         final status = row['status'];
         final disposition = row['remote_disposition'];
         final operationType = row['operation_type'];
-        if (status == OutboxStatus.superseded.value ||
-            status == OutboxStatus.discarded.value) {
+        final safeDisposition = disposition == RemoteDisposition.unsent.value ||
+            disposition == RemoteDisposition.confirmed.value;
+        if ((status == OutboxStatus.superseded.value ||
+                status == OutboxStatus.discarded.value) &&
+            safeDisposition) {
           continue;
         }
         final discardable = operationType == 'CREATE' &&
@@ -493,12 +484,22 @@ class OutboxDao {
       'CUSTOMER' => const [
           ('equipments', 'customer_id'),
           ('service_orders', 'customer_id'),
+          ('pre_acquisitions', 'customer_id'),
+          ('equipment_acquisitions', 'customer_id'),
         ],
       'EQUIPMENT' => const [
           ('service_orders', 'equipment_id'),
           ('pre_acquisitions', 'equipment_id'),
+          ('equipment_acquisitions', 'equipment_id'),
         ],
-      'SERVICE_ORDER' => const [('service_order_items', 'service_order_id')],
+      'SERVICE_ORDER' => const [
+          ('service_order_items', 'service_order_id'),
+          ('pre_acquisitions', 'service_order_id'),
+          ('equipment_acquisitions', 'service_order_id'),
+        ],
+      'PRE_ACQUISITION' => const [
+          ('equipment_acquisitions', 'client_pre_acquisition_id'),
+        ],
       _ => const <(String, String)>[],
     };
     for (final (table, column) in checks) {
