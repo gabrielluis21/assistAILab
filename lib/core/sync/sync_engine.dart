@@ -32,6 +32,10 @@ final class SyncHttpException implements Exception {
       'SyncHttpException($operation, HTTP $statusCode): $responseBody';
 }
 
+final class _SyncLeaseInvalidated implements Exception {
+  const _SyncLeaseInvalidated();
+}
+
 class SyncPushSummary {
   final int totalProcessed;
   final int syncedCount;
@@ -313,18 +317,25 @@ class SyncEngine {
     // Persist ambiguity before network I/O: any interruption after this point
     // must not silently replay an operation whose remote result is unknown.
     final nowIso = DateTime.now().toIso8601String();
+    final attemptIdentities =
+        <String, ({int attemptCount, String lastAttemptAt})>{};
     await targetDb.transaction((txn) async {
       for (final item in pendingEntries) {
+        final attemptCount = item.attemptCount + 1;
         await outboxDao.transition(
           operationId: item.operationId,
           fromStatus: item.status,
           fromDisposition: item.remoteDisposition,
           toStatus: 'PROCESSING',
           toDisposition: RemoteDisposition.ambiguous,
-          attemptCount: item.attemptCount + 1,
+          attemptCount: attemptCount,
           lastAttemptAt: nowIso,
           requireUnattempted: true,
           executor: txn,
+        );
+        attemptIdentities[item.operationId] = (
+          attemptCount: attemptCount,
+          lastAttemptAt: nowIso,
         );
       }
     });
@@ -338,6 +349,36 @@ class SyncEngine {
     int failed = 0;
     int conflict = 0;
 
+    SyncPushSummary cancelledSummary() => SyncPushSummary(
+          totalProcessed: pendingEntries.length,
+          syncedCount: 0,
+          failedCount: 0,
+          conflictCount: 0,
+        );
+
+    Future<bool> transitionClaimed({
+      required OutboxItem item,
+      required String toStatus,
+      required RemoteDisposition toDisposition,
+      String? lastError,
+      String? nextRetryAt,
+      required DatabaseExecutor executor,
+    }) {
+      final attempt = attemptIdentities[item.operationId]!;
+      return outboxDao.transition(
+        operationId: item.operationId,
+        fromStatus: 'PROCESSING',
+        fromDisposition: RemoteDisposition.ambiguous,
+        toStatus: toStatus,
+        toDisposition: toDisposition,
+        nextRetryAt: nextRetryAt,
+        lastError: lastError,
+        expectedAttemptCount: attempt.attemptCount,
+        expectedLastAttemptAt: attempt.lastAttemptAt,
+        executor: executor,
+      );
+    }
+
     try {
       final response = await apiClient.postBoundWithHeaders(
         '/sync/push',
@@ -347,12 +388,7 @@ class SyncEngine {
       ).timeout(const Duration(seconds: 15));
 
       if (!lease.isStillValid) {
-        return SyncPushSummary(
-          totalProcessed: pendingEntries.length,
-          syncedCount: synced,
-          failedCount: failed,
-          conflictCount: conflict,
-        );
+        return cancelledSummary();
       }
 
       if (response.statusCode == 200) {
@@ -362,92 +398,96 @@ class SyncEngine {
             pendingEntries.map((entry) => entry.operationId).toSet();
         final completedIds = <String>{};
 
-        for (final res in results) {
-          if (res is! Map<String, dynamic>) continue;
-          final rawOpId = res['operationId'];
-          if (rawOpId is! String ||
-              !knownIds.contains(rawOpId) ||
-              !completedIds.add(rawOpId)) {
-            continue;
-          }
-          final opId = rawOpId;
-          final status = res['status'];
-          final error = res['error'];
-
-          if (status == 'SYNCED' && error == null) {
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: 'SYNCED',
-              toDisposition: RemoteDisposition.confirmed,
-              executor: targetDb,
-            );
-            synced++;
-          } else if (status == 'FAILED' &&
-              (error is String && error.isNotEmpty)) {
-            // The v2 backend emits per-entry FAILED only for checks performed
-            // before mutation or for domain failures caught after the
-            // transaction rollback. Infrastructure failures escape the
-            // handler as batch HTTP errors and remain AMBIGUOUS below.
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: 'FAILED_FATAL',
-              toDisposition: RemoteDisposition.confirmed,
-              nextRetryAt: null,
-              lastError: error,
-              executor: targetDb,
-            );
-            failed++;
-          } else if (status == 'CONFLICT' &&
-              (error is String && error.isNotEmpty)) {
-            // These explicit codes cover every unresolved idempotency result
-            // in the current backend contract. Unknown conflict codes remain
-            // quarantined below; none is promoted to CONFIRMED by status alone.
-            final unresolved = _unresolvedSyncConflictCodes.contains(error);
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: unresolved ? 'CONFLICT' : 'REQUIRES_ATTENTION',
-              toDisposition: RemoteDisposition.ambiguous,
-              lastError: unresolved ? error : 'SYNC_CONFLICT_UNKNOWN:$error',
-              executor: targetDb,
-            );
-            if (unresolved) {
-              conflict++;
-            } else {
-              failed++;
+        await targetDb.transaction((txn) async {
+          for (final res in results) {
+            if (!lease.isStillValid) {
+              throw const _SyncLeaseInvalidated();
             }
-          } else {
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
+            if (res is! Map<String, dynamic>) continue;
+            final rawOpId = res['operationId'];
+            if (rawOpId is! String ||
+                !knownIds.contains(rawOpId) ||
+                !completedIds.add(rawOpId)) {
+              continue;
+            }
+            final item = pendingEntries
+                .firstWhere((entry) => entry.operationId == rawOpId);
+            final status = res['status'];
+            final error = res['error'];
+
+            if (status == 'SYNCED' && error == null) {
+              if (await transitionClaimed(
+                item: item,
+                toStatus: 'SYNCED',
+                toDisposition: RemoteDisposition.confirmed,
+                executor: txn,
+              )) {
+                synced++;
+              }
+            } else if (status == 'FAILED' &&
+                (error is String && error.isNotEmpty)) {
+              // The v2 backend emits per-entry FAILED only for checks performed
+              // before mutation or for domain failures caught after the
+              // transaction rollback. Infrastructure failures escape the
+              // handler as batch HTTP errors and remain AMBIGUOUS below.
+              if (await transitionClaimed(
+                item: item,
+                toStatus: 'FAILED_FATAL',
+                toDisposition: RemoteDisposition.confirmed,
+                lastError: error,
+                executor: txn,
+              )) {
+                failed++;
+              }
+            } else if (status == 'CONFLICT' &&
+                (error is String && error.isNotEmpty)) {
+              // These explicit codes cover every unresolved idempotency result
+              // in the current backend contract. Unknown conflict codes remain
+              // quarantined below; none is promoted to CONFIRMED by status alone.
+              final unresolved = _unresolvedSyncConflictCodes.contains(error);
+              if (await transitionClaimed(
+                item: item,
+                toStatus: unresolved ? 'CONFLICT' : 'REQUIRES_ATTENTION',
+                toDisposition: RemoteDisposition.ambiguous,
+                lastError: unresolved ? error : 'SYNC_CONFLICT_UNKNOWN:$error',
+                executor: txn,
+              )) {
+                if (unresolved) {
+                  conflict++;
+                } else {
+                  failed++;
+                }
+              }
+            } else {
+              await transitionClaimed(
+                item: item,
+                toStatus: 'REQUIRES_ATTENTION',
+                toDisposition: RemoteDisposition.ambiguous,
+                lastError: 'SYNC_RESULT_UNKNOWN',
+                executor: txn,
+              );
+            }
+          }
+          // Missing or malformed result entries remain ambiguous and are
+          // quarantined for reconciliation; they are never implicitly retried.
+          for (final item in pendingEntries.where(
+            (entry) => !completedIds.contains(entry.operationId),
+          )) {
+            if (!lease.isStillValid) {
+              throw const _SyncLeaseInvalidated();
+            }
+            await transitionClaimed(
+              item: item,
               toStatus: 'REQUIRES_ATTENTION',
               toDisposition: RemoteDisposition.ambiguous,
-              lastError: 'SYNC_RESULT_UNKNOWN',
-              executor: targetDb,
+              lastError: 'SYNC_RESULT_MISSING',
+              executor: txn,
             );
           }
-        }
-        // Missing or malformed result entries remain ambiguous and are
-        // quarantined for reconciliation; they are never implicitly retried.
-        for (final item in pendingEntries.where(
-          (entry) => !completedIds.contains(entry.operationId),
-        )) {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: 'SYNC_RESULT_MISSING',
-            executor: targetDb,
-          );
-        }
+          if (!lease.isStillValid) {
+            throw const _SyncLeaseInvalidated();
+          }
+        });
       } else {
         // Batch HTTP classification rationale: backend 400 body validation,
         // 401 authentication, and 403/409 bootstrap-proof failures are request
@@ -455,17 +495,24 @@ class SyncEngine {
         // The Sync route has no 429 handler, while 408/5xx may follow applied
         // work. Since a client cannot prove the response source or bind a
         // batch status to every operation, every non-200 remains ambiguous.
-        for (final item in pendingEntries) {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: 'HTTP ${response.statusCode}: ${response.body}',
-            executor: targetDb,
-          );
-        }
+        await targetDb.transaction((txn) async {
+          for (final item in pendingEntries) {
+            if (!lease.isStillValid) {
+              throw const _SyncLeaseInvalidated();
+            }
+            await transitionClaimed(
+              item: item,
+              toStatus: 'REQUIRES_ATTENTION',
+              toDisposition: RemoteDisposition.ambiguous,
+              lastError: 'HTTP ${response.statusCode}: ${response.body}',
+              executor: txn,
+            );
+          }
+          if (!lease.isStillValid) {
+            throw const _SyncLeaseInvalidated();
+          }
+        });
+        if (!lease.isStillValid) return cancelledSummary();
         throw SyncHttpException(
           statusCode: response.statusCode,
           operation: 'push',
@@ -473,25 +520,34 @@ class SyncEngine {
         );
       }
     } catch (e) {
-      for (final item in pendingEntries) {
-        final current = await targetDb.query(
-          'outbox',
-          columns: ['status', 'remote_disposition'],
-          where: 'operation_id = ?',
-          whereArgs: [item.operationId],
-          limit: 1,
-        );
-        if (current.length == 1 && current.single['status'] == 'PROCESSING') {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: e.toString(),
-            executor: targetDb,
-          );
-        }
+      // A stale cycle must stop before touching its database or publishing an
+      // error. The coordinator will discard this neutral summary on cancel.
+      if (!lease.isStillValid || e is _SyncLeaseInvalidated) {
+        return cancelledSummary();
+      }
+      try {
+        await targetDb.transaction((txn) async {
+          for (final item in pendingEntries) {
+            if (!lease.isStillValid) {
+              throw const _SyncLeaseInvalidated();
+            }
+            await transitionClaimed(
+              item: item,
+              toStatus: 'REQUIRES_ATTENTION',
+              toDisposition: RemoteDisposition.ambiguous,
+              lastError: e.toString(),
+              executor: txn,
+            );
+          }
+          if (!lease.isStillValid) {
+            throw const _SyncLeaseInvalidated();
+          }
+        });
+      } on _SyncLeaseInvalidated {
+        return cancelledSummary();
+      }
+      if (!lease.isStillValid) {
+        return cancelledSummary();
       }
       rethrow;
     }

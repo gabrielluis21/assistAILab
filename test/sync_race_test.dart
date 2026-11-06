@@ -39,6 +39,51 @@ class _CapturingHttpClient extends http.BaseClient {
   }
 }
 
+class _TrackingOutboxDao extends OutboxDao {
+  final void Function(String status)? afterResponseTransition;
+  int responseTransitions = 0;
+
+  _TrackingOutboxDao({this.afterResponseTransition});
+
+  @override
+  Future<bool> transition({
+    required String operationId,
+    required String fromStatus,
+    required RemoteDisposition fromDisposition,
+    required String toStatus,
+    required RemoteDisposition toDisposition,
+    int? attemptCount,
+    String? lastAttemptAt,
+    String? nextRetryAt,
+    String? lastError,
+    bool requireUnattempted = false,
+    int? expectedAttemptCount,
+    String? expectedLastAttemptAt,
+    DatabaseExecutor? executor,
+  }) async {
+    final changed = await super.transition(
+      operationId: operationId,
+      fromStatus: fromStatus,
+      fromDisposition: fromDisposition,
+      toStatus: toStatus,
+      toDisposition: toDisposition,
+      attemptCount: attemptCount,
+      lastAttemptAt: lastAttemptAt,
+      nextRetryAt: nextRetryAt,
+      lastError: lastError,
+      requireUnattempted: requireUnattempted,
+      expectedAttemptCount: expectedAttemptCount,
+      expectedLastAttemptAt: expectedLastAttemptAt,
+      executor: executor,
+    );
+    if (toStatus != 'PROCESSING' && changed) {
+      responseTransitions++;
+      afterResponseTransition?.call(toStatus);
+    }
+    return changed;
+  }
+}
+
 Future<void> _activateSyncV2(Database db, {String cursor = '0'}) async {
   for (final entry in {
     'sync_contract_version': '2',
@@ -51,6 +96,30 @@ Future<void> _activateSyncV2(Database db, {String cursor = '0'}) async {
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
+}
+
+Future<Database> _openRawSyncDatabase(String name) async {
+  final db = await SqliteDatabase.openDatabaseByName(name);
+  await _activateSyncV2(db);
+  return db;
+}
+
+Future<void> _insertPushItem(
+  Database db, {
+  required String operationId,
+  required String name,
+}) {
+  return OutboxDao().insert(
+    OutboxItem(
+      operationId: operationId,
+      entityType: 'CUSTOMER',
+      entityId: 'entity-$operationId',
+      operationType: 'CREATE',
+      payload: {'name': name},
+      createdAt: DateTime.now().toIso8601String(),
+    ),
+    executor: db,
+  );
 }
 
 SyncSessionBinding _sessionBinding({
@@ -124,6 +193,255 @@ void main() {
     try {
       tempDir.deleteSync(recursive: true);
     } catch (_) {}
+  });
+
+  group('Late Outbox Push Response Protection (Etapa 2)', () {
+    test('late SYNCED response after lease cancellation preserves DB A claim',
+        () async {
+      final dbA = await _openRawSyncDatabase('e2_late_success_a.db');
+      final dbB = await _openRawSyncDatabase('e2_late_success_b.db');
+      const operationId = 'e2-late-success';
+      const payload = {'name': 'Customer A'};
+      await _insertPushItem(dbA,
+          operationId: operationId, name: payload['name']!);
+
+      final requestStarted = Completer<void>();
+      final responseGate = Completer<http.Response>();
+      final transport = _CapturingHttpClient((request) {
+        if (request.url.path == '/sync/push') {
+          requestStarted.complete();
+          return responseGate.future;
+        }
+        return Future.value(http.Response('Not Found', 404));
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+      );
+      var valid = true;
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final push = engine.pushPendingOutbox(lease: lease);
+      await requestStarted.future;
+      expect(transport.recordedRequests, hasLength(1));
+      expect(transport.recordedRequests.single.headers['authorization'],
+          'Bearer TOKEN_A');
+      final claimed = (await dbA.query('outbox',
+              where: 'operation_id = ?', whereArgs: [operationId]))
+          .single;
+      expect(claimed['status'], 'PROCESSING');
+      expect(claimed['remote_disposition'], 'AMBIGUOUS');
+      expect(claimed['attempt_count'], 1);
+      final attemptAt = claimed['last_attempt_at'];
+
+      valid = false;
+      responseGate.complete(http.Response(
+        jsonEncode({
+          'results': [
+            {'operationId': operationId, 'status': 'SYNCED'}
+          ]
+        }),
+        200,
+      ));
+      final summary = await push;
+
+      final row = (await dbA.query('outbox',
+              where: 'operation_id = ?', whereArgs: [operationId]))
+          .single;
+      expect(summary.syncedCount, 0);
+      expect(row['operation_id'], operationId);
+      expect(jsonDecode(row['payload'] as String), payload);
+      expect(row['status'], 'PROCESSING');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 1);
+      expect(row['last_attempt_at'], attemptAt);
+      expect(await dbB.query('outbox'), isEmpty);
+      expect(transport.recordedRequests, hasLength(1));
+
+      await engine.pushPendingOutbox(lease: lease);
+      expect(transport.recordedRequests, hasLength(1));
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test('HTTP exception after cancellation performs no Outbox recovery writes',
+        () async {
+      final dbA = await _openRawSyncDatabase('e2_late_error_a.db');
+      final dbB = await _openRawSyncDatabase('e2_late_error_b.db');
+      const operationId = 'e2-late-error';
+      await _insertPushItem(dbA, operationId: operationId, name: 'Customer A');
+      final requestStarted = Completer<void>();
+      final responseGate = Completer<http.Response>();
+      final transport = _CapturingHttpClient((request) {
+        if (request.url.path == '/sync/push') {
+          requestStarted.complete();
+          return responseGate.future;
+        }
+        return Future.value(http.Response('Not Found', 404));
+      });
+      final dao = _TrackingOutboxDao();
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      var valid = true;
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final push = engine.pushPendingOutbox(lease: lease);
+      await requestStarted.future;
+      expect(transport.recordedRequests.single.headers['authorization'],
+          'Bearer TOKEN_A');
+      final claimed = (await dbA.query('outbox',
+              where: 'operation_id = ?', whereArgs: [operationId]))
+          .single;
+      final attemptAt = claimed['last_attempt_at'];
+      valid = false;
+      responseGate.completeError(StateError('late transport failure'));
+      final summary = await push;
+
+      final row = (await dbA.query('outbox',
+              where: 'operation_id = ?', whereArgs: [operationId]))
+          .single;
+      expect(summary.totalProcessed, 1);
+      expect(dao.responseTransitions, 0);
+      expect(row['status'], 'PROCESSING');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 1);
+      expect(row['last_attempt_at'], attemptAt);
+      expect(await dbB.query('outbox'), isEmpty);
+      expect(transport.recordedRequests, hasLength(1));
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test('cancellation during a result batch rolls back earlier row updates',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_batch_rollback_a.db');
+      final dbB = await _openRawSyncDatabase('e2_batch_rollback_b.db');
+      const operationIds = ['e2-batch-first', 'e2-batch-second'];
+      await _insertPushItem(dbA, operationId: operationIds[0], name: 'First');
+      await _insertPushItem(dbA, operationId: operationIds[1], name: 'Second');
+      final requestStarted = Completer<void>();
+      final transport = _CapturingHttpClient((request) async {
+        if (request.url.path == '/sync/push') {
+          requestStarted.complete();
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {'operationId': operationIds[0], 'status': 'SYNCED'},
+                {'operationId': operationIds[1], 'status': 'SYNCED'},
+              ]
+            }),
+            200,
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+      final dao = _TrackingOutboxDao(
+        afterResponseTransition: (status) {
+          if (status == 'SYNCED') valid = false;
+        },
+      );
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final push = engine.pushPendingOutbox(lease: lease);
+      await requestStarted.future;
+      final summary = await push;
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+
+      expect(summary.syncedCount, 0);
+      expect(dao.responseTransitions, 1);
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PROCESSING');
+        expect(row['remote_disposition'], 'AMBIGUOUS');
+        expect(row['attempt_count'], 1);
+        expect(row['last_attempt_at'], isNotNull);
+      }
+      expect(await dbB.query('outbox'), isEmpty);
+      expect(transport.recordedRequests, hasLength(1));
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test('late result cannot overwrite a newer Outbox attempt identity',
+        () async {
+      final dbA = await _openRawSyncDatabase('e2_newer_attempt_a.db');
+      final dbB = await _openRawSyncDatabase('e2_newer_attempt_b.db');
+      const operationId = 'e2-newer-attempt';
+      await _insertPushItem(dbA, operationId: operationId, name: 'Customer A');
+      final requestStarted = Completer<void>();
+      final responseGate = Completer<http.Response>();
+      final transport = _CapturingHttpClient((request) {
+        if (request.url.path == '/sync/push') {
+          requestStarted.complete();
+          return responseGate.future;
+        }
+        return Future.value(http.Response('Not Found', 404));
+      });
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => false,
+      );
+
+      final push = engine.pushPendingOutbox(lease: lease);
+      await requestStarted.future;
+      await dbA.update(
+        'outbox',
+        {
+          'status': 'REQUIRES_ATTENTION',
+          'remote_disposition': 'AMBIGUOUS',
+          'attempt_count': 9,
+          'last_attempt_at': '2027-01-01T00:00:00.000Z',
+          'last_error': 'newer concurrent state',
+        },
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      );
+      responseGate.complete(http.Response(
+        jsonEncode({
+          'results': [
+            {'operationId': operationId, 'status': 'SYNCED'}
+          ]
+        }),
+        200,
+      ));
+      final summary = await push;
+      final row = (await dbA.query('outbox',
+              where: 'operation_id = ?', whereArgs: [operationId]))
+          .single;
+
+      expect(summary.syncedCount, 0);
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 9);
+      expect(row['last_attempt_at'], '2027-01-01T00:00:00.000Z');
+      expect(row['last_error'], 'newer concurrent state');
+      expect(await dbB.query('outbox'), isEmpty);
+      expect(transport.recordedRequests, hasLength(1));
+      await dbA.close();
+      await dbB.close();
+    });
   });
 
   group(

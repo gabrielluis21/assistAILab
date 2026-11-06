@@ -239,7 +239,9 @@ class OutboxDao {
     }
   }
 
-  Future<void> transition({
+  /// Returns false only when a supplied attempt identity no longer matches.
+  /// Other failed compare-and-set transitions remain programming errors.
+  Future<bool> transition({
     required String operationId,
     required String fromStatus,
     required RemoteDisposition fromDisposition,
@@ -250,8 +252,15 @@ class OutboxDao {
     String? nextRetryAt,
     String? lastError,
     bool requireUnattempted = false,
+    int? expectedAttemptCount,
+    String? expectedLastAttemptAt,
     DatabaseExecutor? executor,
   }) async {
+    if ((expectedAttemptCount == null) != (expectedLastAttemptAt == null)) {
+      throw const OutboxTransitionException(
+        'Attempt identity requires both attempt_count and last_attempt_at.',
+      );
+    }
     if (requireUnattempted &&
         (!{
               OutboxStatus.pending.value,
@@ -360,6 +369,12 @@ class OutboxDao {
     if (requireUnattempted) {
       where.write(' AND attempt_count = 0 AND last_attempt_at IS NULL');
     }
+    if (expectedAttemptCount != null && expectedLastAttemptAt != null) {
+      where.write(' AND attempt_count = ? AND last_attempt_at = ?');
+      whereArgs
+        ..add(expectedAttemptCount)
+        ..add(expectedLastAttemptAt);
+    }
     final changed = await db.update(
       'outbox',
       values,
@@ -367,10 +382,12 @@ class OutboxDao {
       whereArgs: whereArgs,
     );
     if (changed != 1) {
+      if (expectedAttemptCount != null) return false;
       throw OutboxTransitionException(
         'Outbox transition compare-and-set failed for $operationId.',
       );
     }
+    return true;
   }
 
   /// Recovers entries stuck in PROCESSING state for more than [timeout] (default 5 minutes)
