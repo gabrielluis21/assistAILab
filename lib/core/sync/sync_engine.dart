@@ -274,7 +274,8 @@ class SyncEngine {
       final type = entry.entityType.toUpperCase();
       if (type == 'PAYMENT' || type == 'PART' || type == 'PRE_ACQUISITION') {
         final canProveUnsent =
-            entry.remoteDisposition == RemoteDisposition.unsent &&
+            entry.status == OutboxStatus.pending.value &&
+                entry.remoteDisposition == RemoteDisposition.unsent &&
                 entry.attemptCount == 0 &&
                 entry.lastAttemptAt == null;
         await outboxDao.transition(
@@ -385,6 +386,10 @@ class SyncEngine {
             synced++;
           } else if (status == 'FAILED' &&
               (error is String && error.isNotEmpty)) {
+            // The v2 backend emits per-entry FAILED only for checks performed
+            // before mutation or for domain failures caught after the
+            // transaction rollback. Infrastructure failures escape the
+            // handler as batch HTTP errors and remain AMBIGUOUS below.
             await outboxDao.transition(
               operationId: opId,
               fromStatus: 'PROCESSING',

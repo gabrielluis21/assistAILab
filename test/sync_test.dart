@@ -605,16 +605,19 @@ void main() {
 
     test('unknown per-operation status is quarantined', () async {
       final db = await SqliteDatabase.instance;
-      const operationId = 'unknown-sync-status';
+      final operationId =
+          'unknown-sync-status-${DateTime.now().microsecondsSinceEpoch}';
+      final customerId =
+          'unknown-status-customer-${DateTime.now().microsecondsSinceEpoch}';
       await db.insert('customers', {
-        'id': 'unknown-status-customer',
+        'id': customerId,
         'name': 'Local entity',
         'updated_at': DateTime.now().toIso8601String(),
       });
       await db.insert('outbox', {
         'operation_id': operationId,
         'entity_type': 'CUSTOMER',
-        'entity_id': 'unknown-status-customer',
+        'entity_id': customerId,
         'operation_type': 'CREATE',
         'payload': jsonEncode({'name': 'Unknown status'}),
         'created_at': DateTime.now().toIso8601String(),
@@ -655,15 +658,74 @@ void main() {
       await expectLater(
         OutboxDao().discardCreate(
           entityType: 'CUSTOMER',
-          entityId: 'unknown-status-customer',
+          entityId: customerId,
           entityTable: 'customers',
           database: db,
         ),
         throwsA(isA<OutboxTransitionException>()),
       );
-      expect((await db.query('customers')).single['name'], 'Local entity');
+      expect(
+        (await db.query('customers', where: 'id = ?', whereArgs: [customerId]))
+            .single['name'],
+        'Local entity',
+      );
       await db.delete('outbox',
           where: 'operation_id = ?', whereArgs: [operationId]);
+      await db.delete('customers', where: 'id = ?', whereArgs: [customerId]);
+    });
+
+    test('backend FAILED domain, validation, and authorization rejections are definitive', () async {
+      final db = await SqliteDatabase.instance;
+      for (final error in [
+        'SYNC_ENTITY_ALREADY_EXISTS',
+        'SYNC_PAYLOAD_INVALID',
+        'SYNC_TENANT_MISMATCH',
+      ]) {
+        final operationId = 'failed-$error';
+        await db.insert('outbox', {
+          'operation_id': operationId,
+          'entity_type': 'CUSTOMER',
+          'entity_id': operationId,
+          'operation_type': 'CREATE',
+          'payload': jsonEncode({'name': error}),
+          'created_at': DateTime.now().toIso8601String(),
+          'status': 'PENDING',
+          'attempt_count': 0,
+        });
+        final engine = SyncEngine(
+          apiClient: ApiClient(
+            baseUrl: 'http://test.api',
+            client: MockHttpClientWithCustomResponses((request) async {
+              if (request.url.path == '/sync/push') {
+                return http.Response(
+                  jsonEncode({
+                    'results': [
+                      {
+                        'operationId': operationId,
+                        'status': 'FAILED',
+                        'error': error,
+                      }
+                    ],
+                  }),
+                  200,
+                );
+              }
+              return http.Response('unexpected', 404);
+            }),
+          ),
+        );
+
+        final summary = await engine.pushPendingOutbox(lease: _testLease(db));
+        final row = (await db.query('outbox',
+                where: 'operation_id = ?', whereArgs: [operationId]))
+            .single;
+        expect(summary.failedCount, 1, reason: error);
+        expect(row['status'], 'FAILED_FATAL', reason: error);
+        expect(row['remote_disposition'], 'CONFIRMED', reason: error);
+        expect(row['last_error'], error, reason: error);
+        await db.delete('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]);
+      }
     });
 
     test('transport ambiguity is quarantined and excluded from automatic retry',
@@ -2195,21 +2257,43 @@ void main() {
         .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
   });
 
-  test('PART and PAYMENT after a prior 429 cannot be downgraded to UNSENT',
-      () async {
+  test('PART and PAYMENT pre-send intercept only as proven UNSENT', () async {
     final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
-    for (final type in ['PART', 'PAYMENT']) {
-      final operationId = 'after-429-$type';
+    for (final item in [
+      (type: 'PART', status: 'PENDING', attempts: 0, lastAttempt: null, expected: 'UNSENT'),
+      (type: 'PAYMENT', status: 'PENDING', attempts: 0, lastAttempt: null, expected: 'UNSENT'),
+      (type: 'PART', status: 'PENDING', attempts: 1, lastAttempt: null, expected: 'AMBIGUOUS'),
+      (type: 'PAYMENT', status: 'PENDING', attempts: 1, lastAttempt: null, expected: 'AMBIGUOUS'),
+      (type: 'PART', status: 'FAILED_TRANSIENT', attempts: 0, lastAttempt: null, expected: 'AMBIGUOUS'),
+      (type: 'PAYMENT', status: 'FAILED_TRANSIENT', attempts: 0, lastAttempt: null, expected: 'AMBIGUOUS'),
+      (
+        type: 'PART',
+        status: 'PENDING',
+        attempts: 0,
+        lastAttempt: '2026-11-01T12:00:00.000Z',
+        expected: 'AMBIGUOUS'
+      ),
+      (
+        type: 'PAYMENT',
+        status: 'PENDING',
+        attempts: 0,
+        lastAttempt: '2026-11-01T12:00:00.000Z',
+        expected: 'AMBIGUOUS'
+      ),
+    ]) {
+      final operationId =
+          'pre-send-${item.type}-${item.status}-${item.attempts}-${item.expected}-${item.lastAttempt == null ? 'no-time' : 'has-time'}';
+      final payload = {'value': operationId};
       await db.insert('outbox', {
         'operation_id': operationId,
-        'entity_type': type,
-        'entity_id': 'entity-$type',
+        'entity_type': item.type,
+        'entity_id': 'entity-${item.type}',
         'operation_type': 'CREATE',
-        'payload': jsonEncode({'value': type}),
-        'status': 'FAILED_TRANSIENT',
-        'remote_disposition': 'CONFIRMED',
-        'attempt_count': 1,
-        'last_attempt_at': '2026-11-01T12:00:00.000Z',
+        'payload': jsonEncode(payload),
+        'status': item.status,
+        'remote_disposition': 'UNSENT',
+        'attempt_count': item.attempts,
+        'last_attempt_at': item.lastAttempt,
         'created_at': '2026-11-01T12:00:00.000Z',
       });
       var httpCalled = false;
@@ -2230,13 +2314,107 @@ void main() {
         whereArgs: [operationId],
       ))
           .single;
-      expect(httpCalled, isFalse, reason: type);
-      expect(row['status'], 'REQUIRES_ATTENTION', reason: type);
-      expect(row['remote_disposition'], 'AMBIGUOUS', reason: type);
-      expect(row['attempt_count'], 1, reason: type);
-      expect(row['last_attempt_at'], '2026-11-01T12:00:00.000Z', reason: type);
+      expect(httpCalled, isFalse, reason: item.type);
+      expect(row['status'], 'REQUIRES_ATTENTION', reason: item.type);
+      expect(row['remote_disposition'], item.expected, reason: item.type);
+      expect(
+        row['last_error'],
+        item.type == 'PART'
+            ? 'PART_TENANCY_REQUIRED'
+            : 'FINANCE_COMMAND_REQUIRED',
+        reason: item.type,
+      );
+      expect(row['attempt_count'], item.attempts, reason: item.type);
+      expect(row['last_attempt_at'], item.lastAttempt, reason: item.type);
+      expect(row['operation_id'], operationId);
+      expect(jsonDecode(row['payload'] as String), payload);
+      final beforeRetry = Map<String, Object?>.from(row);
+      await engine.pushPendingOutbox(lease: _testLease(db));
+      expect(
+        (await db.query('outbox',
+                where: 'operation_id = ?', whereArgs: [operationId]))
+            .single,
+        beforeRetry,
+      );
       await db.delete('outbox',
           where: 'operation_id = ?', whereArgs: [operationId]);
     }
   });
+
+  for (final type in ['PART', 'PAYMENT']) {
+    test('$type v8 429 and timeout history is quarantined before real SyncEngine selection', () async {
+      final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+      final states = [
+        (status: 'FAILED_TRANSIENT', disposition: 'CONFIRMED', error: 'HTTP 429: rate limited'),
+        (status: 'PROCESSING', disposition: 'AMBIGUOUS', error: 'TimeoutException: response timeout'),
+      ];
+      for (var index = 0; index < states.length; index++) {
+        final state = states[index];
+        final operationId = 'legacy-$type-${state.status}-$index';
+        final payload = {'value': operationId};
+        await db.insert('outbox', {
+          'operation_id': operationId,
+          'entity_type': type,
+          'entity_id': 'entity-$type',
+          'operation_type': 'CREATE',
+          'payload': jsonEncode(payload),
+          'status': state.status,
+          'remote_disposition': state.disposition,
+          'attempt_count': 1,
+          'last_attempt_at': '2026-11-01T12:00:00.000Z',
+          'last_error': state.error,
+          'created_at': '2026-11-01T12:00:00.000Z',
+        });
+      }
+
+      await SqliteDatabase.migrateV8ToV9(db);
+      final migratedRows = await db.query(
+        'outbox',
+        where: 'entity_type = ?',
+        whereArgs: [type],
+      );
+      expect(migratedRows, hasLength(states.length));
+      for (final row in migratedRows) {
+        expect(row['status'], 'REQUIRES_ATTENTION', reason: type);
+        expect(row['remote_disposition'], 'AMBIGUOUS', reason: type);
+        expect(row['operation_id'], startsWith('legacy-$type-'));
+        expect(
+          jsonDecode(row['payload'] as String),
+          {'value': row['operation_id']},
+        );
+        expect(row['attempt_count'], 1);
+        expect(row['last_attempt_at'], '2026-11-01T12:00:00.000Z');
+      }
+
+      var httpCalled = false;
+      final engine = SyncEngine(
+        apiClient: ApiClient(
+          baseUrl: 'http://test.api',
+          client: MockHttpClientWithCustomResponses((request) async {
+            httpCalled = true;
+            return http.Response('unexpected', 500);
+          }),
+        ),
+      );
+      final before = migratedRows.map(Map<String, Object?>.from).toList();
+
+      await engine.pushPendingOutbox(lease: _testLease(db));
+      await engine.pushPendingOutbox(lease: _testLease(db));
+
+      expect(httpCalled, isFalse, reason: type);
+      expect(
+        await db.query(
+          'outbox',
+          where: 'entity_type = ?',
+          whereArgs: [type],
+          orderBy: 'operation_id',
+        ),
+        before..sort((a, b) => (a['operation_id'] as String).compareTo(b['operation_id'] as String)),
+      );
+      for (final row in migratedRows) {
+        await db.delete('outbox',
+            where: 'operation_id = ?', whereArgs: [row['operation_id']]);
+      }
+    });
+  }
 }

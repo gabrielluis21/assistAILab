@@ -11,6 +11,48 @@ import '../money/money_minor.dart';
 import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
+// Explicit per-entry errors returned by the v8 /sync/push controller. These
+// prove that the operation was rejected before a successful mutation.
+const Set<String> _v8DefinitiveSyncFailureCodes = {
+  'PART_TENANCY_REQUIRED',
+  'FINANCE_COMMAND_REQUIRED',
+  'SYNC_PAYLOAD_INVALID',
+  'SYNC_ENTITY_CONFLICT',
+  'Equipment ownership cannot be transferred through generic Sync',
+  'organizationId cannot be assigned to Equipment through generic Sync',
+  'organizationPurpose cannot be assigned through generic Sync',
+  'SYNC_PAYLOAD_ALIAS_AMBIGUOUS',
+  'SYNC_MONEY_AMBIGUOUS',
+  'SYNC_V1_MINOR_FIELD_FORBIDDEN',
+  'SYNC_DERIVED_MONEY_FORBIDDEN',
+  'SYNC_MONEY_FIELD_INVALID',
+  'SYNC_ENTITY_ID_MISMATCH',
+  'SYNC_SERVER_OWNED_FIELD',
+  'MONEY_RANGE_INVALID',
+  'MONEY_LEGACY_INVALID',
+  'MONEY_DECIMAL_INVALID',
+  'SYNC_ENTITY_ALREADY_EXISTS',
+  'SYNC_ENTITY_NOT_FOUND',
+  'SYNC_COMMERCIAL_STAFF_REQUIRED',
+  'FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION',
+  'SYNC_ITEM_PARENT_IMMUTABLE',
+  'SYNC_TENANT_MISMATCH',
+  'SYNC_DELETE_MONEY_FORBIDDEN',
+  'SYNC_MONEY_ASSERTION_MISMATCH',
+  'SYNC_V2_REFRESH_REQUIRED',
+  'SYNC_INITIAL_STATUS_SERVER_OWNED',
+  'SYNC_CUSTOMER_RELATION_REQUIRED',
+  'SYNC_EQUIPMENT_CUSTOMER_MISMATCH',
+  'SYNC_TECHNICIAN_TENANT_MISMATCH',
+  'SYNC_ORDER_IDENTITY_IMMUTABLE',
+  'SYNC_STATUS_TRANSITION_INVALID',
+  'FIN_F02_SERVICE_ORDER_GENERIC_DELETE_BLOCKED',
+  'SYNC_CUSTOMER_MISMATCH',
+  'SYNC_CUSTOMER_DELETE_FORBIDDEN',
+  'SYNC_EQUIPMENT_OWNERSHIP_PROTECTED',
+  'SYNC_ENTITY_TYPE_FORBIDDEN',
+};
+
 class SqliteDatabase {
   static const schemaVersion = 9;
 
@@ -529,6 +571,11 @@ class SqliteDatabase {
           (row['remote_disposition'] as String? ?? '').toUpperCase();
       final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
       final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
+      final completeAttemptEvidence =
+          attempts > 0 && row['last_attempt_at'] != null;
+      final lastError = row['last_error'] as String?;
+      final definitiveFailure = lastError != null &&
+          _v8DefinitiveSyncFailureCodes.contains(lastError);
       var newStatus = status;
       var newDisposition = disposition;
 
@@ -536,43 +583,52 @@ class SqliteDatabase {
       final isHistoricalTerminal =
           status == 'SUPERSEDED' || status == 'DISCARDED';
       if (isHistoricalTerminal) {
-        if (disposition == 'UNSENT' || disposition == 'CONFIRMED') continue;
-        if (disposition != 'AMBIGUOUS') {
-          await db.update(
-            'outbox',
-            {'remote_disposition': 'AMBIGUOUS'},
-            where: 'operation_id = ?',
-            whereArgs: [row['operation_id']],
-          );
-        }
-        continue;
-      }
-      if (status == 'PENDING' &&
+        final provenUnsent =
+            disposition == 'UNSENT' && !hasAttemptEvidence;
+        final provenRejected = disposition == 'CONFIRMED' &&
+            completeAttemptEvidence &&
+            definitiveFailure;
+        if (provenUnsent || provenRejected) continue;
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'SYNCED') {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'PENDING' &&
           disposition == 'UNSENT' &&
           !hasAttemptEvidence) {
         continue;
+      } else if (status == 'REQUIRES_ATTENTION' &&
+          disposition == 'UNSENT' &&
+          !hasAttemptEvidence &&
+          _isV8PreSendInterception(row)) {
+        // v8 classified PART/PAYMENT by type. The marker and missing attempt
+        // evidence together prove interception before network I/O.
+        continue;
+      } else if (status == 'FAILED_FATAL' &&
+          disposition == 'CONFIRMED' &&
+          completeAttemptEvidence &&
+          definitiveFailure) {
+        continue;
+      } else if (status == 'CONFLICT' && disposition == 'AMBIGUOUS') {
+        continue;
       }
 
-      if (status == 'PROCESSING' ||
-          status == 'FAILED_TRANSIENT' ||
-          status == 'FAILED_FATAL' ||
-          status == 'CONFLICT' ||
-          status == 'SYNCED' ||
-          disposition == 'AMBIGUOUS' ||
-          disposition == 'CONFIRMED' &&
-              (status == 'REQUIRES_ATTENTION' || status == 'PENDING')) {
-        if (status != 'SUPERSEDED' && status != 'DISCARDED') {
-          newStatus = status == 'CONFLICT' ? 'CONFLICT' : 'REQUIRES_ATTENTION';
-        }
+      if (status == 'CONFLICT') {
+        newStatus = 'CONFLICT';
         newDisposition = 'AMBIGUOUS';
-      } else if (hasAttemptEvidence) {
+      } else if (isHistoricalTerminal) {
+        // Keep terminal history and all identity/payload/attempt fields; only
+        // remove an unproven remote confirmation.
+        newDisposition = 'AMBIGUOUS';
+      } else if (hasAttemptEvidence ||
+          disposition == 'AMBIGUOUS' ||
+          disposition == 'CONFIRMED') {
         newStatus = 'REQUIRES_ATTENTION';
         newDisposition = 'AMBIGUOUS';
-      } else if (status == 'REQUIRES_ATTENTION' && disposition == 'UNSENT') {
-        // v8 used UNSENT for P08 solely from entity type. No v8 marker proves
-        // that a prior request was never transmitted.
-        newDisposition = 'AMBIGUOUS';
-      } else if (disposition != 'UNSENT' && disposition != 'CONFIRMED') {
+      } else if (status == 'PENDING' && disposition == 'UNSENT') {
+        newStatus = 'PENDING';
+        newDisposition = 'UNSENT';
+      } else {
         newStatus = 'REQUIRES_ATTENTION';
         newDisposition = 'AMBIGUOUS';
       }
@@ -586,6 +642,13 @@ class SqliteDatabase {
         );
       }
     }
+  }
+
+  static bool _isV8PreSendInterception(Map<String, Object?> row) {
+    final type = (row['entity_type'] as String? ?? '').toUpperCase();
+    final error = row['last_error'];
+    return (type == 'PART' && error == 'PART_TENANCY_REQUIRED') ||
+        (type == 'PAYMENT' && error == 'FINANCE_COMMAND_REQUIRED');
   }
 
   static Future<void> _ensureServiceOrderOrganizationColumn(

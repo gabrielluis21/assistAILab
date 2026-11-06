@@ -223,6 +223,18 @@ class OutboxDao {
         RemoteDisposition.unsent
       ) ||
       (
+        'PENDING',
+        RemoteDisposition.unsent,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.ambiguous
+      ) ||
+      (
+        'FAILED_TRANSIENT',
+        RemoteDisposition.unsent,
+        'REQUIRES_ATTENTION',
+        RemoteDisposition.ambiguous
+      ) ||
+      (
         'FAILED_TRANSIENT',
         RemoteDisposition.confirmed,
         'REQUIRES_ATTENTION',
@@ -486,6 +498,7 @@ class OutboxDao {
           ('service_orders', 'customer_id'),
           ('pre_acquisitions', 'customer_id'),
           ('equipment_acquisitions', 'customer_id'),
+          ('payments', 'customer_id'),
         ],
       'EQUIPMENT' => const [
           ('service_orders', 'equipment_id'),
@@ -496,6 +509,8 @@ class OutboxDao {
           ('service_order_items', 'service_order_id'),
           ('pre_acquisitions', 'service_order_id'),
           ('equipment_acquisitions', 'service_order_id'),
+          ('payments', 'service_order_id'),
+          ('inventory_movements', 'service_order_id'),
         ],
       'PRE_ACQUISITION' => const [
           ('equipment_acquisitions', 'client_pre_acquisition_id'),
@@ -513,6 +528,39 @@ class OutboxDao {
       if (rows.isNotEmpty) {
         throw OutboxTransitionException(
             '$entityType has dependent rows in $table.');
+      }
+    }
+    final commandTypes = switch (entityType) {
+      'SERVICE_ORDER' => const [
+          'SERVICE_ORDER_QUOTE_PUBLISH',
+          'SERVICE_ORDER_QUOTE_REVISE',
+          'SERVICE_ORDER_RESUME_APPROVED_SCOPE',
+          'SERVICE_ORDER_MARK_READY',
+          'SERVICE_ORDER_MARK_DELIVERED',
+          'CUSTOMER_QUOTE_DECISION',
+          'PAYMENT_CREATE',
+        ],
+      'PRE_ACQUISITION' => const ['EQUIPMENT_ACQUISITION_CREATE'],
+      _ => const <String>[],
+    };
+    if (commandTypes.isNotEmpty) {
+      final intents = await txn.query(
+        'command_intents',
+        columns: ['operation_id'],
+        where:
+            'target_id = ? AND lifecycle_state IN (?, ?, ?) AND command_type IN (${List.filled(commandTypes.length, '?').join(',')})',
+        whereArgs: [
+          entityId,
+          'PENDING',
+          'SENDING',
+          'UNKNOWN',
+          ...commandTypes,
+        ],
+        limit: 1,
+      );
+      if (intents.isNotEmpty) {
+        throw OutboxTransitionException(
+            '$entityType has unresolved command intents targeting it.');
       }
     }
   }

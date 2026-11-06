@@ -264,7 +264,7 @@ void main() {
     expect(await db.query('outbox', orderBy: 'operation_id'), snapshot);
   });
 
-  test('v8 to v9 removes false certainty and is idempotent', () async {
+  test('v8 to v9 classifies historical outcomes from evidence and is idempotent', () async {
     final db = await databaseFactory.openDatabase(inMemoryDatabasePath);
     addTearDown(db.close);
     await db.execute('''CREATE TABLE outbox (
@@ -276,114 +276,50 @@ void main() {
       remote_disposition TEXT NOT NULL)''');
     final cases = <({
       String id,
+      String type,
       String status,
       String disposition,
       int attempts,
       String? lastAttempt,
+      String? lastError,
       String expectedStatus,
       String expectedDisposition,
+      String rationale,
     })>[
-      (
-        id: 'synced',
-        status: 'SYNCED',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'SYNCED',
-        expectedDisposition: 'CONFIRMED'
-      ),
-      (
-        id: 'conflict',
-        status: 'CONFLICT',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'CONFLICT',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'http-4xx',
-        status: 'REQUIRES_ATTENTION',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'REQUIRES_ATTENTION',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'http-429',
-        status: 'FAILED_TRANSIENT',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'REQUIRES_ATTENTION',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'unknown-failure',
-        status: 'FAILED_FATAL',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'REQUIRES_ATTENTION',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'clean-pending',
-        status: 'PENDING',
-        disposition: 'UNSENT',
-        attempts: 0,
-        lastAttempt: null,
-        expectedStatus: 'PENDING',
-        expectedDisposition: 'UNSENT'
-      ),
-      (
-        id: 'attempted-pending',
-        status: 'PENDING',
-        disposition: 'UNSENT',
-        attempts: 1,
-        lastAttempt: null,
-        expectedStatus: 'REQUIRES_ATTENTION',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'p08-v8',
-        status: 'REQUIRES_ATTENTION',
-        disposition: 'UNSENT',
-        attempts: 0,
-        lastAttempt: null,
-        expectedStatus: 'REQUIRES_ATTENTION',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'superseded-ambiguous',
-        status: 'SUPERSEDED',
-        disposition: 'AMBIGUOUS',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'SUPERSEDED',
-        expectedDisposition: 'AMBIGUOUS'
-      ),
-      (
-        id: 'discarded-confirmed',
-        status: 'DISCARDED',
-        disposition: 'CONFIRMED',
-        attempts: 1,
-        lastAttempt: '2026-01-01',
-        expectedStatus: 'DISCARDED',
-        expectedDisposition: 'CONFIRMED'
-      ),
+      (id: 'synced-confirmed', type: 'CUSTOMER', status: 'SYNCED', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: null, expectedStatus: 'SYNCED', expectedDisposition: 'CONFIRMED', rationale: 'Explicit server acknowledgement for this operation id.'),
+      (id: 'conflict-ambiguous', type: 'CUSTOMER', status: 'CONFLICT', disposition: 'AMBIGUOUS', attempts: 1, lastAttempt: '2026-01-01', lastError: 'IDEMPOTENCY_OPERATION_IN_PROGRESS', expectedStatus: 'CONFLICT', expectedDisposition: 'AMBIGUOUS', rationale: 'Conflict does not prove whether the server applied the operation.'),
+      (id: 'conflict-falsely-confirmed', type: 'CUSTOMER', status: 'CONFLICT', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'IDEMPOTENCY_KEY_REUSE', expectedStatus: 'CONFLICT', expectedDisposition: 'AMBIGUOUS', rationale: 'v8 promoted conflicts to confirmed without proof.'),
+      (id: 'superseded-confirmed-no-attempt', type: 'CUSTOMER', status: 'SUPERSEDED', disposition: 'CONFIRMED', attempts: 0, lastAttempt: null, lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'SUPERSEDED', expectedDisposition: 'AMBIGUOUS', rationale: 'Error code without attempt evidence cannot establish the source state.'),
+      (id: 'superseded-confirmed-definitive', type: 'CUSTOMER', status: 'SUPERSEDED', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'SUPERSEDED', expectedDisposition: 'CONFIRMED', rationale: 'Attempt evidence plus a known per-entry FAILED code proves rejection.'),
+      (id: 'superseded-confirmed-unknown', type: 'CUSTOMER', status: 'SUPERSEDED', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'unknown server result', expectedStatus: 'SUPERSEDED', expectedDisposition: 'AMBIGUOUS', rationale: 'Unknown code cannot distinguish failure from an unrecognized response.'),
+      (id: 'superseded-unsent-no-attempt', type: 'CUSTOMER', status: 'SUPERSEDED', disposition: 'UNSENT', attempts: 0, lastAttempt: null, lastError: null, expectedStatus: 'SUPERSEDED', expectedDisposition: 'UNSENT', rationale: 'No attempt evidence supports a local-only supersede.'),
+      (id: 'superseded-unsent-with-attempt', type: 'CUSTOMER', status: 'SUPERSEDED', disposition: 'UNSENT', attempts: 1, lastAttempt: '2026-01-01', lastError: 'HTTP 429: rate limited', expectedStatus: 'SUPERSEDED', expectedDisposition: 'AMBIGUOUS', rationale: 'v8 could downgrade a transmitted PART/PAYMENT operation to UNSENT.'),
+      (id: 'discarded-confirmed-no-attempt', type: 'CUSTOMER', status: 'DISCARDED', disposition: 'CONFIRMED', attempts: 0, lastAttempt: null, lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'DISCARDED', expectedDisposition: 'AMBIGUOUS', rationale: 'Discard status alone is not evidence of remote rejection.'),
+      (id: 'discarded-confirmed-definitive', type: 'CUSTOMER', status: 'DISCARDED', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'DISCARDED', expectedDisposition: 'CONFIRMED', rationale: 'Known individual rejection and transmission evidence are preserved.'),
+      (id: 'discarded-ambiguous', type: 'CUSTOMER', status: 'DISCARDED', disposition: 'AMBIGUOUS', attempts: 1, lastAttempt: '2026-01-01', lastError: 'HTTP 500: internal error', expectedStatus: 'DISCARDED', expectedDisposition: 'AMBIGUOUS', rationale: 'Ambiguous terminal history stays ambiguous.'),
+      (id: 'failed-transient-confirmed', type: 'CUSTOMER', status: 'FAILED_TRANSIENT', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'HTTP 429: rate limited', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Batch 429 cannot prove per-operation non-application.'),
+      (id: 'failed-fatal-definitive', type: 'CUSTOMER', status: 'FAILED_FATAL', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'FAILED_FATAL', expectedDisposition: 'CONFIRMED', rationale: 'Backend emits this per-entry rejection before mutation or after rollback.'),
+      (id: 'failed-fatal-unknown', type: 'CUSTOMER', status: 'FAILED_FATAL', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'SYNC_RESULT_UNKNOWN', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Unknown status/error may have represented an applied operation.'),
+      (id: 'failed-fatal-incomplete-evidence', type: 'CUSTOMER', status: 'FAILED_FATAL', disposition: 'CONFIRMED', attempts: 1, lastAttempt: null, lastError: 'SYNC_ENTITY_ALREADY_EXISTS', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Partial attempt record does not prove the response belongs to this send.'),
+      (id: 'clean-pending', type: 'CUSTOMER', status: 'PENDING', disposition: 'UNSENT', attempts: 0, lastAttempt: null, lastError: null, expectedStatus: 'PENDING', expectedDisposition: 'UNSENT', rationale: 'No attempt evidence; safe for first send.'),
+      (id: 'attempted-pending', type: 'CUSTOMER', status: 'PENDING', disposition: 'UNSENT', attempts: 1, lastAttempt: null, lastError: null, expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Attempt count prevents automatic replay when timestamp is missing.'),
+      (id: 'part-presend', type: 'PART', status: 'REQUIRES_ATTENTION', disposition: 'UNSENT', attempts: 0, lastAttempt: null, lastError: 'PART_TENANCY_REQUIRED', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'UNSENT', rationale: 'Exact v8 interception marker and no attempt prove pre-send interception.'),
+      (id: 'payment-after-attempt', type: 'PAYMENT', status: 'REQUIRES_ATTENTION', disposition: 'UNSENT', attempts: 1, lastAttempt: '2026-01-01', lastError: 'FINANCE_COMMAND_REQUIRED', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'v8 could assign the marker after a previous transmitted attempt.'),
+      (id: 'p08-legacy', type: 'PRE_ACQUISITION', status: 'REQUIRES_ATTENTION', disposition: 'UNSENT', attempts: 0, lastAttempt: null, lastError: 'PRE_ACQUISITION_LOCAL_ONLY', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'v8 had no proven pre-send P08 interception path.'),
+      (id: 'unknown-status', type: 'CUSTOMER', status: 'FUTURE_STATUS', disposition: 'CONFIRMED', attempts: 1, lastAttempt: '2026-01-01', lastError: 'FUTURE_ERROR', expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Unknown state is quarantined without inventing history.'),
+      (id: 'unknown-disposition', type: 'CUSTOMER', status: 'PENDING', disposition: 'FUTURE_DISPOSITION', attempts: 0, lastAttempt: null, lastError: null, expectedStatus: 'REQUIRES_ATTENTION', expectedDisposition: 'AMBIGUOUS', rationale: 'Unknown disposition does not authorize automatic push.'),
     ];
     for (final item in cases) {
       await db.insert('outbox', {
         'operation_id': item.id,
-        'entity_type': 'CUSTOMER',
+        'entity_type': item.type,
         'entity_id': item.id,
         'operation_type': 'CREATE',
         'payload': '{"preserved":true}',
         'created_at': '2026-01-01',
         'attempt_count': item.attempts,
         'last_attempt_at': item.lastAttempt,
+        'last_error': item.lastError,
         'status': item.status,
         'remote_disposition': item.disposition,
       });
@@ -393,12 +329,15 @@ void main() {
     final first = await db.query('outbox', orderBy: 'operation_id');
     for (final item in cases) {
       final row = first.singleWhere((row) => row['operation_id'] == item.id);
-      expect(row['status'], item.expectedStatus, reason: item.id);
+      expect(row['status'], item.expectedStatus, reason: item.rationale);
       expect(row['remote_disposition'], item.expectedDisposition,
-          reason: item.id);
+          reason: item.rationale);
       expect(row['payload'], '{"preserved":true}', reason: item.id);
       expect(row['attempt_count'], item.attempts, reason: item.id);
       expect(row['last_attempt_at'], item.lastAttempt, reason: item.id);
+      expect(row['last_error'], item.lastError, reason: item.id);
+      expect(row['entity_id'], item.id, reason: item.id);
+      expect(row['operation_id'], item.id, reason: item.id);
     }
     await SqliteDatabase.migrateV8ToV9(db);
     expect(await db.query('outbox', orderBy: 'operation_id'), first);
