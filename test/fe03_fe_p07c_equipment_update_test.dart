@@ -348,7 +348,7 @@ void main() {
 
       await handle.database.update(
         'outbox',
-        {'status': 'SYNCED'},
+        {'status': 'SYNCED', 'remote_disposition': 'CONFIRMED'},
         where: 'operation_id = ?',
         whereArgs: [operationId],
       );

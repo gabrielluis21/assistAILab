@@ -194,6 +194,7 @@ Future<Database> _openProjectionDb() {
           operation_id TEXT PRIMARY KEY, entity_type TEXT NOT NULL,
           entity_id TEXT NOT NULL, operation_type TEXT NOT NULL,
           payload TEXT NOT NULL, created_at TEXT NOT NULL,
+          remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
           status TEXT NOT NULL)''');
       },
     ),

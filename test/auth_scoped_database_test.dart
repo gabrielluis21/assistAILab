@@ -166,6 +166,11 @@ void main() {
         scopeGA,
         sessionGeneration: nextSessionGeneration(),
       );
+      await (await SqliteDatabase.instance).delete(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: ['op-A-1'],
+      );
       await outboxDao.insert(itemA);
       final entriesA = await outboxDao.getPendingEntries();
       expect(entriesA.length, equals(1));
@@ -231,6 +236,11 @@ void main() {
       await AuthScopedDatabaseManager.instance.openDatabaseForScope(
         scopeIA,
         sessionGeneration: nextSessionGeneration(),
+      );
+      await (await SqliteDatabase.instance).delete(
+        'outbox',
+        where: 'operation_id = ?',
+        whereArgs: ['op-A-persist'],
       );
       await outboxDao.insert(itemA);
 

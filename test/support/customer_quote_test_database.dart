@@ -61,6 +61,7 @@ Future<Database> openCustomerQuoteTestDatabase() async {
             operation_type TEXT NOT NULL,
             payload TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
             status TEXT NOT NULL
           )
         ''');

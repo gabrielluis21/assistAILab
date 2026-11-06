@@ -11,8 +11,50 @@ import '../money/money_minor.dart';
 import 'sqlite_database_io.dart'
     if (dart.library.html) 'sqlite_database_web.dart';
 
+// Explicit per-entry errors returned by the v8 /sync/push controller. These
+// prove that the operation was rejected before a successful mutation.
+const Set<String> _v8DefinitiveSyncFailureCodes = {
+  'PART_TENANCY_REQUIRED',
+  'FINANCE_COMMAND_REQUIRED',
+  'SYNC_PAYLOAD_INVALID',
+  'SYNC_ENTITY_CONFLICT',
+  'Equipment ownership cannot be transferred through generic Sync',
+  'organizationId cannot be assigned to Equipment through generic Sync',
+  'organizationPurpose cannot be assigned through generic Sync',
+  'SYNC_PAYLOAD_ALIAS_AMBIGUOUS',
+  'SYNC_MONEY_AMBIGUOUS',
+  'SYNC_V1_MINOR_FIELD_FORBIDDEN',
+  'SYNC_DERIVED_MONEY_FORBIDDEN',
+  'SYNC_MONEY_FIELD_INVALID',
+  'SYNC_ENTITY_ID_MISMATCH',
+  'SYNC_SERVER_OWNED_FIELD',
+  'MONEY_RANGE_INVALID',
+  'MONEY_LEGACY_INVALID',
+  'MONEY_DECIMAL_INVALID',
+  'SYNC_ENTITY_ALREADY_EXISTS',
+  'SYNC_ENTITY_NOT_FOUND',
+  'SYNC_COMMERCIAL_STAFF_REQUIRED',
+  'FIN_F02_COMMERCIAL_MUTATION_REQUIRES_QUOTE_REVISION',
+  'SYNC_ITEM_PARENT_IMMUTABLE',
+  'SYNC_TENANT_MISMATCH',
+  'SYNC_DELETE_MONEY_FORBIDDEN',
+  'SYNC_MONEY_ASSERTION_MISMATCH',
+  'SYNC_V2_REFRESH_REQUIRED',
+  'SYNC_INITIAL_STATUS_SERVER_OWNED',
+  'SYNC_CUSTOMER_RELATION_REQUIRED',
+  'SYNC_EQUIPMENT_CUSTOMER_MISMATCH',
+  'SYNC_TECHNICIAN_TENANT_MISMATCH',
+  'SYNC_ORDER_IDENTITY_IMMUTABLE',
+  'SYNC_STATUS_TRANSITION_INVALID',
+  'FIN_F02_SERVICE_ORDER_GENERIC_DELETE_BLOCKED',
+  'SYNC_CUSTOMER_MISMATCH',
+  'SYNC_CUSTOMER_DELETE_FORBIDDEN',
+  'SYNC_EQUIPMENT_OWNERSHIP_PROTECTED',
+  'SYNC_ENTITY_TYPE_FORBIDDEN',
+};
+
 class SqliteDatabase {
-  static const schemaVersion = 7;
+  static const schemaVersion = 9;
 
   /// Retorna o banco de dados ativo no [AuthScopedDatabaseManager].
   ///
@@ -63,13 +105,23 @@ class SqliteDatabase {
         if (oldVersion < 7) {
           await _migrateV6ToV7(db, requireLegacyTable: oldVersion >= 6);
         }
+
+        if (oldVersion < 8) {
+          await _migrateV7ToV8(db);
+        }
+
+        // v8 clients could persist request-level failures and idempotency
+        // conflicts as CONFIRMED. Reclassify those rows before enabling v9.
+        if (oldVersion >= 8 && oldVersion < 9) {
+          await _migrateV8ToV9(db);
+        }
       },
       onOpen: (db) async {
         await _createTables(db);
 
         // Compatibilidade defensiva para instalações antigas que
         // já estavam marcadas como v4 com schema físico incompleto.
-        await _verifyV7Schema(db);
+        await _verifyV9Schema(db);
       },
     );
   }
@@ -89,6 +141,7 @@ class SqliteDatabase {
         last_attempt_at TEXT,
         next_retry_at TEXT,
         last_error TEXT,
+        remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
         status TEXT NOT NULL
       )
     ''');
@@ -424,6 +477,180 @@ class SqliteDatabase {
     }
   }
 
+  /// v7 -> v8 adds an explicit remote outcome marker. Legacy outcomes are
+  /// classified conservatively: any operation that may have reached the API
+  /// remains AMBIGUOUS and cannot re-enter automatic push.
+  static Future<void> _migrateV7ToV8(DatabaseExecutor db) async {
+    final columns = await _columnNames(db, 'outbox');
+    // A present column means this migration already ran. Avoid reinterpreting
+    // rows whose dispositions were established by later Sync responses.
+    if (columns.contains('remote_disposition')) return;
+    await db.execute(
+      "ALTER TABLE outbox ADD COLUMN remote_disposition TEXT NOT NULL DEFAULT 'AMBIGUOUS'",
+    );
+
+    final rows = await db.query('outbox');
+    for (final row in rows) {
+      final status = (row['status'] as String? ?? '').toUpperCase();
+      final type = (row['entity_type'] as String? ?? '').toUpperCase();
+      final error = (row['last_error'] as String?) ?? '';
+      final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
+      final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
+      var disposition = 'AMBIGUOUS';
+      var newStatus = status;
+
+      switch (status) {
+        case 'SYNCED':
+          disposition = 'CONFIRMED';
+          break;
+        case 'PENDING':
+          if (!hasAttemptEvidence) {
+            disposition = 'UNSENT';
+          } else {
+            newStatus = 'REQUIRES_ATTENTION';
+          }
+          break;
+        case 'PROCESSING':
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'FAILED':
+          // Legacy FAILED is produced after a push attempt. Missing retry
+          // metadata cannot prove that the server did not apply the operation.
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'CONFLICT':
+          // v7 did not retain enough error detail to distinguish a domain
+          // rejection from an unresolved idempotency reservation.
+          disposition = 'AMBIGUOUS';
+          break;
+        case 'FAILED_TRANSIENT':
+        case 'FAILED_FATAL':
+          // Legacy status names did not prove whether the whole request or
+          // the individual operation was rejected.
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+        case 'SUPERSEDED':
+        case 'DISCARDED':
+          // Keep the history state, but do not treat it as safe without the
+          // disposition that v7 did not persist.
+          break;
+        case 'REQUIRES_ATTENTION':
+          final preSendMarker =
+              (type == 'PART' && error == 'PART_TENANCY_REQUIRED') ||
+                  (type == 'PAYMENT' && error == 'FINANCE_COMMAND_REQUIRED') ||
+                  (type == 'PRE_ACQUISITION' &&
+                      error == 'PRE_ACQUISITION_LOCAL_ONLY');
+          if (!hasAttemptEvidence && preSendMarker) {
+            disposition = 'UNSENT';
+          } else if (error.startsWith(
+            'FE02B_LEGACY_MONEY_RECONCILIATION_REQUIRED',
+          )) {
+            disposition = 'AMBIGUOUS';
+          }
+          break;
+        default:
+          newStatus = 'REQUIRES_ATTENTION';
+          break;
+      }
+
+      await db.update(
+        'outbox',
+        {'status': newStatus, 'remote_disposition': disposition},
+        where: 'operation_id = ?',
+        whereArgs: [row['operation_id']],
+      );
+    }
+  }
+
+  /// v8 -> v9 removes false certainty written by the audited v8 Sync engine.
+  static Future<void> _migrateV8ToV9(DatabaseExecutor db) async {
+    final rows = await db.query('outbox');
+    for (final row in rows) {
+      final status = (row['status'] as String? ?? '').toUpperCase();
+      final disposition =
+          (row['remote_disposition'] as String? ?? '').toUpperCase();
+      final attempts = (row['attempt_count'] as num?)?.toInt() ?? 0;
+      final hasAttemptEvidence = attempts > 0 || row['last_attempt_at'] != null;
+      final completeAttemptEvidence =
+          attempts > 0 && row['last_attempt_at'] != null;
+      final lastError = row['last_error'] as String?;
+      final definitiveFailure = lastError != null &&
+          _v8DefinitiveSyncFailureCodes.contains(lastError);
+      var newStatus = status;
+      var newDisposition = disposition;
+
+      if (status == 'SYNCED' && disposition == 'CONFIRMED') continue;
+      final isHistoricalTerminal =
+          status == 'SUPERSEDED' || status == 'DISCARDED';
+      if (isHistoricalTerminal) {
+        final provenUnsent =
+            disposition == 'UNSENT' && !hasAttemptEvidence;
+        final provenRejected = disposition == 'CONFIRMED' &&
+            completeAttemptEvidence &&
+            definitiveFailure;
+        if (provenUnsent || provenRejected) continue;
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'SYNCED') {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'PENDING' &&
+          disposition == 'UNSENT' &&
+          !hasAttemptEvidence) {
+        continue;
+      } else if (status == 'REQUIRES_ATTENTION' &&
+          disposition == 'UNSENT' &&
+          !hasAttemptEvidence &&
+          _isV8PreSendInterception(row)) {
+        // v8 classified PART/PAYMENT by type. The marker and missing attempt
+        // evidence together prove interception before network I/O.
+        continue;
+      } else if (status == 'FAILED_FATAL' &&
+          disposition == 'CONFIRMED' &&
+          completeAttemptEvidence &&
+          definitiveFailure) {
+        continue;
+      } else if (status == 'CONFLICT' && disposition == 'AMBIGUOUS') {
+        continue;
+      }
+
+      if (status == 'CONFLICT') {
+        newStatus = 'CONFLICT';
+        newDisposition = 'AMBIGUOUS';
+      } else if (isHistoricalTerminal) {
+        // Keep terminal history and all identity/payload/attempt fields; only
+        // remove an unproven remote confirmation.
+        newDisposition = 'AMBIGUOUS';
+      } else if (hasAttemptEvidence ||
+          disposition == 'AMBIGUOUS' ||
+          disposition == 'CONFIRMED') {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      } else if (status == 'PENDING' && disposition == 'UNSENT') {
+        newStatus = 'PENDING';
+        newDisposition = 'UNSENT';
+      } else {
+        newStatus = 'REQUIRES_ATTENTION';
+        newDisposition = 'AMBIGUOUS';
+      }
+
+      if (newStatus != status || newDisposition != disposition) {
+        await db.update(
+          'outbox',
+          {'status': newStatus, 'remote_disposition': newDisposition},
+          where: 'operation_id = ?',
+          whereArgs: [row['operation_id']],
+        );
+      }
+    }
+  }
+
+  static bool _isV8PreSendInterception(Map<String, Object?> row) {
+    final type = (row['entity_type'] as String? ?? '').toUpperCase();
+    final error = row['last_error'];
+    return (type == 'PART' && error == 'PART_TENANCY_REQUIRED') ||
+        (type == 'PAYMENT' && error == 'FINANCE_COMMAND_REQUIRED');
+  }
+
   static Future<void> _ensureServiceOrderOrganizationColumn(
     Database db,
   ) async {
@@ -450,6 +677,14 @@ class SqliteDatabase {
         await _createCommandIntentTable(txn);
         await _migrateV6ToV7(txn, requireLegacyTable: true);
       });
+
+  /// Transactional v7 -> v8 migration entry point for deterministic tests.
+  static Future<void> migrateV7ToV8(Database db) =>
+      db.transaction(_migrateV7ToV8);
+
+  /// Transactional v8 -> v9 correction entry point for deterministic tests.
+  static Future<void> migrateV8ToV9(Database db) =>
+      db.transaction(_migrateV8ToV9);
 
   /// Idempotent additive schema migration for the local-only pre-acquisition
   /// workflow. The baseline keeps schema version 7, while [_createTables]
@@ -789,7 +1024,7 @@ class SqliteDatabase {
     }
   }
 
-  static Future<void> _verifyV7Schema(Database db) async {
+  static Future<void> _verifyV9Schema(Database db) async {
     await _verifyV6Schema(db);
     if (await _tableExists(db, 'payment_command_intents')) {
       throw StateError('Legacy Payment command authority remains in v7.');
@@ -807,6 +1042,9 @@ class SqliteDatabase {
     if (columns.length != expectedColumns.length ||
         !columns.containsAll(expectedColumns)) {
       throw StateError('SQLite v7 command intent schema is incomplete.');
+    }
+    if (!(await _columnNames(db, 'outbox')).contains('remote_disposition')) {
+      throw StateError('SQLite v9 Outbox schema is incomplete.');
     }
     const expectedPreAcquisitionColumns = {
       'id',

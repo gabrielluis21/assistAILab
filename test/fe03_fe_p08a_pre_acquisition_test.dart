@@ -78,7 +78,7 @@ void main() {
   group('FE03-P08-A SQLite schema extension', () {
     test('migration creates the complete constrained table idempotently',
         () async {
-      expect(SqliteDatabase.schemaVersion, 7);
+      expect(SqliteDatabase.schemaVersion, 9);
       final db = await databaseFactoryFfi.openDatabase(
         inMemoryDatabasePath,
         options: OpenDatabaseOptions(singleInstance: false),
