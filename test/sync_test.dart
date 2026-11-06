@@ -85,6 +85,31 @@ class FakeOutboxDao extends OutboxDao {
       pendingItems;
 }
 
+class _ConcurrentOutboxMutationDao extends OutboxDao {
+  final Database db;
+  final String operationId;
+
+  _ConcurrentOutboxMutationDao(this.db, this.operationId);
+
+  @override
+  Future<List<OutboxItem>> getPendingEntries({
+    int limit = 20,
+    DatabaseExecutor? executor,
+  }) async {
+    final entries = await super.getPendingEntries(
+      limit: limit,
+      executor: executor,
+    );
+    await db.update(
+      'outbox',
+      {'attempt_count': 1},
+      where: 'operation_id = ?',
+      whereArgs: [operationId],
+    );
+    return entries;
+  }
+}
+
 class FakeSyncEngine extends SyncEngine {
   int pushCount = 0;
   int pullCount = 0;
@@ -674,7 +699,9 @@ void main() {
       await db.delete('customers', where: 'id = ?', whereArgs: [customerId]);
     });
 
-    test('backend FAILED domain, validation, and authorization rejections are definitive', () async {
+    test(
+        'backend FAILED domain, validation, and authorization rejections are definitive',
+        () async {
       final db = await SqliteDatabase.instance;
       for (final error in [
         'SYNC_ENTITY_ALREADY_EXISTS',
@@ -2260,12 +2287,48 @@ void main() {
   test('PART and PAYMENT pre-send intercept only as proven UNSENT', () async {
     final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
     for (final item in [
-      (type: 'PART', status: 'PENDING', attempts: 0, lastAttempt: null, expected: 'UNSENT'),
-      (type: 'PAYMENT', status: 'PENDING', attempts: 0, lastAttempt: null, expected: 'UNSENT'),
-      (type: 'PART', status: 'PENDING', attempts: 1, lastAttempt: null, expected: 'AMBIGUOUS'),
-      (type: 'PAYMENT', status: 'PENDING', attempts: 1, lastAttempt: null, expected: 'AMBIGUOUS'),
-      (type: 'PART', status: 'FAILED_TRANSIENT', attempts: 0, lastAttempt: null, expected: 'AMBIGUOUS'),
-      (type: 'PAYMENT', status: 'FAILED_TRANSIENT', attempts: 0, lastAttempt: null, expected: 'AMBIGUOUS'),
+      (
+        type: 'PART',
+        status: 'PENDING',
+        attempts: 0,
+        lastAttempt: null,
+        expected: 'UNSENT'
+      ),
+      (
+        type: 'PAYMENT',
+        status: 'PENDING',
+        attempts: 0,
+        lastAttempt: null,
+        expected: 'UNSENT'
+      ),
+      (
+        type: 'PART',
+        status: 'PENDING',
+        attempts: 1,
+        lastAttempt: null,
+        expected: 'AMBIGUOUS'
+      ),
+      (
+        type: 'PAYMENT',
+        status: 'PENDING',
+        attempts: 1,
+        lastAttempt: null,
+        expected: 'AMBIGUOUS'
+      ),
+      (
+        type: 'PART',
+        status: 'FAILED_TRANSIENT',
+        attempts: 0,
+        lastAttempt: null,
+        expected: 'AMBIGUOUS'
+      ),
+      (
+        type: 'PAYMENT',
+        status: 'FAILED_TRANSIENT',
+        attempts: 0,
+        lastAttempt: null,
+        expected: 'AMBIGUOUS'
+      ),
       (
         type: 'PART',
         status: 'PENDING',
@@ -2319,9 +2382,11 @@ void main() {
       expect(row['remote_disposition'], item.expected, reason: item.type);
       expect(
         row['last_error'],
-        item.type == 'PART'
-            ? 'PART_TENANCY_REQUIRED'
-            : 'FINANCE_COMMAND_REQUIRED',
+        item.attempts > 0 || item.lastAttempt != null
+            ? 'OUTBOX_UNSAFE_AUTOMATIC_SELECTION'
+            : item.type == 'PART'
+                ? 'PART_TENANCY_REQUIRED'
+                : 'FINANCE_COMMAND_REQUIRED',
         reason: item.type,
       );
       expect(row['attempt_count'], item.attempts, reason: item.type);
@@ -2342,11 +2407,21 @@ void main() {
   });
 
   for (final type in ['PART', 'PAYMENT']) {
-    test('$type v8 429 and timeout history is quarantined before real SyncEngine selection', () async {
+    test(
+        '$type v8 429 and timeout history is quarantined before real SyncEngine selection',
+        () async {
       final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
       final states = [
-        (status: 'FAILED_TRANSIENT', disposition: 'CONFIRMED', error: 'HTTP 429: rate limited'),
-        (status: 'PROCESSING', disposition: 'AMBIGUOUS', error: 'TimeoutException: response timeout'),
+        (
+          status: 'FAILED_TRANSIENT',
+          disposition: 'CONFIRMED',
+          error: 'HTTP 429: rate limited'
+        ),
+        (
+          status: 'PROCESSING',
+          disposition: 'AMBIGUOUS',
+          error: 'TimeoutException: response timeout'
+        ),
       ];
       for (var index = 0; index < states.length; index++) {
         final state = states[index];
@@ -2409,7 +2484,9 @@ void main() {
           whereArgs: [type],
           orderBy: 'operation_id',
         ),
-        before..sort((a, b) => (a['operation_id'] as String).compareTo(b['operation_id'] as String)),
+        before
+          ..sort((a, b) => (a['operation_id'] as String)
+              .compareTo(b['operation_id'] as String)),
       );
       for (final row in migratedRows) {
         await db.delete('outbox',
@@ -2417,4 +2494,217 @@ void main() {
       }
     });
   }
+
+  test(
+      'SyncEngine quarantines all customer equipment and service order attempt evidence before HTTP',
+      () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    final cases = <({String type, int attempts, String? lastAttempt})>[
+      for (final type in ['CUSTOMER', 'EQUIPMENT', 'SERVICE_ORDER']) ...[
+        (type: type, attempts: 1, lastAttempt: '2026-11-01T12:00:00.000Z'),
+        (type: type, attempts: 1, lastAttempt: null),
+        (type: type, attempts: 0, lastAttempt: '2026-11-01T12:00:00.000Z'),
+      ],
+    ];
+    final saved = <String, Map<String, Object?>>{};
+    for (var index = 0; index < cases.length; index++) {
+      final item = cases[index];
+      final operationId = 'r3-${item.type.toLowerCase()}-$index';
+      final payload = {'preserve': operationId};
+      final error = 'existing-history-$index';
+      await db.insert('outbox', {
+        'operation_id': operationId,
+        'entity_type': item.type,
+        'entity_id': 'entity-$index',
+        'operation_type': 'CREATE',
+        'payload': jsonEncode(payload),
+        'status': 'PENDING',
+        'remote_disposition': 'UNSENT',
+        'attempt_count': item.attempts,
+        'last_attempt_at': item.lastAttempt,
+        'last_error': error,
+        'created_at': '2026-11-01T12:00:00.000Z',
+      });
+      saved[operationId] = {
+        'payload': payload,
+        'last_error': error,
+        'attempt_count': item.attempts,
+        'last_attempt_at': item.lastAttempt,
+      };
+    }
+
+    var pushCalls = 0;
+    final engine = SyncEngine(
+      apiClient: ApiClient(
+        baseUrl: 'http://test.api',
+        client: MockHttpClientWithCustomResponses((request) async {
+          if (request.url.path == '/sync/push') pushCalls++;
+          return http.Response('unexpected', 500);
+        }),
+      ),
+    );
+    await engine.pushPendingOutbox(lease: _testLease(db));
+    await engine.pushPendingOutbox(lease: _testLease(db));
+
+    expect(pushCalls, 0);
+    for (final entry in saved.entries) {
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: [entry.key]))
+          .single;
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['operation_id'], entry.key);
+      expect(jsonDecode(row['payload'] as String), entry.value['payload']);
+      expect(row['last_error'], contains(entry.value['last_error']));
+      expect(row['last_error'], contains('OUTBOX_UNSAFE_AUTOMATIC_SELECTION'));
+      expect(row['attempt_count'], entry.value['attempt_count']);
+      expect(row['last_attempt_at'], entry.value['last_attempt_at']);
+      await db
+          .delete('outbox', where: 'operation_id = ?', whereArgs: [entry.key]);
+    }
+  });
+
+  test(
+      'inconsistent disposition is quarantined before SyncEngine can call HTTP',
+      () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    const operationId = 'r3-inconsistent-disposition';
+    const payload = {'preserve': 'inconsistent'};
+    await db.insert('outbox', {
+      'operation_id': operationId,
+      'entity_type': 'SERVICE_ORDER',
+      'entity_id': 'inconsistent-service-order',
+      'operation_type': 'CREATE',
+      'payload': jsonEncode(payload),
+      'status': 'PENDING',
+      'remote_disposition': 'CONFIRMED',
+      'attempt_count': 0,
+      'last_attempt_at': null,
+      'last_error': 'prior diagnostic',
+      'created_at': DateTime.now().toIso8601String(),
+    });
+    var pushCalls = 0;
+    final engine = SyncEngine(
+      apiClient: ApiClient(
+        baseUrl: 'http://test.api',
+        client: MockHttpClientWithCustomResponses((request) async {
+          if (request.url.path == '/sync/push') pushCalls++;
+          return http.Response('unexpected', 500);
+        }),
+      ),
+    );
+
+    await engine.pushPendingOutbox(lease: _testLease(db));
+    final row = (await db.query('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]))
+        .single;
+    expect(pushCalls, 0);
+    expect(row['status'], 'REQUIRES_ATTENTION');
+    expect(row['remote_disposition'], 'AMBIGUOUS');
+    expect(row['last_error'],
+        'prior diagnostic | OUTBOX_UNSAFE_AUTOMATIC_SELECTION');
+    expect(row['operation_id'], operationId);
+    expect(jsonDecode(row['payload'] as String), payload);
+    expect(row['attempt_count'], 0);
+    expect(row['last_attempt_at'], isNull);
+    await db
+        .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
+  });
+
+  test(
+      'safe due FAILED_TRANSIENT retry with no attempt evidence remains eligible',
+      () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    const operationId = 'r3-safe-retry';
+    await db.insert('outbox', {
+      'operation_id': operationId,
+      'entity_type': 'CUSTOMER',
+      'entity_id': 'safe-retry-customer',
+      'operation_type': 'CREATE',
+      'payload': jsonEncode({'name': 'safe retry'}),
+      'status': 'FAILED_TRANSIENT',
+      'remote_disposition': 'UNSENT',
+      'attempt_count': 0,
+      'last_attempt_at': null,
+      'next_retry_at': null,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+    var pushCalls = 0;
+    final engine = SyncEngine(
+      apiClient: ApiClient(
+        baseUrl: 'http://test.api',
+        client: MockHttpClientWithCustomResponses((request) async {
+          if (request.url.path == '/sync/push') {
+            pushCalls++;
+            return http.Response(
+              jsonEncode({
+                'results': [
+                  {'operationId': operationId, 'status': 'SYNCED'}
+                ]
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
+          return http.Response('Not Found', 404);
+        }),
+      ),
+    );
+
+    final summary = await engine.pushPendingOutbox(lease: _testLease(db));
+    final row = (await db.query('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]))
+        .single;
+    expect(pushCalls, 1);
+    expect(summary.syncedCount, 1);
+    expect(row['status'], 'SYNCED');
+    expect(row['attempt_count'], 1);
+    await db
+        .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
+  });
+
+  test(
+      'conditional claim prevents HTTP when attempt evidence appears after selection',
+      () async {
+    final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+    const operationId = 'r3-concurrent-attempt';
+    await db.insert('outbox', {
+      'operation_id': operationId,
+      'entity_type': 'CUSTOMER',
+      'entity_id': 'concurrent-customer',
+      'operation_type': 'CREATE',
+      'payload': jsonEncode({'name': 'concurrent'}),
+      'status': 'PENDING',
+      'remote_disposition': 'UNSENT',
+      'attempt_count': 0,
+      'last_attempt_at': null,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+    var pushCalls = 0;
+    final engine = SyncEngine(
+      apiClient: ApiClient(
+        baseUrl: 'http://test.api',
+        client: MockHttpClientWithCustomResponses((request) async {
+          if (request.url.path == '/sync/push') pushCalls++;
+          return http.Response('unexpected', 500);
+        }),
+      ),
+      outboxDao: _ConcurrentOutboxMutationDao(db, operationId),
+    );
+
+    await expectLater(
+      engine.pushPendingOutbox(lease: _testLease(db)),
+      throwsA(isA<OutboxTransitionException>()),
+    );
+    final row = (await db.query('outbox',
+            where: 'operation_id = ?', whereArgs: [operationId]))
+        .single;
+    expect(pushCalls, 0);
+    expect(row['status'], 'PENDING');
+    expect(row['remote_disposition'], 'UNSENT');
+    expect(row['attempt_count'], 1);
+    expect(jsonDecode(row['payload'] as String), {'name': 'concurrent'});
+    await db
+        .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
+  });
 }

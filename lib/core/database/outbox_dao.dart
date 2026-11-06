@@ -149,15 +149,94 @@ class OutboxDao {
   }) async {
     final db = executor ?? await SqliteDatabase.instance;
     final nowIso = DateTime.now().toIso8601String();
+    if (db is Database) {
+      return db.transaction(
+        (txn) => _getPendingEntries(txn, limit: limit, nowIso: nowIso),
+      );
+    }
+    return _getPendingEntries(db, limit: limit, nowIso: nowIso);
+  }
+
+  Future<List<OutboxItem>> _getPendingEntries(
+    DatabaseExecutor db, {
+    required int limit,
+    required String nowIso,
+  }) async {
+    await _quarantineInconsistentPendingEntries(db);
     final maps = await db.query(
       'outbox',
       where:
-          "status IN ('PENDING', 'FAILED_TRANSIENT') AND remote_disposition = 'UNSENT' AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+          "status IN ('PENDING', 'FAILED_TRANSIENT') AND remote_disposition = 'UNSENT' AND attempt_count = 0 AND last_attempt_at IS NULL AND (next_retry_at IS NULL OR next_retry_at <= ?)",
       whereArgs: [nowIso],
       orderBy: 'created_at ASC',
       limit: limit,
     );
     return maps.map((m) => OutboxItem.fromMap(m)).toList();
+  }
+
+  /// Moves active rows with inconsistent remote state or prior-attempt
+  /// evidence out of automatic selection. The compare-and-set protects a row
+  /// that another writer changed after this query.
+  Future<void> _quarantineInconsistentPendingEntries(
+    DatabaseExecutor db,
+  ) async {
+    final rows = await db.query(
+      'outbox',
+      where: """
+        status IN ('PENDING', 'FAILED_TRANSIENT') AND (
+          remote_disposition IS NULL OR remote_disposition != 'UNSENT' OR
+          attempt_count != 0 OR last_attempt_at IS NOT NULL
+        )
+      """,
+    );
+    for (final row in rows) {
+      final previousError = row['last_error'];
+      const marker = 'OUTBOX_UNSAFE_AUTOMATIC_SELECTION';
+      final error = previousError is String && previousError.isNotEmpty
+          ? '$previousError | $marker'
+          : marker;
+      final where = StringBuffer(
+        'operation_id = ? AND status = ? AND last_error ',
+      );
+      final whereArgs = <Object?>[row['operation_id'], row['status']];
+      if (row['last_error'] == null) {
+        where.write('IS NULL');
+      } else {
+        where.write('= ?');
+        whereArgs.add(row['last_error']);
+      }
+      where.write(' AND remote_disposition ');
+      if (row['remote_disposition'] == null) {
+        where.write('IS NULL');
+      } else {
+        where.write('= ?');
+        whereArgs.add(row['remote_disposition']);
+      }
+      where.write(' AND attempt_count ');
+      if (row['attempt_count'] == null) {
+        where.write('IS NULL');
+      } else {
+        where.write('= ?');
+        whereArgs.add(row['attempt_count']);
+      }
+      where.write(' AND last_attempt_at ');
+      if (row['last_attempt_at'] == null) {
+        where.write('IS NULL');
+      } else {
+        where.write('= ?');
+        whereArgs.add(row['last_attempt_at']);
+      }
+      await db.update(
+        'outbox',
+        {
+          'status': 'REQUIRES_ATTENTION',
+          'remote_disposition': 'AMBIGUOUS',
+          'last_error': error,
+        },
+        where: where.toString(),
+        whereArgs: whereArgs,
+      );
+    }
   }
 
   Future<void> transition({
@@ -170,8 +249,21 @@ class OutboxDao {
     String? lastAttemptAt,
     String? nextRetryAt,
     String? lastError,
+    bool requireUnattempted = false,
     DatabaseExecutor? executor,
   }) async {
+    if (requireUnattempted &&
+        (!{
+              OutboxStatus.pending.value,
+              OutboxStatus.failedTransient.value,
+            }.contains(fromStatus) ||
+            fromDisposition != RemoteDisposition.unsent ||
+            toStatus != OutboxStatus.processing.value ||
+            toDisposition != RemoteDisposition.ambiguous)) {
+      throw const OutboxTransitionException(
+        'Unattempted compare-and-set is only valid when claiming an UNSENT operation.',
+      );
+    }
     final allowed =
         switch ((fromStatus, fromDisposition, toStatus, toDisposition)) {
       (
@@ -257,11 +349,22 @@ class OutboxDao {
       if (nextRetryAt != null) 'next_retry_at': nextRetryAt,
       if (lastError != null) 'last_error': lastError,
     };
+    final where = StringBuffer(
+      'operation_id = ? AND status = ? AND remote_disposition = ?',
+    );
+    final whereArgs = <Object?>[
+      operationId,
+      fromStatus,
+      fromDisposition.value,
+    ];
+    if (requireUnattempted) {
+      where.write(' AND attempt_count = 0 AND last_attempt_at IS NULL');
+    }
     final changed = await db.update(
       'outbox',
       values,
-      where: 'operation_id = ? AND status = ? AND remote_disposition = ?',
-      whereArgs: [operationId, fromStatus, fromDisposition.value],
+      where: where.toString(),
+      whereArgs: whereArgs,
     );
     if (changed != 1) {
       throw OutboxTransitionException(

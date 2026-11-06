@@ -273,11 +273,10 @@ class SyncEngine {
     for (final entry in rawPendingEntries) {
       final type = entry.entityType.toUpperCase();
       if (type == 'PAYMENT' || type == 'PART' || type == 'PRE_ACQUISITION') {
-        final canProveUnsent =
-            entry.status == OutboxStatus.pending.value &&
-                entry.remoteDisposition == RemoteDisposition.unsent &&
-                entry.attemptCount == 0 &&
-                entry.lastAttemptAt == null;
+        final canProveUnsent = entry.status == OutboxStatus.pending.value &&
+            entry.remoteDisposition == RemoteDisposition.unsent &&
+            entry.attemptCount == 0 &&
+            entry.lastAttemptAt == null;
         await outboxDao.transition(
           operationId: entry.operationId,
           fromStatus: entry.status,
@@ -324,6 +323,7 @@ class SyncEngine {
           toDisposition: RemoteDisposition.ambiguous,
           attemptCount: item.attemptCount + 1,
           lastAttemptAt: nowIso,
+          requireUnattempted: true,
           executor: txn,
         );
       }
