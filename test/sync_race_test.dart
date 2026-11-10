@@ -41,9 +41,13 @@ class _CapturingHttpClient extends http.BaseClient {
 
 class _TrackingOutboxDao extends OutboxDao {
   final void Function(String status)? afterResponseTransition;
+  final void Function(String operationId, String toStatus)? onTransition;
   int responseTransitions = 0;
 
-  _TrackingOutboxDao({this.afterResponseTransition});
+  _TrackingOutboxDao({
+    this.afterResponseTransition,
+    this.onTransition,
+  });
 
   @override
   Future<bool> transition({
@@ -76,9 +80,12 @@ class _TrackingOutboxDao extends OutboxDao {
       expectedLastAttemptAt: expectedLastAttemptAt,
       executor: executor,
     );
-    if (toStatus != 'PROCESSING' && changed) {
-      responseTransitions++;
-      afterResponseTransition?.call(toStatus);
+    if (changed) {
+      onTransition?.call(operationId, toStatus);
+      if (toStatus != 'PROCESSING') {
+        responseTransitions++;
+        afterResponseTransition?.call(toStatus);
+      }
     }
     return changed;
   }
@@ -108,14 +115,16 @@ Future<void> _insertPushItem(
   Database db, {
   required String operationId,
   required String name,
+  String entityType = 'CUSTOMER',
+  Map<String, dynamic>? payload,
 }) {
   return OutboxDao().insert(
     OutboxItem(
       operationId: operationId,
-      entityType: 'CUSTOMER',
+      entityType: entityType,
       entityId: 'entity-$operationId',
       operationType: 'CREATE',
-      payload: {'name': name},
+      payload: payload ?? {'name': name},
       createdAt: DateTime.now().toIso8601String(),
     ),
     executor: db,
@@ -439,6 +448,428 @@ void main() {
       expect(row['last_error'], 'newer concurrent state');
       expect(await dbB.query('outbox'), isEmpty);
       expect(transport.recordedRequests, hasLength(1));
+      await dbA.close();
+      await dbB.close();
+    });
+  });
+
+  group('E2-04: Lease Cancellation Guard before HTTP (Intercept and Claim)', () {
+    test('cancellation during PART interception rolls back and performs 0 HTTP',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_part_cancel_a.db');
+      final dbB = await _openRawSyncDatabase('e2_part_cancel_b.db');
+      const op1 = 'e2-part-first';
+      const op2 = 'e2-part-second';
+      await _insertPushItem(dbA,
+          operationId: op1, name: 'Part 1', entityType: 'PART');
+      await _insertPushItem(dbA,
+          operationId: op2, name: 'Part 2', entityType: 'PART');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(jsonEncode({'results': []}), 200);
+      });
+
+      final dao = _TrackingOutboxDao(
+        onTransition: (operationId, toStatus) {
+          if (operationId == op1) {
+            valid = false;
+          }
+        },
+      );
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final summary = await engine.pushPendingOutbox(lease: lease);
+
+      expect(summary.syncedCount, 0);
+      expect(summary.totalProcessed, 0);
+      expect(transport.recordedRequests, isEmpty,
+          reason: 'No HTTP must be issued when lease is cancelled');
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PENDING',
+            reason: 'Rollback must preserve original PENDING status');
+        expect(row['remote_disposition'], 'UNSENT',
+            reason: 'Rollback must preserve original UNSENT disposition');
+        expect(row['attempt_count'], 0,
+            reason: 'attempt_count must remain 0');
+        expect(row['last_attempt_at'], isNull,
+            reason: 'last_attempt_at must remain null');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test('cancellation during PAYMENT interception rolls back and performs 0 HTTP',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_pay_cancel_a.db');
+      final dbB = await _openRawSyncDatabase('e2_pay_cancel_b.db');
+      const op1 = 'e2-pay-first';
+      const op2 = 'e2-pay-second';
+      await _insertPushItem(dbA,
+          operationId: op1, name: 'Pay 1', entityType: 'PAYMENT');
+      await _insertPushItem(dbA,
+          operationId: op2, name: 'Pay 2', entityType: 'PAYMENT');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(jsonEncode({'results': []}), 200);
+      });
+
+      final dao = _TrackingOutboxDao(
+        onTransition: (operationId, toStatus) {
+          if (operationId == op1) {
+            valid = false;
+          }
+        },
+      );
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final summary = await engine.pushPendingOutbox(lease: lease);
+
+      expect(summary.syncedCount, 0);
+      expect(summary.totalProcessed, 0);
+      expect(transport.recordedRequests, isEmpty,
+          reason: 'No HTTP must be issued when lease is cancelled');
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PENDING',
+            reason: 'Rollback must preserve original PENDING status');
+        expect(row['remote_disposition'], 'UNSENT',
+            reason: 'Rollback must preserve original UNSENT disposition');
+        expect(row['attempt_count'], 0,
+            reason: 'attempt_count must remain 0');
+        expect(row['last_attempt_at'], isNull,
+            reason: 'last_attempt_at must remain null');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test(
+        'cancellation during PRE_ACQUISITION interception rolls back and performs 0 HTTP',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_pre_cancel_a.db');
+      final dbB = await _openRawSyncDatabase('e2_pre_cancel_b.db');
+      const op1 = 'e2-pre-first';
+      const op2 = 'e2-pre-second';
+      await _insertPushItem(dbA,
+          operationId: op1, name: 'Pre 1', entityType: 'PRE_ACQUISITION');
+      await _insertPushItem(dbA,
+          operationId: op2, name: 'Pre 2', entityType: 'PRE_ACQUISITION');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(jsonEncode({'results': []}), 200);
+      });
+
+      final dao = _TrackingOutboxDao(
+        onTransition: (operationId, toStatus) {
+          if (operationId == op1) {
+            valid = false;
+          }
+        },
+      );
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final summary = await engine.pushPendingOutbox(lease: lease);
+
+      expect(summary.syncedCount, 0);
+      expect(summary.totalProcessed, 0);
+      expect(transport.recordedRequests, isEmpty,
+          reason: 'No HTTP must be issued when lease is cancelled');
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PENDING',
+            reason: 'Rollback must preserve original PENDING status');
+        expect(row['remote_disposition'], 'UNSENT',
+            reason: 'Rollback must preserve original UNSENT disposition');
+        expect(row['attempt_count'], 0,
+            reason: 'attempt_count must remain 0');
+        expect(row['last_attempt_at'], isNull,
+            reason: 'last_attempt_at must remain null');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test(
+        'cancellation during claim of two operations rolls back both to PENDING/UNSENT and performs 0 HTTP',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_claim_cancel_a.db');
+      final dbB = await _openRawSyncDatabase('e2_claim_cancel_b.db');
+      const op1 = 'e2-claim-first';
+      const op2 = 'e2-claim-second';
+      await _insertPushItem(dbA, operationId: op1, name: 'First');
+      await _insertPushItem(dbA, operationId: op2, name: 'Second');
+
+      final transport = _CapturingHttpClient((request) async {
+        return http.Response(jsonEncode({'results': []}), 200);
+      });
+
+      final dao = _TrackingOutboxDao(
+        onTransition: (operationId, toStatus) {
+          if (operationId == op1 && toStatus == 'PROCESSING') {
+            valid = false;
+          }
+        },
+      );
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: dao,
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final summary = await engine.pushPendingOutbox(lease: lease);
+
+      expect(summary.syncedCount, 0);
+      expect(summary.totalProcessed, 0);
+      expect(transport.recordedRequests, isEmpty,
+          reason: 'No HTTP request must be sent when claim is cancelled');
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PENDING',
+            reason: 'Rollback must preserve PENDING status for both operations');
+        expect(row['remote_disposition'], 'UNSENT',
+            reason: 'Unsent operations must NEVER be left as AMBIGUOUS');
+        expect(row['attempt_count'], 0,
+            reason: 'attemptCount must remain 0 because operation was never sent');
+        expect(row['last_attempt_at'], isNull,
+            reason: 'lastAttemptAt must remain null');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+  });
+
+  group('E2-05: Coordinated Lease Validity and Transaction Commit', () {
+    test(
+        'HTTP 200: suspension immediately before commit detects invalid lease and rolls back all results',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_commit_200_a.db');
+      final dbB = await _openRawSyncDatabase('e2_commit_200_b.db');
+      const op1 = 'e2-c200-first';
+      const op2 = 'e2-c200-second';
+      await _insertPushItem(dbA, operationId: op1, name: 'First');
+      await _insertPushItem(dbA, operationId: op2, name: 'Second');
+
+      final transport = _CapturingHttpClient((request) async {
+        if (request.url.path == '/sync/push') {
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {'operationId': op1, 'status': 'SYNCED'},
+                {'operationId': op2, 'status': 'SYNCED'},
+              ]
+            }),
+            200,
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final processingFinished = Completer<void>();
+      final resumeCommit = Completer<void>();
+
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        onBeforeCommit: (stage) async {
+          if (stage == 'push_http_200') {
+            processingFinished.complete();
+            await resumeCommit.future;
+          }
+        },
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final pushFuture = engine.pushPendingOutbox(lease: lease);
+
+      await processingFinished.future;
+      valid = false;
+      resumeCommit.complete();
+
+      final summary = await pushFuture;
+
+      expect(summary.syncedCount, 0,
+          reason: 'Cancelled summary must report 0 syncedCount');
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PROCESSING',
+            reason:
+                'Rollback must prevent SYNCED commit; items remain in claimed state');
+        expect(row['remote_disposition'], 'AMBIGUOUS',
+            reason: 'Network request was sent, so items remain AMBIGUOUS');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test(
+        'HTTP non-200: suspension immediately before commit detects invalid lease and rolls back quarantine',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_commit_500_a.db');
+      final dbB = await _openRawSyncDatabase('e2_commit_500_b.db');
+      const op1 = 'e2-c500-first';
+      const op2 = 'e2-c500-second';
+      await _insertPushItem(dbA, operationId: op1, name: 'First');
+      await _insertPushItem(dbA, operationId: op2, name: 'Second');
+
+      final transport = _CapturingHttpClient((request) async {
+        if (request.url.path == '/sync/push') {
+          return http.Response('Server Error', 500);
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final processingFinished = Completer<void>();
+      final resumeCommit = Completer<void>();
+
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        onBeforeCommit: (stage) async {
+          if (stage == 'push_http_non_200') {
+            processingFinished.complete();
+            await resumeCommit.future;
+          }
+        },
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final pushFuture = engine.pushPendingOutbox(lease: lease);
+
+      await processingFinished.future;
+      valid = false;
+      resumeCommit.complete();
+
+      final summary = await pushFuture;
+
+      expect(summary.totalProcessed, 2);
+      expect(summary.failedCount, 0);
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PROCESSING',
+            reason: 'Rollback must prevent non-200 transaction commit');
+        expect(row['last_error'], isNull,
+            reason: 'HTTP 500 error must not be persisted on cancelled cycle');
+      }
+
+      await dbA.close();
+      await dbB.close();
+    });
+
+    test(
+        'Catch recovery: suspension immediately before commit detects invalid lease and rolls back error quarantine',
+        () async {
+      var valid = true;
+      final dbA = await _openRawSyncDatabase('e2_commit_catch_a.db');
+      final dbB = await _openRawSyncDatabase('e2_commit_catch_b.db');
+      const op1 = 'e2-catch-first';
+      const op2 = 'e2-catch-second';
+      await _insertPushItem(dbA, operationId: op1, name: 'First');
+      await _insertPushItem(dbA, operationId: op2, name: 'Second');
+
+      final transport = _CapturingHttpClient((request) async {
+        if (request.url.path == '/sync/push') {
+          throw http.ClientException('Simulated network drop');
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      final processingFinished = Completer<void>();
+      final resumeCommit = Completer<void>();
+
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        onBeforeCommit: (stage) async {
+          if (stage == 'push_catch_recovery') {
+            processingFinished.complete();
+            await resumeCommit.future;
+          }
+        },
+      );
+      final lease = SyncLease(
+        db: dbA,
+        credential: BoundCredential.explicit('TOKEN_A'),
+        isCancelled: () => !valid,
+      );
+
+      final pushFuture = engine.pushPendingOutbox(lease: lease);
+
+      await processingFinished.future;
+      valid = false;
+      resumeCommit.complete();
+
+      final summary = await pushFuture;
+
+      expect(summary.totalProcessed, 2);
+      expect(summary.failedCount, 0);
+
+      final rows = await dbA.query('outbox', orderBy: 'operation_id ASC');
+      expect(rows, hasLength(2));
+      for (final row in rows) {
+        expect(row['status'], 'PROCESSING',
+            reason: 'Rollback must prevent catch recovery transaction commit');
+        expect(row['last_error'], isNull,
+            reason:
+                'Network drop error must not be persisted on cancelled cycle');
+      }
+
       await dbA.close();
       await dbB.close();
     });
