@@ -100,13 +100,24 @@ class SyncEngine {
 
   Future<void> saveLocalCursor(
     String cursor, {
-    DatabaseExecutor? executor,
+    required SyncLease lease,
   }) async {
-    final db = executor ?? await SqliteDatabase.instance;
-    await db.insert(
-      'sync_metadata',
-      {'key': 'last_cursor', 'value': cursor},
-      conflictAlgorithm: ConflictAlgorithm.replace,
+    assertWebNoSqlite();
+    final db = lease.db;
+    if (db == null) {
+      throw StateError('A bound SQLite database is required to save a cursor.');
+    }
+    await _runLeasedTransaction(
+      db: db,
+      lease: lease,
+      stage: 'save_cursor',
+      action: (txn) async {
+        await txn.insert(
+          'sync_metadata',
+          {'key': 'last_cursor', 'value': cursor},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      },
     );
   }
 
