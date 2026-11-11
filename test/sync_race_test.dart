@@ -1961,6 +1961,242 @@ void main() {
     });
 
     test(
+        'E2-08-R1: both Unclaim destinations reject missing and null claim IDs',
+        () async {
+      final outboxDao = OutboxDao();
+      for (final destination in ['PENDING', 'FAILED_TRANSIENT']) {
+        for (final explicitNull in [false, true]) {
+          final operationId = 'unclaim-missing-$destination-$explicitNull';
+          await outboxDao.insert(
+            OutboxItem(
+              operationId: operationId,
+              entityType: 'CUSTOMER',
+              entityId: operationId,
+              operationType: 'CREATE',
+              payload: {'name': operationId},
+              createdAt: '2026-01-01T00:00:00.000Z',
+              attemptCount: 4,
+              lastAttemptAt: '2026-01-01T01:00:00.000Z',
+              status: 'PROCESSING',
+              remoteDisposition: RemoteDisposition.ambiguous,
+              claimId: 'claim-current-$operationId',
+            ),
+            executor: db,
+          );
+          final before = (await db.query(
+            'outbox',
+            where: 'operation_id = ?',
+            whereArgs: [operationId],
+          ))
+              .single;
+
+          final arguments = {
+            'operationId': operationId,
+            'fromStatus': 'PROCESSING',
+            'fromDisposition': RemoteDisposition.ambiguous,
+            'toStatus': destination,
+            'toDisposition': RemoteDisposition.unsent,
+            'attemptCount': 0,
+            'clearLastAttemptAt': true,
+            'clearNextRetryAt': true,
+            'clearLastError': true,
+            'clearClaimId': true,
+            'executor': db,
+          };
+          Future<bool> unclaim() => explicitNull
+              ? outboxDao.transition(
+                  operationId: arguments['operationId'] as String,
+                  fromStatus: arguments['fromStatus'] as String,
+                  fromDisposition:
+                      arguments['fromDisposition'] as RemoteDisposition,
+                  toStatus: arguments['toStatus'] as String,
+                  toDisposition:
+                      arguments['toDisposition'] as RemoteDisposition,
+                  attemptCount: arguments['attemptCount'] as int,
+                  clearLastAttemptAt: arguments['clearLastAttemptAt'] as bool,
+                  clearNextRetryAt: arguments['clearNextRetryAt'] as bool,
+                  clearLastError: arguments['clearLastError'] as bool,
+                  clearClaimId: arguments['clearClaimId'] as bool,
+                  expectedClaimId: null,
+                  executor: arguments['executor'] as DatabaseExecutor,
+                )
+              : outboxDao.transition(
+                  operationId: arguments['operationId'] as String,
+                  fromStatus: arguments['fromStatus'] as String,
+                  fromDisposition:
+                      arguments['fromDisposition'] as RemoteDisposition,
+                  toStatus: arguments['toStatus'] as String,
+                  toDisposition:
+                      arguments['toDisposition'] as RemoteDisposition,
+                  attemptCount: arguments['attemptCount'] as int,
+                  clearLastAttemptAt: arguments['clearLastAttemptAt'] as bool,
+                  clearNextRetryAt: arguments['clearNextRetryAt'] as bool,
+                  clearLastError: arguments['clearLastError'] as bool,
+                  clearClaimId: arguments['clearClaimId'] as bool,
+                  executor: arguments['executor'] as DatabaseExecutor,
+                );
+
+          await expectLater(
+            unclaim(),
+            throwsA(isA<OutboxTransitionException>()),
+          );
+          expect(
+            (await db.query(
+              'outbox',
+              where: 'operation_id = ?',
+              whereArgs: [operationId],
+            ))
+                .single,
+            before,
+          );
+        }
+      }
+    });
+
+    test('E2-08-R1: stale Unclaim cannot revert a newer claim', () async {
+      final outboxDao = OutboxDao();
+      for (final destination in ['PENDING', 'FAILED_TRANSIENT']) {
+        final operationId = 'unclaim-stale-$destination';
+        await outboxDao.insert(
+          OutboxItem(
+            operationId: operationId,
+            entityType: 'CUSTOMER',
+            entityId: operationId,
+            operationType: 'CREATE',
+            payload: {'name': operationId},
+            createdAt: '2026-01-01T00:00:00.000Z',
+            attemptCount: 9,
+            lastAttemptAt: '2026-01-02T01:00:00.000Z',
+            nextRetryAt: '2026-01-03T01:00:00.000Z',
+            lastError: 'new claim history',
+            status: 'PROCESSING',
+            remoteDisposition: RemoteDisposition.ambiguous,
+            claimId: 'claim-new-$operationId',
+          ),
+          executor: db,
+        );
+        final before = (await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [operationId],
+        ))
+            .single;
+
+        final changed = await outboxDao.transition(
+          operationId: operationId,
+          fromStatus: 'PROCESSING',
+          fromDisposition: RemoteDisposition.ambiguous,
+          toStatus: destination,
+          toDisposition: RemoteDisposition.unsent,
+          attemptCount: 0,
+          clearLastAttemptAt: true,
+          clearNextRetryAt: true,
+          clearLastError: true,
+          clearClaimId: true,
+          expectedClaimId: 'claim-old-$operationId',
+          executor: db,
+        );
+
+        expect(changed, isFalse);
+        expect(
+          (await db.query(
+            'outbox',
+            where: 'operation_id = ?',
+            whereArgs: [operationId],
+          ))
+              .single,
+          before,
+        );
+      }
+    });
+
+    test(
+        'E2-08-R1: current claim restores both snapshots including null fields',
+        () async {
+      final outboxDao = OutboxDao();
+      final snapshots = <({
+        String status,
+        int attemptCount,
+        String? lastAttemptAt,
+        String? nextRetryAt,
+        String? lastError,
+      })>[
+        (
+          status: 'PENDING',
+          attemptCount: 0,
+          lastAttemptAt: null,
+          nextRetryAt: null,
+          lastError: null,
+        ),
+        (
+          status: 'FAILED_TRANSIENT',
+          attemptCount: 3,
+          lastAttemptAt: '2026-01-01T01:00:00.000Z',
+          nextRetryAt: '2026-01-01T02:00:00.000Z',
+          lastError: 'prior retry error',
+        ),
+      ];
+
+      for (final snapshot in snapshots) {
+        final operationId = 'unclaim-current-${snapshot.status}';
+        final claimId = 'claim-current-$operationId';
+        final payload = {'name': operationId};
+        await outboxDao.insert(
+          OutboxItem(
+            operationId: operationId,
+            entityType: 'CUSTOMER',
+            entityId: operationId,
+            operationType: 'CREATE',
+            payload: payload,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            attemptCount: snapshot.attemptCount + 1,
+            lastAttemptAt: '2026-01-04T01:00:00.000Z',
+            nextRetryAt: snapshot.nextRetryAt,
+            lastError: snapshot.lastError,
+            status: 'PROCESSING',
+            remoteDisposition: RemoteDisposition.ambiguous,
+            claimId: claimId,
+          ),
+          executor: db,
+        );
+
+        final changed = await outboxDao.transition(
+          operationId: operationId,
+          fromStatus: 'PROCESSING',
+          fromDisposition: RemoteDisposition.ambiguous,
+          toStatus: snapshot.status,
+          toDisposition: RemoteDisposition.unsent,
+          attemptCount: snapshot.attemptCount,
+          lastAttemptAt: snapshot.lastAttemptAt,
+          clearLastAttemptAt: snapshot.lastAttemptAt == null,
+          nextRetryAt: snapshot.nextRetryAt,
+          clearNextRetryAt: snapshot.nextRetryAt == null,
+          lastError: snapshot.lastError,
+          clearLastError: snapshot.lastError == null,
+          clearClaimId: true,
+          expectedClaimId: claimId,
+          executor: db,
+        );
+        expect(changed, isTrue);
+
+        final row = (await db.query(
+          'outbox',
+          where: 'operation_id = ?',
+          whereArgs: [operationId],
+        ))
+            .single;
+        expect(row['status'], snapshot.status);
+        expect(row['remote_disposition'], 'UNSENT');
+        expect(row['attempt_count'], snapshot.attemptCount);
+        expect(row['last_attempt_at'], snapshot.lastAttemptAt);
+        expect(row['next_retry_at'], snapshot.nextRetryAt);
+        expect(row['last_error'], snapshot.lastError);
+        expect(row['claim_id'], isNull);
+        expect(jsonDecode(row['payload'] as String), payload);
+      }
+    });
+
+    test(
         'E2-T05: Bootstrap preserva zero escritas em caso de cancelamento durante paginação',
         () async {
       var callCount = 0;

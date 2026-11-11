@@ -304,6 +304,16 @@ class OutboxDao {
     String? expectedClaimId,
     DatabaseExecutor? executor,
   }) async {
+    final isUnclaim = fromStatus == OutboxStatus.processing.value &&
+        fromDisposition == RemoteDisposition.ambiguous &&
+        toDisposition == RemoteDisposition.unsent &&
+        (toStatus == OutboxStatus.pending.value ||
+            toStatus == OutboxStatus.failedTransient.value);
+    if (isUnclaim && expectedClaimId == null) {
+      throw const OutboxTransitionException(
+        'Unclaim requires the claim_id owned by the caller.',
+      );
+    }
     if ((expectedAttemptCount == null) != (expectedLastAttemptAt == null)) {
       throw const OutboxTransitionException(
         'Attempt identity requires both attempt_count and last_attempt_at.',
