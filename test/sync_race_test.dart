@@ -60,9 +60,15 @@ class _TrackingOutboxDao extends OutboxDao {
     String? lastAttemptAt,
     String? nextRetryAt,
     String? lastError,
+    bool clearLastAttemptAt = false,
+    bool clearNextRetryAt = false,
+    bool clearLastError = false,
+    String? claimId,
+    bool clearClaimId = false,
     bool requireUnattempted = false,
     int? expectedAttemptCount,
     String? expectedLastAttemptAt,
+    String? expectedClaimId,
     DatabaseExecutor? executor,
   }) async {
     final changed = await super.transition(
@@ -75,9 +81,15 @@ class _TrackingOutboxDao extends OutboxDao {
       lastAttemptAt: lastAttemptAt,
       nextRetryAt: nextRetryAt,
       lastError: lastError,
+      clearLastAttemptAt: clearLastAttemptAt,
+      clearNextRetryAt: clearNextRetryAt,
+      clearLastError: clearLastError,
+      claimId: claimId,
+      clearClaimId: clearClaimId,
       requireUnattempted: requireUnattempted,
       expectedAttemptCount: expectedAttemptCount,
       expectedLastAttemptAt: expectedLastAttemptAt,
+      expectedClaimId: expectedClaimId,
       executor: executor,
     );
     if (changed) {
@@ -453,7 +465,8 @@ void main() {
     });
   });
 
-  group('E2-04: Lease Cancellation Guard before HTTP (Intercept and Claim)', () {
+  group('E2-04: Lease Cancellation Guard before HTTP (Intercept and Claim)',
+      () {
     test('cancellation during PART interception rolls back and performs 0 HTTP',
         () async {
       var valid = true;
@@ -501,8 +514,7 @@ void main() {
             reason: 'Rollback must preserve original PENDING status');
         expect(row['remote_disposition'], 'UNSENT',
             reason: 'Rollback must preserve original UNSENT disposition');
-        expect(row['attempt_count'], 0,
-            reason: 'attempt_count must remain 0');
+        expect(row['attempt_count'], 0, reason: 'attempt_count must remain 0');
         expect(row['last_attempt_at'], isNull,
             reason: 'last_attempt_at must remain null');
       }
@@ -511,7 +523,8 @@ void main() {
       await dbB.close();
     });
 
-    test('cancellation during PAYMENT interception rolls back and performs 0 HTTP',
+    test(
+        'cancellation during PAYMENT interception rolls back and performs 0 HTTP',
         () async {
       var valid = true;
       final dbA = await _openRawSyncDatabase('e2_pay_cancel_a.db');
@@ -558,8 +571,7 @@ void main() {
             reason: 'Rollback must preserve original PENDING status');
         expect(row['remote_disposition'], 'UNSENT',
             reason: 'Rollback must preserve original UNSENT disposition');
-        expect(row['attempt_count'], 0,
-            reason: 'attempt_count must remain 0');
+        expect(row['attempt_count'], 0, reason: 'attempt_count must remain 0');
         expect(row['last_attempt_at'], isNull,
             reason: 'last_attempt_at must remain null');
       }
@@ -616,8 +628,7 @@ void main() {
             reason: 'Rollback must preserve original PENDING status');
         expect(row['remote_disposition'], 'UNSENT',
             reason: 'Rollback must preserve original UNSENT disposition');
-        expect(row['attempt_count'], 0,
-            reason: 'attempt_count must remain 0');
+        expect(row['attempt_count'], 0, reason: 'attempt_count must remain 0');
         expect(row['last_attempt_at'], isNull,
             reason: 'last_attempt_at must remain null');
       }
@@ -669,11 +680,13 @@ void main() {
       expect(rows, hasLength(2));
       for (final row in rows) {
         expect(row['status'], 'PENDING',
-            reason: 'Rollback must preserve PENDING status for both operations');
+            reason:
+                'Rollback must preserve PENDING status for both operations');
         expect(row['remote_disposition'], 'UNSENT',
             reason: 'Unsent operations must NEVER be left as AMBIGUOUS');
         expect(row['attempt_count'], 0,
-            reason: 'attemptCount must remain 0 because operation was never sent');
+            reason:
+                'attemptCount must remain 0 because operation was never sent');
         expect(row['last_attempt_at'], isNull,
             reason: 'lastAttemptAt must remain null');
       }
@@ -1065,17 +1078,13 @@ void main() {
           ApiClient(baseUrl: 'http://fake.api', client: transport);
       final syncEngine = SyncEngine(apiClient: apiClient);
 
-      int cancelChecks = 0;
+      var cancelled = false;
       final lease = SyncLease(
         db: dbA,
         credential: BoundCredential.explicit('TOKEN_A'),
-        isCancelled: () {
-          cancelChecks++;
-          // Checks 1-5 cover entry/bootstrap/page 1. Check 6 occurs at the
-          // top of the loop before page 2 is dispatched.
-          return cancelChecks >= 6;
-        },
+        isCancelled: () => cancelled,
       );
+      syncEngine.onAfterPullPageCommit = () async => cancelled = true;
 
       final summary = await syncEngine.pullIncrementalChanges(lease: lease);
 
@@ -1633,5 +1642,461 @@ void main() {
             reason: 'last_attempt_at must not be mutated');
       });
     }
+  });
+
+  group(
+      'Etapa 2 — Testes Específicos de Concorrência e Cancelamento (Categorias A a H)',
+      () {
+    late Database db;
+
+    setUp(() async {
+      db = await databaseFactory.openDatabase(inMemoryDatabasePath);
+      await db.execute('''
+        CREATE TABLE outbox (
+          operation_id TEXT PRIMARY KEY,
+          device_id TEXT,
+          user_id TEXT,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          operation_type TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          last_attempt_at TEXT,
+          next_retry_at TEXT,
+          last_error TEXT,
+          remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
+          status TEXT NOT NULL,
+          claim_id TEXT
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE customers (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE sync_metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      ''');
+      await db.insert(
+          'sync_metadata', {'key': 'sync_contract_version', 'value': '2'});
+      await db.insert('sync_metadata',
+          {'key': 'sync_bootstrap_proof', 'value': 'proof-123'});
+      await db.insert('sync_metadata', {'key': 'last_cursor', 'value': '10'});
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    test('E2-T01: Reversão integral via Unclaim CAS restaura snapshot completo',
+        () async {
+      final outboxDao = OutboxDao();
+      final item = OutboxItem(
+        operationId: 'op-unclaim-1',
+        entityType: 'CUSTOMER',
+        entityId: 'c-1',
+        operationType: 'CREATE',
+        payload: {'name': 'Client 1'},
+        createdAt: '2026-01-01T00:00:00.000Z',
+        attemptCount: 0,
+        lastAttemptAt: null,
+        nextRetryAt: '2026-01-01T01:00:00.000Z',
+        lastError: 'PREVIOUS_ERROR',
+        status: 'PENDING',
+        remoteDisposition: RemoteDisposition.unsent,
+      );
+      await outboxDao.insert(item, executor: db);
+
+      var transportInvoked = false;
+      final transport = _CapturingHttpClient((req) async {
+        transportInvoked = true;
+        return http.Response('{"contractVersion":2,"results":[]}', 200);
+      });
+
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: outboxDao,
+      );
+
+      var cancelRequested = false;
+      final lease = SyncLease(
+        db: db,
+        credential: BoundCredential.explicit('TOKEN_1'),
+        isCancelled: () => cancelRequested,
+      );
+
+      engine.onAfterClaimCommit = () async {
+        cancelRequested = true;
+        lease.barrier.requestCancellation();
+      };
+
+      final summary = await engine.pushPendingOutbox(lease: lease);
+
+      expect(summary.syncedCount, 0);
+      expect(transportInvoked, isFalse,
+          reason: 'Transport must never be invoked');
+
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: ['op-unclaim-1']))
+          .first;
+      expect(row['status'], 'PENDING');
+      expect(row['remote_disposition'], 'UNSENT');
+      expect(row['attempt_count'], 0);
+      expect(row['last_attempt_at'], isNull);
+      expect(row['next_retry_at'], '2026-01-01T01:00:00.000Z');
+      expect(row['last_error'], 'PREVIOUS_ERROR');
+      expect(row['claim_id'], isNull);
+    });
+
+    test('E2-T02: Requisição despachada em voo nunca sofre Unclaim', () async {
+      final outboxDao = OutboxDao();
+      final item = OutboxItem(
+        operationId: 'op-inflight-1',
+        entityType: 'CUSTOMER',
+        entityId: 'c-2',
+        operationType: 'CREATE',
+        payload: {'name': 'Client 2'},
+        createdAt: '2026-01-01T00:00:00.000Z',
+        attemptCount: 0,
+        lastAttemptAt: null,
+        status: 'PENDING',
+        remoteDisposition: RemoteDisposition.unsent,
+      );
+      await outboxDao.insert(item, executor: db);
+
+      var cancelRequested = false;
+      final transportStarted = Completer<void>();
+      final transportResume = Completer<http.Response>();
+
+      final transport = _CapturingHttpClient((req) async {
+        transportStarted.complete();
+        return await transportResume.future;
+      });
+
+      final engine = SyncEngine(
+        apiClient: ApiClient(baseUrl: 'http://fake.api', client: transport),
+        outboxDao: outboxDao,
+      );
+
+      final lease = SyncLease(
+        db: db,
+        credential: BoundCredential.explicit('TOKEN_1'),
+        isCancelled: () => cancelRequested,
+      );
+
+      final future = engine.pushPendingOutbox(lease: lease);
+      await transportStarted.future;
+
+      // Now client.send has already been invoked. Request cancellation!
+      cancelRequested = true;
+      lease.barrier.requestCancellation();
+
+      transportResume.complete(http.Response(
+          '{"contractVersion":2,"results":[{"operationId":"op-inflight-1","status":"SYNCED"}]}',
+          200));
+      await future;
+
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: ['op-inflight-1']))
+          .first;
+      expect(row['status'], 'PROCESSING',
+          reason:
+              'Must remain in PROCESSING/AMBIGUOUS because lease was cancelled');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 1);
+      expect(row['last_attempt_at'], isNotNull);
+      expect(row['claim_id'], isNotNull);
+      expect(
+        row['claim_id'],
+        matches(RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          caseSensitive: false,
+        )),
+      );
+      expect(
+        DateTime.tryParse(row['last_attempt_at'] as String),
+        isNotNull,
+      );
+    });
+
+    test('E2-T02a: cancelamento durante preparação de headers faz Unclaim',
+        () async {
+      final outboxDao = OutboxDao();
+      await outboxDao.insert(
+        OutboxItem(
+          operationId: 'op-header-cancel',
+          entityType: 'CUSTOMER',
+          entityId: 'c-header',
+          operationType: 'CREATE',
+          payload: {'name': 'Header cancel'},
+          createdAt: '2026-01-01T00:00:00.000Z',
+          status: 'PENDING',
+          remoteDisposition: RemoteDisposition.unsent,
+        ),
+        executor: db,
+      );
+
+      var cancelRequested = false;
+      var transportInvoked = false;
+      late final SyncLease lease;
+      final transport = _CapturingHttpClient((request) async {
+        transportInvoked = true;
+        return http.Response('unexpected', 500);
+      });
+      final api = ApiClient(
+        baseUrl: 'http://fake.api',
+        client: transport,
+        beforeDispatch: () async {
+          cancelRequested = true;
+          lease.barrier.requestCancellation();
+        },
+      );
+      lease = SyncLease(
+        db: db,
+        credential: BoundCredential.explicit('TOKEN_HEADERS'),
+        isCancelled: () => cancelRequested,
+      );
+
+      await SyncEngine(apiClient: api, outboxDao: outboxDao)
+          .pushPendingOutbox(lease: lease);
+
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: ['op-header-cancel']))
+          .single;
+      expect(transportInvoked, isFalse);
+      expect(row['status'], 'PENDING');
+      expect(row['remote_disposition'], 'UNSENT');
+      expect(row['attempt_count'], 0);
+      expect(row['last_attempt_at'], isNull);
+      expect(row['claim_id'], isNull);
+      expect(lease.barrier.isCancelled, isTrue);
+    });
+
+    test('E2-T03: Drenagem aguarda transação e requisições HTTP em andamento',
+        () async {
+      final barrier = LeaseCommitBarrier();
+      final txStarted = Completer<void>();
+      final txResume = Completer<void>();
+
+      expect(barrier.state, BarrierState.active);
+
+      final txFuture = barrier.runWorkTransaction(
+        db: db,
+        stage: 'test_stage',
+        action: (txn) async {
+          txStarted.complete();
+          await txResume.future;
+        },
+      );
+
+      await txStarted.future;
+      barrier.requestCancellation();
+
+      expect(barrier.isDraining, isTrue);
+      expect(barrier.isCancelled, isFalse);
+
+      var effectiveFired = false;
+      unawaited(barrier.whenEffective.then((_) => effectiveFired = true));
+
+      expect(effectiveFired, isFalse);
+
+      txResume.complete();
+      expect(txFuture, throwsA(isA<SyncLeaseInvalidatedException>()));
+      try {
+        await txFuture;
+      } catch (_) {}
+
+      await barrier.whenEffective;
+      expect(barrier.isCancelled, isTrue);
+      expect(effectiveFired, isTrue);
+    });
+
+    test(
+        'E2-T04: Isolamento absoluto e proteção de claim_id contra respostas tardias de ciclos anteriores',
+        () async {
+      final outboxDao = OutboxDao();
+      final item = OutboxItem(
+        operationId: 'op-stale-1',
+        entityType: 'CUSTOMER',
+        entityId: 'c-3',
+        operationType: 'CREATE',
+        payload: {'name': 'Client 3'},
+        createdAt: '2026-01-01T00:00:00.000Z',
+        attemptCount: 1,
+        lastAttemptAt: '2026-01-01T10:00:00.000Z',
+        status: 'PROCESSING',
+        remoteDisposition: RemoteDisposition.ambiguous,
+        claimId: 'claim-token-NEW',
+      );
+      await outboxDao.insert(item, executor: db);
+
+      // Attempt to confirm with OLD claim_id
+      final successOld = await outboxDao.transition(
+        operationId: 'op-stale-1',
+        fromStatus: 'PROCESSING',
+        fromDisposition: RemoteDisposition.ambiguous,
+        toStatus: 'SYNCED',
+        toDisposition: RemoteDisposition.confirmed,
+        expectedAttemptCount: 1,
+        expectedLastAttemptAt: '2026-01-01T10:00:00.000Z',
+        expectedClaimId: 'claim-token-OLD',
+        executor: db,
+      );
+
+      expect(successOld, isFalse,
+          reason: 'Transition with stale claim_id must fail compare-and-set');
+
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: ['op-stale-1']))
+          .first;
+      expect(row['status'], 'PROCESSING');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['claim_id'], 'claim-token-NEW');
+    });
+
+    test(
+        'E2-T05: Bootstrap preserva zero escritas em caso de cancelamento durante paginação',
+        () async {
+      var callCount = 0;
+      var cancelRequested = false;
+
+      final transport = _CapturingHttpClient((req) async {
+        callCount++;
+        if (callCount == 1) {
+          return http.Response(
+            jsonEncode({
+              'contractVersion': 2,
+              'complete': false,
+              'continuationToken': 'page-2-token',
+              'bootstrapCursor': '100',
+              'records': [
+                {
+                  'entityType': 'CUSTOMER',
+                  'data': {
+                    'id': 'boot-1',
+                    'name': 'Boot 1',
+                    'updated_at': '2026-01-01'
+                  }
+                }
+              ]
+            }),
+            200,
+          );
+        } else {
+          return http.Response(
+            jsonEncode({
+              'contractVersion': 2,
+              'complete': true,
+              'bootstrapProof': 'proof-final',
+              'bootstrapCursor': '100',
+              'records': [
+                {
+                  'entityType': 'CUSTOMER',
+                  'data': {
+                    'id': 'boot-2',
+                    'name': 'Boot 2',
+                    'updated_at': '2026-01-01'
+                  }
+                }
+              ]
+            }),
+            200,
+          );
+        }
+      });
+
+      final lease = SyncLease(
+        db: db,
+        credential: BoundCredential.explicit('TOKEN_BOOT'),
+        isCancelled: () => cancelRequested,
+      );
+
+      // We clear sync_metadata so bootstrap is needed
+      await db.delete('sync_metadata');
+
+      // Cancel between page 1 and page 2
+      // We can intercept by wrapping transport or checking callCount
+      final origHandler = transport.handler;
+      final wrappedTransport = _CapturingHttpClient((req) async {
+        final res = await origHandler(req);
+        if (callCount == 1) {
+          cancelRequested = true;
+        }
+        return res;
+      });
+
+      final engineWithCancel = SyncEngine(
+        apiClient:
+            ApiClient(baseUrl: 'http://fake.api', client: wrappedTransport),
+      );
+
+      await engineWithCancel.ensureV2Bootstrap(lease: lease);
+
+      // Verify ZERO records written to customers
+      final custRows = await db.query('customers');
+      expect(custRows, isEmpty,
+          reason:
+              'Zero writes to projection during interrupted bootstrap pagination');
+
+      // Verify bootstrap proof not written
+      final metaRows = await db.query('sync_metadata');
+      expect(metaRows, isEmpty);
+    });
+
+    test('E2-T06: Timeout de HTTP não cancela transporte e não executa Unclaim',
+        () async {
+      final outboxDao = OutboxDao();
+      final item = OutboxItem(
+        operationId: 'op-timeout-1',
+        entityType: 'CUSTOMER',
+        entityId: 'c-4',
+        operationType: 'CREATE',
+        payload: {'name': 'Client 4'},
+        createdAt: '2026-01-01T00:00:00.000Z',
+        attemptCount: 0,
+        lastAttemptAt: null,
+        status: 'PENDING',
+        remoteDisposition: RemoteDisposition.unsent,
+      );
+      await outboxDao.insert(item, executor: db);
+
+      final lease = SyncLease(
+        db: db,
+        credential: BoundCredential.explicit('TOKEN_TIMEOUT'),
+        isCancelled: () => false,
+      );
+
+      // We do not wait for the 15s real timer; we verify that upon TimeoutException
+      // the catch recovery moves entry to REQUIRES_ATTENTION/AMBIGUOUS, NEVER UNSENT.
+      // We simulate timeout by throwing TimeoutException directly via mock client:
+      final timeoutTransport = _CapturingHttpClient((req) async {
+        throw TimeoutException('Simulated HTTP timeout');
+      });
+
+      final timeoutEngine = SyncEngine(
+        apiClient:
+            ApiClient(baseUrl: 'http://fake.api', client: timeoutTransport),
+        outboxDao: outboxDao,
+      );
+
+      try {
+        await timeoutEngine.pushPendingOutbox(lease: lease);
+      } catch (_) {}
+
+      final row = (await db.query('outbox',
+              where: 'operation_id = ?', whereArgs: ['op-timeout-1']))
+          .first;
+      expect(row['status'], 'REQUIRES_ATTENTION');
+      expect(row['remote_disposition'], 'AMBIGUOUS');
+      expect(row['attempt_count'], 1);
+      expect(row['last_attempt_at'], isNotNull);
+      expect(row['last_error'], contains('Simulated HTTP timeout'));
+    });
   });
 }

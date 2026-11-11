@@ -62,7 +62,8 @@ Future<Database> openCustomerQuoteTestDatabase() async {
             payload TEXT NOT NULL,
             created_at TEXT NOT NULL,
             remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
-            status TEXT NOT NULL
+            status TEXT NOT NULL,
+            claim_id TEXT
           )
         ''');
         await db.execute('''

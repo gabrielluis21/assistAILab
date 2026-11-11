@@ -72,6 +72,7 @@ class BackgroundSyncCoordinator {
   Timer? _debounceTimer;
   int _currentGeneration = 0;
   bool _isDisposed = false;
+  SyncLease? _activeLease;
 
   /// Whether the last completed sync cycle performed any real work.
   bool lastCycleDidWork = false;
@@ -97,6 +98,11 @@ class BackgroundSyncCoordinator {
     _hasPendingCatchUp = false;
     _pendingCatchUpTrigger = null;
     _debounceTimer?.cancel();
+    final lease = _activeLease;
+    if (lease != null) {
+      lease.barrier.requestCancellation();
+      _activeLease = null;
+    }
   }
 
   /// Current synchronization state snapshot.
@@ -174,8 +180,21 @@ class BackgroundSyncCoordinator {
   }) async {
     if (!_isBoundContextCurrent(operationGeneration, handle)) return;
     try {
-      final recovered = await outboxDao.recoverProcessingEntries(
-        executor: handle.database,
+      final lease = SyncLease(
+        db: handle.database,
+        credential: BoundCredential.absent,
+        isCancelled: () => !_isBoundContextCurrent(operationGeneration, handle),
+      );
+      var recovered = 0;
+      await lease.barrier.runWorkTransaction(
+        db: handle.database,
+        stage: 'recover_processing',
+        isCancelled: lease.isCancelled,
+        action: (txn) async {
+          recovered = await outboxDao.recoverProcessingEntries(
+            executor: txn,
+          );
+        },
       );
       if (!_isBoundContextCurrent(operationGeneration, handle)) return;
       if (recovered > 0) {
@@ -253,7 +272,14 @@ class BackgroundSyncCoordinator {
       db: handle.database,
       credential: BoundCredential.explicit(token),
       isCancelled: () => !_isBoundContextCurrent(cycleGeneration, handle),
+      identity: LeaseIdentity(
+        leaseId:
+            'lease-$cycleGeneration-${DateTime.now().microsecondsSinceEpoch}',
+        sequence: cycleGeneration,
+        authScope: binding.scope.canonicalKey,
+      ),
     );
+    _activeLease = lease;
 
     final pendingCount = await _getPendingOutboxCount(
       handle: handle,
@@ -326,6 +352,9 @@ class BackgroundSyncCoordinator {
         pendingOutboxCount: remainingPending,
       ));
     } finally {
+      if (identical(_activeLease, lease)) {
+        _activeLease = null;
+      }
       if (cycleGeneration == _currentGeneration) {
         _isSyncing = false;
         if (_hasPendingCatchUp && !_isDisposed) {

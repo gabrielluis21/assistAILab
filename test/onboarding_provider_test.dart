@@ -119,6 +119,7 @@ final class _RecordingApiClient extends ApiClient {
     String endpoint,
     BoundCredential credential, {
     Map<String, dynamic>? body,
+    SyncLease? lease,
   }) async {
     boundCalls++;
     boundEndpoint = endpoint;

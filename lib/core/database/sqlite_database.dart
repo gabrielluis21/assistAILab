@@ -142,9 +142,14 @@ class SqliteDatabase {
         next_retry_at TEXT,
         last_error TEXT,
         remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
-        status TEXT NOT NULL
+        status TEXT NOT NULL,
+        claim_id TEXT
       )
     ''');
+    // Guard idempotente: bancos já na v9 sem claim_id recebem a coluna.
+    // CREATE TABLE IF NOT EXISTS não adiciona colunas a tabelas existentes,
+    // portanto o ALTER TABLE abaixo é necessário para o caminho onOpen.
+    await _ensureOutboxClaimIdColumn(db);
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS customers (
@@ -477,6 +482,19 @@ class SqliteDatabase {
     }
   }
 
+  /// Garante que a coluna [claim_id] existe na tabela outbox.
+  ///
+  /// Idempotente: não recria a coluna se ela já existir.
+  /// Necessário para bancos que foram criados/atualizados para v9 antes
+  /// da adição do claim_id (e.g., bancos abertos via onOpen sem passar
+  /// pelo _migrateV8ToV9 porque já estavam em schemaVersion = 9).
+  static Future<void> _ensureOutboxClaimIdColumn(DatabaseExecutor db) async {
+    final columns = await _columnNames(db, 'outbox');
+    if (!columns.contains('claim_id')) {
+      await db.execute('ALTER TABLE outbox ADD COLUMN claim_id TEXT');
+    }
+  }
+
   /// v7 -> v8 adds an explicit remote outcome marker. Legacy outcomes are
   /// classified conservatively: any operation that may have reached the API
   /// remains AMBIGUOUS and cannot re-enter automatic push.
@@ -562,8 +580,14 @@ class SqliteDatabase {
     }
   }
 
-  /// v8 -> v9 removes false certainty written by the audited v8 Sync engine.
+  /// v8 -> v9 removes false certainty written by the audited v8 Sync engine,
+  /// and adds the nullable claim_id column for non-reusable claim identity.
   static Future<void> _migrateV8ToV9(DatabaseExecutor db) async {
+    final columns = await _columnNames(db, 'outbox');
+    if (!columns.contains('claim_id')) {
+      await db.execute('ALTER TABLE outbox ADD COLUMN claim_id TEXT');
+    }
+
     final rows = await db.query('outbox');
     for (final row in rows) {
       final status = (row['status'] as String? ?? '').toUpperCase();
@@ -583,8 +607,7 @@ class SqliteDatabase {
       final isHistoricalTerminal =
           status == 'SUPERSEDED' || status == 'DISCARDED';
       if (isHistoricalTerminal) {
-        final provenUnsent =
-            disposition == 'UNSENT' && !hasAttemptEvidence;
+        final provenUnsent = disposition == 'UNSENT' && !hasAttemptEvidence;
         final provenRejected = disposition == 'CONFIRMED' &&
             completeAttemptEvidence &&
             definitiveFailure;
@@ -1043,7 +1066,9 @@ class SqliteDatabase {
         !columns.containsAll(expectedColumns)) {
       throw StateError('SQLite v7 command intent schema is incomplete.');
     }
-    if (!(await _columnNames(db, 'outbox')).contains('remote_disposition')) {
+    final outboxColumns = await _columnNames(db, 'outbox');
+    if (!outboxColumns.contains('remote_disposition') ||
+        !outboxColumns.contains('claim_id')) {
       throw StateError('SQLite v9 Outbox schema is incomplete.');
     }
     const expectedPreAcquisitionColumns = {

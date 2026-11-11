@@ -1,49 +1,69 @@
+import 'dart:async';
 import 'package:sqflite/sqflite.dart';
+import '../database/outbox_dao.dart';
 
-/// Represents an explicit, session-bound credential override for a sync lease.
-///
-/// Distinguishes between two semantically different states:
-///
-/// - [BoundCredential.absent]: No credential override is supplied.
-///   The caller has NOT bound a credential; ApiClient may use its normal
-///   dynamic canonical-storage resolution. This is appropriate for non-leased
-///   callers.
-///
-/// - [BoundCredential.explicit]: An explicit credential has been captured at
-///   scope initiation. ApiClient MUST use exactly this value and MUST NOT fall
-///   back to any dynamic credential store. A null or empty explicit credential
-///   means the session had no valid token — the leased operation must fail
-///   closed rather than fall through to canonical credential storage.
-///
-/// Never use a magic sentinel string to encode this distinction.
+/// Exceptions thrown when a lease is cancelled or invalidated.
+final class SyncLeaseInvalidatedException implements Exception {
+  final String stage;
+  const SyncLeaseInvalidatedException([this.stage = 'unspecified']);
+
+  @override
+  String toString() => 'SyncLeaseInvalidatedException(stage: $stage)';
+}
+
+/// Thrown by the terminal dispatch gate immediately prior to HTTP transport execution.
+/// Contains snapshots of claimed entries to perform Unclaim CAS compensation.
+final class SyncDispatchBlockedException implements Exception {
+  final List<OutboxItem> claimSnapshots;
+  final Map<String, String> claimIds;
+  const SyncDispatchBlockedException({
+    required this.claimSnapshots,
+    required this.claimIds,
+  });
+
+  @override
+  String toString() =>
+      'SyncDispatchBlockedException(blocked ${claimSnapshots.length} operations)';
+}
+
+/// Identidade não reutilizável e imutável do lease.
+final class LeaseIdentity {
+  final String leaseId;
+  final int sequence;
+  final String? authScope;
+
+  const LeaseIdentity({
+    required this.leaseId,
+    required this.sequence,
+    this.authScope,
+  });
+
+  @override
+  String toString() =>
+      'LeaseIdentity($leaseId, seq: $sequence, scope: $authScope)';
+}
+
+enum BarrierState {
+  active,
+  draining,
+  cancelled,
+}
+
+/// Represents an active, session-bound credential override for a sync lease.
 sealed class BoundCredential {
   const BoundCredential._();
 
-  /// No credential override — normal ApiClient canonical-storage resolution
-  /// applies.
   static const BoundCredential absent = _AbsentCredential();
 
-  /// Explicit credential captured at session initiation.
-  ///
-  /// [token] is the exact value to use. A null or empty [token] means the
-  /// session had no valid credential; leased operations must reject HTTP
-  /// execution rather than fall back to dynamic credential resolution.
   static BoundCredential explicit(String? token) => _ExplicitCredential(token);
 
-  /// Returns the pinned token value if this is an [explicit] credential, or
-  /// null if [absent]. Does NOT resolve from credential storage.
   String? get pinnedToken => switch (this) {
         _AbsentCredential() => null,
         _ExplicitCredential(token: final t) => t,
       };
 
-  /// True when this is an explicit credential binding (regardless of whether
-  /// the captured token is null/empty).
   bool get isExplicit => this is _ExplicitCredential;
 
-  /// True when this explicit credential has a valid (non-null, non-empty) token.
-  ///
-  /// Always false for [absent].
   bool get hasValidToken => switch (this) {
         _AbsentCredential() => false,
         _ExplicitCredential(token: final t) => t != null && t.trim().isNotEmpty,
@@ -59,40 +79,140 @@ final class _ExplicitCredential extends BoundCredential {
   const _ExplicitCredential(this.token) : super._();
 }
 
+/// Barreira de coordenação transacional e cancelamento para o lease SQLite.
+class LeaseCommitBarrier {
+  BarrierState _state = BarrierState.active;
+  int _activeWorkTransactions = 0;
+  int _activeCompensationTransactions = 0;
+  int _pendingCompensationReservations = 0;
+  final Completer<void> _effectiveCompleter = Completer<void>();
+
+  BarrierState get state => _state;
+  bool get isDraining => _state == BarrierState.draining;
+  bool get isCancelled => _state == BarrierState.cancelled;
+  bool get hasPendingUnsentClaim => _pendingCompensationReservations > 0;
+  Future<void> get whenEffective => _effectiveCompleter.future;
+
+  /// Admissão síncrona atômica de uma transação de trabalho normal.
+  /// Lança [SyncLeaseInvalidatedException] se o lease não estiver estritamente ativo.
+  Future<T> runWorkTransaction<T>({
+    required Database db,
+    required String stage,
+    Future<void> Function(String stage)? onBeforeCommit,
+    bool Function()? isCancelled,
+    required Future<T> Function(Transaction txn) action,
+  }) async {
+    final cancelled = isCancelled?.call() ?? false;
+    if (_state != BarrierState.active || cancelled) {
+      throw SyncLeaseInvalidatedException(stage);
+    }
+    _activeWorkTransactions++;
+    try {
+      return await db.transaction<T>((txn) async {
+        final duringActionCancelled = isCancelled?.call() ?? false;
+        if (_state != BarrierState.active || duringActionCancelled) {
+          throw SyncLeaseInvalidatedException(stage);
+        }
+        final result = await action(txn);
+        if (onBeforeCommit != null) {
+          await onBeforeCommit(stage);
+        }
+        final postCallbackCancelled = isCancelled?.call() ?? false;
+        if (_state != BarrierState.active || postCallbackCancelled) {
+          throw SyncLeaseInvalidatedException(stage);
+        }
+        return result;
+      });
+    } finally {
+      _activeWorkTransactions--;
+      _checkDrainComplete();
+    }
+  }
+
+  /// Reserva prévia de compensação de Unclaim.
+  /// Deve ser chamada ANTES de iniciar a transação de claim no SQLite.
+  /// Impede que o barrier mude para `cancelled` antes do término de um claim e
+  /// eventual Unclaim CAS.
+  void reserveUnclaimCompensation() {
+    _pendingCompensationReservations++;
+  }
+
+  /// Releases a reservation for claims that did not commit or are no longer
+  /// eligible for compensation. Must be called exactly once per reservation.
+  void releaseUnclaimReservation() {
+    if (_pendingCompensationReservations == 0) {
+      throw StateError('No Unclaim compensation reservation is available.');
+    }
+    _pendingCompensationReservations--;
+    _checkDrainComplete();
+  }
+
+  /// Marca que a requisição HTTP foi despachada para o transporte (`client.send`).
+  /// A partir deste instante, o transporte está em voo; Unclaim não é mais permitido.
+  void markDispatchedToTransport() {
+    releaseUnclaimReservation();
+  }
+
+  /// Executa transação compensatória de Unclaim CAS durante drenagem ou cancelamento.
+  /// É admitida mesmo em estado draining.
+  Future<T> runUnclaimTransaction<T>({
+    required Database db,
+    required Future<T> Function(Transaction txn) action,
+  }) async {
+    _activeCompensationTransactions++;
+    try {
+      final result = await db.transaction<T>((txn) async => await action(txn));
+      releaseUnclaimReservation();
+      return result;
+    } finally {
+      _activeCompensationTransactions--;
+      _checkDrainComplete();
+    }
+  }
+
+  /// Solicita cancelamento do lease.
+  void requestCancellation() {
+    if (_state == BarrierState.cancelled) return;
+    _state = BarrierState.draining;
+    _checkDrainComplete();
+  }
+
+  void _checkDrainComplete() {
+    if (_state == BarrierState.draining &&
+        _activeWorkTransactions == 0 &&
+        _activeCompensationTransactions == 0 &&
+        _pendingCompensationReservations == 0) {
+      _state = BarrierState.cancelled;
+      if (!_effectiveCompleter.isCompleted) {
+        _effectiveCompleter.complete();
+      }
+    }
+  }
+}
+
 /// A session-bound sync lease that binds a single logical sync cycle to:
 /// 1. The database instance captured for the initiating scope;
 /// 2. An explicit authentication credential captured for the initiating session;
-/// 3. A lifecycle validity / cancellation guard.
-///
-/// The [credential] field uses [BoundCredential] rather than a raw [String?]
-/// so that null cannot mean "fall back to credential storage". A null token inside an
-/// [BoundCredential.explicit] means "this session had no credential" and
-/// the operation must fail closed.
+/// 3. A lifecycle validity / cancellation guard;
+/// 4. A [LeaseCommitBarrier] coordinating SQLite writes and atomic cancellation.
 class SyncLease {
-  /// Database captured for the initiating scope (null on Web platform).
   final Database? db;
-
-  /// Explicit session credential captured at scope initiation.
-  ///
-  /// Must be [BoundCredential.explicit]. Use [BoundCredential.absent] only for
-  /// non-leased callers — it must never appear inside a [SyncLease].
   final BoundCredential credential;
-
-  /// Lifecycle validity predicate. Returns true when the initiating coordinator
-  /// or sync cycle has been cancelled, disposed, or superseded.
   final bool Function() isCancelled;
+  final LeaseIdentity? identity;
+  final LeaseCommitBarrier barrier;
 
-  const SyncLease({
+  SyncLease({
     this.db,
     required this.credential,
     required this.isCancelled,
-  });
+    this.identity,
+    LeaseCommitBarrier? barrier,
+  }) : barrier = barrier ?? LeaseCommitBarrier();
 
-  /// Convenience getter for positive validity check.
-  bool get isStillValid => !isCancelled();
+  /// Positive validity check: caller predicate must be false AND barrier must be active.
+  bool get isStillValid =>
+      !isCancelled() && barrier.state == BarrierState.active;
 
-  /// The pinned auth token value. Null when credential is absent or has no token.
-  /// When accessing this on a session-bound lease, always check [credential.hasValidToken]
-  /// before issuing an authenticated HTTP request.
   String? get authToken => credential.pinnedToken;
 }
