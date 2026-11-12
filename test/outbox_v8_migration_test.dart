@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:assistailab/core/database/sqlite_database.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -7,6 +10,47 @@ void main() {
   setUpAll(() {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
+  });
+
+  test('opening a physical v8 database upgrades once and reopens as v9',
+      () async {
+    final directory = Directory.systemTemp.createTempSync('outbox_v8_open_');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('plugins.flutter.io/path_provider'),
+      (_) async => directory.path,
+    );
+
+    const fileName = 'legacy-v8.db';
+    final initial = await SqliteDatabase.openDatabaseByName(fileName);
+    await initial.insert('outbox', {
+      'operation_id': 'legacy-v8-op',
+      'entity_type': 'CUSTOMER',
+      'entity_id': 'legacy-customer',
+      'operation_type': 'CREATE',
+      'payload': '{"keep":true}',
+      'created_at': '2026-01-01T00:00:00.000Z',
+      'attempt_count': 0,
+      'status': 'PENDING',
+      'remote_disposition': 'UNSENT',
+    });
+    await initial.execute('ALTER TABLE outbox DROP COLUMN claim_id');
+    await initial.setVersion(8);
+    await initial.close();
+
+    final upgraded = await SqliteDatabase.openDatabaseByName(fileName);
+    final legacy = (await upgraded.query('outbox')).single;
+    expect(legacy['operation_id'], 'legacy-v8-op');
+    expect(legacy['payload'], '{"keep":true}');
+    expect(legacy['claim_id'], isNull);
+    expect(await upgraded.getVersion(), 9);
+    await upgraded.close();
+
+    final reopened = await SqliteDatabase.openDatabaseByName(fileName);
+    expect((await reopened.query('outbox')).single['claim_id'], isNull);
+    expect(await reopened.getVersion(), 9);
+    await reopened.close();
   });
 
   test('v7 to v8 classifies legacy states conservatively and is idempotent',
@@ -327,6 +371,8 @@ void main() {
 
     await SqliteDatabase.migrateV8ToV9(db);
     final first = await db.query('outbox', orderBy: 'operation_id');
+    final outboxColumns = await db.rawQuery('PRAGMA table_info(outbox)');
+    expect(outboxColumns.map((column) => column['name']), contains('claim_id'));
     for (final item in cases) {
       final row = first.singleWhere((row) => row['operation_id'] == item.id);
       expect(row['status'], item.expectedStatus, reason: item.rationale);
@@ -338,6 +384,7 @@ void main() {
       expect(row['last_error'], item.lastError, reason: item.id);
       expect(row['entity_id'], item.id, reason: item.id);
       expect(row['operation_id'], item.id, reason: item.id);
+      expect(row['claim_id'], isNull, reason: 'legacy claim remains null: ${item.id}');
     }
     await SqliteDatabase.migrateV8ToV9(db);
     expect(await db.query('outbox', orderBy: 'operation_id'), first);

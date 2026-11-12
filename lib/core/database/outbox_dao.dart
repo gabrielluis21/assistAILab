@@ -57,6 +57,7 @@ class OutboxItem {
   final String? lastError;
   final String status;
   final RemoteDisposition remoteDisposition;
+  final String? claimId;
   // Process state is deliberately separate from domain/business state.
 
   OutboxItem({
@@ -74,6 +75,7 @@ class OutboxItem {
     this.lastError,
     this.status = 'PENDING',
     this.remoteDisposition = RemoteDisposition.unsent,
+    this.claimId,
   });
 
   /// Formats outbox item for SQLite table persistence (snake_case + json-encoded payload string)
@@ -93,6 +95,7 @@ class OutboxItem {
       'last_error': lastError,
       'status': status,
       'remote_disposition': remoteDisposition.value,
+      'claim_id': claimId,
     };
   }
 
@@ -129,6 +132,43 @@ class OutboxItem {
         (value) => value.value == map['remote_disposition'],
         orElse: () => RemoteDisposition.ambiguous,
       ),
+      claimId: map['claim_id'],
+    );
+  }
+
+  OutboxItem copyWith({
+    String? operationId,
+    String? deviceId,
+    String? userId,
+    String? entityType,
+    String? entityId,
+    String? operationType,
+    Map<String, dynamic>? payload,
+    String? createdAt,
+    int? attemptCount,
+    String? lastAttemptAt,
+    String? nextRetryAt,
+    String? lastError,
+    String? status,
+    RemoteDisposition? remoteDisposition,
+    String? claimId,
+  }) {
+    return OutboxItem(
+      operationId: operationId ?? this.operationId,
+      deviceId: deviceId ?? this.deviceId,
+      userId: userId ?? this.userId,
+      entityType: entityType ?? this.entityType,
+      entityId: entityId ?? this.entityId,
+      operationType: operationType ?? this.operationType,
+      payload: payload ?? this.payload,
+      createdAt: createdAt ?? this.createdAt,
+      attemptCount: attemptCount ?? this.attemptCount,
+      lastAttemptAt: lastAttemptAt ?? this.lastAttemptAt,
+      nextRetryAt: nextRetryAt ?? this.nextRetryAt,
+      lastError: lastError ?? this.lastError,
+      status: status ?? this.status,
+      remoteDisposition: remoteDisposition ?? this.remoteDisposition,
+      claimId: claimId ?? this.claimId,
     );
   }
 }
@@ -185,6 +225,7 @@ class OutboxDao {
       where: """
         status IN ('PENDING', 'FAILED_TRANSIENT') AND (
           remote_disposition IS NULL OR remote_disposition != 'UNSENT' OR
+          claim_id IS NOT NULL OR
           attempt_count != 0 OR last_attempt_at IS NOT NULL
         )
       """,
@@ -239,7 +280,10 @@ class OutboxDao {
     }
   }
 
-  Future<void> transition({
+  /// Returns false only when a supplied attempt identity or claim identity no
+  /// longer matches. Other failed compare-and-set transitions remain
+  /// programming errors.
+  Future<bool> transition({
     required String operationId,
     required String fromStatus,
     required RemoteDisposition fromDisposition,
@@ -249,9 +293,32 @@ class OutboxDao {
     String? lastAttemptAt,
     String? nextRetryAt,
     String? lastError,
+    bool clearLastAttemptAt = false,
+    bool clearNextRetryAt = false,
+    bool clearLastError = false,
+    String? claimId,
+    bool clearClaimId = false,
     bool requireUnattempted = false,
+    int? expectedAttemptCount,
+    String? expectedLastAttemptAt,
+    String? expectedClaimId,
     DatabaseExecutor? executor,
   }) async {
+    final isUnclaim = fromStatus == OutboxStatus.processing.value &&
+        fromDisposition == RemoteDisposition.ambiguous &&
+        toDisposition == RemoteDisposition.unsent &&
+        (toStatus == OutboxStatus.pending.value ||
+            toStatus == OutboxStatus.failedTransient.value);
+    if (isUnclaim && expectedClaimId == null) {
+      throw const OutboxTransitionException(
+        'Unclaim requires the claim_id owned by the caller.',
+      );
+    }
+    if ((expectedAttemptCount == null) != (expectedLastAttemptAt == null)) {
+      throw const OutboxTransitionException(
+        'Attempt identity requires both attempt_count and last_attempt_at.',
+      );
+    }
     if (requireUnattempted &&
         (!{
               OutboxStatus.pending.value,
@@ -277,6 +344,18 @@ class OutboxDao {
         RemoteDisposition.unsent,
         'PROCESSING',
         RemoteDisposition.ambiguous
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'PENDING',
+        RemoteDisposition.unsent
+      ) ||
+      (
+        'PROCESSING',
+        RemoteDisposition.ambiguous,
+        'FAILED_TRANSIENT',
+        RemoteDisposition.unsent
       ) ||
       (
         'PROCESSING',
@@ -348,6 +427,12 @@ class OutboxDao {
       if (lastAttemptAt != null) 'last_attempt_at': lastAttemptAt,
       if (nextRetryAt != null) 'next_retry_at': nextRetryAt,
       if (lastError != null) 'last_error': lastError,
+      if (clearLastAttemptAt) 'last_attempt_at': null,
+      if (clearNextRetryAt) 'next_retry_at': null,
+      if (clearLastError) 'last_error': null,
+      if (toStatus != OutboxStatus.processing.value || clearClaimId)
+        'claim_id': null,
+      if (claimId != null) 'claim_id': claimId,
     };
     final where = StringBuffer(
       'operation_id = ? AND status = ? AND remote_disposition = ?',
@@ -360,6 +445,16 @@ class OutboxDao {
     if (requireUnattempted) {
       where.write(' AND attempt_count = 0 AND last_attempt_at IS NULL');
     }
+    if (expectedAttemptCount != null && expectedLastAttemptAt != null) {
+      where.write(' AND attempt_count = ? AND last_attempt_at = ?');
+      whereArgs
+        ..add(expectedAttemptCount)
+        ..add(expectedLastAttemptAt);
+    }
+    if (expectedClaimId != null) {
+      where.write(' AND claim_id = ?');
+      whereArgs.add(expectedClaimId);
+    }
     final changed = await db.update(
       'outbox',
       values,
@@ -367,14 +462,17 @@ class OutboxDao {
       whereArgs: whereArgs,
     );
     if (changed != 1) {
+      if (expectedAttemptCount != null || expectedClaimId != null) return false;
       throw OutboxTransitionException(
         'Outbox transition compare-and-set failed for $operationId.',
       );
     }
+    return true;
   }
 
   /// Recovers entries stuck in PROCESSING state for more than [timeout] (default 5 minutes)
   /// by quarantining them because the remote result may be ambiguous.
+  /// Also clears the claim_id so that future claim attempts get a fresh token.
   Future<int> recoverProcessingEntries({
     Duration timeout = const Duration(minutes: 5),
     DatabaseExecutor? executor,
@@ -387,6 +485,7 @@ class OutboxDao {
         'status': 'REQUIRES_ATTENTION',
         'remote_disposition': 'AMBIGUOUS',
         'last_error': 'Operation timeout: stuck in PROCESSING for > 5 minutes',
+        'claim_id': null,
       },
       where:
           "status = ? AND remote_disposition = 'AMBIGUOUS' AND (last_attempt_at IS NULL OR last_attempt_at <= ?)",

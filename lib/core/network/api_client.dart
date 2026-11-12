@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:assistailab/core/config/app_env.dart';
+import 'package:assistailab/core/database/outbox_dao.dart';
 import 'package:assistailab/core/security/credential_epoch_store.dart';
 import 'package:assistailab/core/security/credential_storage.dart';
 import 'package:assistailab/core/sync/sync_lease.dart';
@@ -11,12 +12,14 @@ class ApiClient {
   final http.Client _client;
   final CredentialStorage? credentialStorage;
   final CredentialEpochStore? credentialEpochStore;
+  final Future<void> Function()? beforeDispatch;
 
   ApiClient({
     String? baseUrl,
     http.Client? client,
     this.credentialStorage,
     this.credentialEpochStore,
+    this.beforeDispatch,
   })  : baseUrl = baseUrl ?? AppEnv.apiBaseUrl,
         _client = client ?? http.Client();
 
@@ -96,28 +99,21 @@ class ApiClient {
   ///
   /// Callers that hold a [SyncLease] must use this variant to ensure no
   /// dynamic credential lookup can occur during an authenticated leased request.
-  Future<http.Response> getBound(
-    String endpoint,
-    BoundCredential credential,
-  ) async {
+  Future<http.Response> getBound(String endpoint, BoundCredential credential,
+      {SyncLease? lease}) async {
     final headers = await _getHeadersBound(credential);
-    return _client.get(
-      Uri.parse('$baseUrl$endpoint'),
-      headers: headers,
-    );
+    return _sendBound('GET', endpoint, headers: headers, lease: lease);
   }
 
   Future<http.Response> getBoundWithHeaders(
     String endpoint,
     BoundCredential credential, {
     Map<String, String> headers = const {},
+    SyncLease? lease,
   }) async {
     final requestHeaders = await _getHeadersBound(credential)
       ..addAll(headers);
-    return _client.get(
-      Uri.parse('$baseUrl$endpoint'),
-      headers: requestHeaders,
-    );
+    return _sendBound('GET', endpoint, headers: requestHeaders, lease: lease);
   }
 
   Future<http.Response> post(
@@ -154,13 +150,11 @@ class ApiClient {
     String endpoint,
     BoundCredential credential, {
     Map<String, dynamic>? body,
+    SyncLease? lease,
   }) async {
     final headers = await _getHeadersBound(credential);
-    return _client.post(
-      Uri.parse('$baseUrl$endpoint'),
-      headers: headers,
-      body: body != null ? jsonEncode(body) : null,
-    );
+    return _sendBound('POST', endpoint,
+        headers: headers, body: body, lease: lease);
   }
 
   Future<http.Response> postBoundWithHeaders(
@@ -168,14 +162,46 @@ class ApiClient {
     BoundCredential credential, {
     Map<String, dynamic>? body,
     Map<String, String> headers = const {},
+    SyncLease? lease,
+    List<OutboxItem>? claimSnapshots,
+    Map<String, String>? claimIds,
   }) async {
     final requestHeaders = await _getHeadersBound(credential)
       ..addAll(headers);
-    return _client.post(
-      Uri.parse('$baseUrl$endpoint'),
-      headers: requestHeaders,
-      body: body != null ? jsonEncode(body) : null,
-    );
+
+    return _sendBound('POST', endpoint,
+        headers: requestHeaders,
+        body: body,
+        lease: lease,
+        blocked: SyncDispatchBlockedException(
+          claimSnapshots: claimSnapshots ?? const [],
+          claimIds: claimIds ?? const {},
+        ));
+  }
+
+  Future<http.Response> _sendBound(
+    String method,
+    String endpoint, {
+    required Map<String, String> headers,
+    Map<String, dynamic>? body,
+    SyncLease? lease,
+    SyncDispatchBlockedException? blocked,
+  }) async {
+    final request = http.Request(method, Uri.parse('$baseUrl$endpoint'))
+      ..headers.addAll(headers);
+    if (body != null) request.body = jsonEncode(body);
+    await beforeDispatch?.call();
+
+    // Final lease check and transport invocation are synchronous neighbors.
+    if (lease != null) {
+      if (!lease.isStillValid) {
+        if (blocked != null) throw blocked;
+        throw const SyncLeaseInvalidatedException('http_dispatch');
+      }
+      if (blocked != null) lease.barrier.markDispatchedToTransport();
+    }
+    final streamedResponse = await _client.send(request);
+    return http.Response.fromStream(streamedResponse);
   }
 
   Future<http.Response> patchBoundWithHeaders(

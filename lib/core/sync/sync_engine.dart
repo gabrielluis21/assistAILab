@@ -2,6 +2,7 @@ import 'dart:convert';
 import '../../core/database/assert_web_no_sqlite.dart';
 import 'dart:math';
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 import '../network/api_client.dart';
 import '../database/sqlite_database.dart';
 import '../database/outbox_dao.dart';
@@ -62,9 +63,28 @@ class SyncEngine {
   final ApiClient apiClient;
   final OutboxDao outboxDao;
 
+  /// Optional hook called immediately before a leased transaction commits.
+  /// Used for deterministic coordination, lifecycle testing, and race verification.
+  /// Receives the stage name: 'push_intercept', 'push_claim', 'push_http_200',
+  /// 'push_http_non_200', 'push_catch_recovery'.
+  Future<void> Function(String stage)? onBeforeCommit;
+
+  /// Deterministic hook after the claim transaction Future (including COMMIT)
+  /// completes and before the HTTP dispatch gate runs.
+  Future<void> Function()? onAfterClaimCommit;
+
+  /// Deterministic hook after an incremental page has committed and before
+  /// the next page can be considered for dispatch.
+  Future<void> Function()? onAfterPullPageCommit;
+
+  /// Deterministic hook after candidate selection commits and before claims
+  /// are admitted, used to simulate another writer changing eligibility.
+  Future<void> Function()? onAfterCandidateSelection;
+
   SyncEngine({
     required this.apiClient,
     OutboxDao? outboxDao,
+    this.onBeforeCommit,
   }) : outboxDao = outboxDao ?? OutboxDao();
 
   Future<String?> getLocalCursor({DatabaseExecutor? executor}) async {
@@ -80,13 +100,24 @@ class SyncEngine {
 
   Future<void> saveLocalCursor(
     String cursor, {
-    DatabaseExecutor? executor,
+    required SyncLease lease,
   }) async {
-    final db = executor ?? await SqliteDatabase.instance;
-    await db.insert(
-      'sync_metadata',
-      {'key': 'last_cursor', 'value': cursor},
-      conflictAlgorithm: ConflictAlgorithm.replace,
+    assertWebNoSqlite();
+    final db = lease.db;
+    if (db == null) {
+      throw StateError('A bound SQLite database is required to save a cursor.');
+    }
+    await _runLeasedTransaction(
+      db: db,
+      lease: lease,
+      stage: 'save_cursor',
+      action: (txn) async {
+        await txn.insert(
+          'sync_metadata',
+          {'key': 'last_cursor', 'value': cursor},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      },
     );
   }
 
@@ -118,15 +149,19 @@ class SyncEngine {
     final records = <Map<String, dynamic>>[];
     do {
       if (!lease.isStillValid) return;
-      final response = await apiClient.postBound(
-        '/sync/bootstrap',
-        lease.credential,
-        body: {
-          'contractVersion': 2,
-          'limit': pageSize,
-          if (continuationToken != null) 'continuationToken': continuationToken,
-        },
-      ).timeout(const Duration(seconds: 15));
+      final response = await apiClient
+          .postBound(
+            '/sync/bootstrap',
+            lease.credential,
+            body: {
+              'contractVersion': 2,
+              'limit': pageSize,
+              if (continuationToken != null)
+                'continuationToken': continuationToken,
+            },
+            lease: lease,
+          )
+          .timeout(const Duration(seconds: 15));
       if (!lease.isStillValid) return;
       if (response.statusCode != 200) {
         throw SyncHttpException(
@@ -178,20 +213,29 @@ class SyncEngine {
     } while (continuationToken != null);
 
     if (!lease.isStillValid) return;
-    await db.transaction((txn) async {
-      await SyncProjectionApplier.replaceBootstrap(txn, records);
-      for (final entry in {
-        'sync_contract_version': '2',
-        'sync_bootstrap_proof': bootstrapProof,
-        'last_cursor': bootstrapCursor,
-      }.entries) {
-        await txn.insert(
-          'sync_metadata',
-          {'key': entry.key, 'value': entry.value},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-    });
+    try {
+      await _runLeasedTransaction(
+        db: db,
+        lease: lease,
+        stage: 'bootstrap_replace',
+        action: (txn) async {
+          await SyncProjectionApplier.replaceBootstrap(txn, records);
+          for (final entry in {
+            'sync_contract_version': '2',
+            'sync_bootstrap_proof': bootstrapProof,
+            'last_cursor': bootstrapCursor,
+          }.entries) {
+            await txn.insert(
+              'sync_metadata',
+              {'key': entry.key, 'value': entry.value},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          }
+        },
+      );
+    } on SyncLeaseInvalidatedException {
+      return;
+    }
   }
 
   Future<String> _requiredBootstrapProof(DatabaseExecutor db) async {
@@ -209,15 +253,37 @@ class SyncEngine {
     return proof;
   }
 
-  Future<void> _invalidateV2Bootstrap(Database db) async {
-    await db.delete(
-      'sync_metadata',
-      where: 'key IN (?, ?, ?)',
-      whereArgs: [
-        'sync_contract_version',
-        'sync_bootstrap_proof',
-        'last_cursor',
-      ],
+  Future<void> _invalidateV2Bootstrap(Database db, SyncLease lease) async {
+    await _runLeasedTransaction(
+      db: db,
+      lease: lease,
+      stage: 'bootstrap_invalidate',
+      action: (txn) async {
+        await txn.delete(
+          'sync_metadata',
+          where: 'key IN (?, ?, ?)',
+          whereArgs: [
+            'sync_contract_version',
+            'sync_bootstrap_proof',
+            'last_cursor',
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _runLeasedTransaction({
+    required Database db,
+    required SyncLease lease,
+    required String stage,
+    required Future<void> Function(Transaction txn) action,
+  }) async {
+    await lease.barrier.runWorkTransaction(
+      db: db,
+      stage: stage,
+      onBeforeCommit: onBeforeCommit,
+      isCancelled: lease.isCancelled,
+      action: action,
     );
   }
 
@@ -265,37 +331,77 @@ class SyncEngine {
     final targetDb = lease.db!;
 
     // 4. Read pending entries
-    final rawPendingEntries = await outboxDao.getPendingEntries(
-      limit: batchSize,
-      executor: targetDb,
-    );
+    List<OutboxItem> rawPendingEntries = const [];
+    try {
+      await _runLeasedTransaction(
+        db: targetDb,
+        lease: lease,
+        stage: 'push_select_candidates',
+        action: (txn) async {
+          rawPendingEntries = await outboxDao.getPendingEntries(
+            limit: batchSize,
+            executor: txn,
+          );
+        },
+      );
+    } on SyncLeaseInvalidatedException {
+      return const SyncPushSummary();
+    }
+    await onAfterCandidateSelection?.call();
+    final interceptEntries = <OutboxItem>[];
     final pendingEntries = <OutboxItem>[];
     for (final entry in rawPendingEntries) {
       final type = entry.entityType.toUpperCase();
       if (type == 'PAYMENT' || type == 'PART' || type == 'PRE_ACQUISITION') {
-        final canProveUnsent = entry.status == OutboxStatus.pending.value &&
-            entry.remoteDisposition == RemoteDisposition.unsent &&
-            entry.attemptCount == 0 &&
-            entry.lastAttemptAt == null;
-        await outboxDao.transition(
-          operationId: entry.operationId,
-          fromStatus: entry.status,
-          fromDisposition: entry.remoteDisposition,
-          toStatus: 'REQUIRES_ATTENTION',
-          toDisposition: canProveUnsent
-              ? RemoteDisposition.unsent
-              : RemoteDisposition.ambiguous,
-          lastError: switch (type) {
-            'PAYMENT' => 'FINANCE_COMMAND_REQUIRED',
-            'PART' => 'PART_TENANCY_REQUIRED',
-            _ => 'PRE_ACQUISITION_LOCAL_ONLY',
-          },
-          executor: targetDb,
-        );
+        interceptEntries.add(entry);
       } else {
         pendingEntries.add(entry);
       }
     }
+
+    if (interceptEntries.isNotEmpty) {
+      if (!lease.isStillValid) {
+        return const SyncPushSummary();
+      }
+      try {
+        await _runLeasedTransaction(
+          db: targetDb,
+          lease: lease,
+          stage: 'push_intercept',
+          action: (txn) async {
+            for (final entry in interceptEntries) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException('push_intercept');
+              }
+              final type = entry.entityType.toUpperCase();
+              final canProveUnsent =
+                  entry.status == OutboxStatus.pending.value &&
+                      entry.remoteDisposition == RemoteDisposition.unsent &&
+                      entry.attemptCount == 0 &&
+                      entry.lastAttemptAt == null;
+              await outboxDao.transition(
+                operationId: entry.operationId,
+                fromStatus: entry.status,
+                fromDisposition: entry.remoteDisposition,
+                toStatus: 'REQUIRES_ATTENTION',
+                toDisposition: canProveUnsent
+                    ? RemoteDisposition.unsent
+                    : RemoteDisposition.ambiguous,
+                lastError: switch (type) {
+                  'PAYMENT' => 'FINANCE_COMMAND_REQUIRED',
+                  'PART' => 'PART_TENANCY_REQUIRED',
+                  _ => 'PRE_ACQUISITION_LOCAL_ONLY',
+                },
+                executor: txn,
+              );
+            }
+          },
+        );
+      } on SyncLeaseInvalidatedException {
+        return const SyncPushSummary();
+      }
+    }
+
     if (pendingEntries.isEmpty) {
       return const SyncPushSummary();
     }
@@ -310,26 +416,96 @@ class SyncEngine {
       'entries': pendingEntries.map((e) => e.toApiPayload()).toList(),
     };
 
-    // Persist ambiguity before network I/O: any interruption after this point
-    // must not silently replay an operation whose remote result is unknown.
+    // Stage 2: Generate unique claim_id per item and take snapshots of original state
+    const uuid = Uuid();
+    final claimIds = <String, String>{
+      for (final item in pendingEntries) item.operationId: uuid.v4(),
+    };
+    final claimSnapshots = List<OutboxItem>.from(pendingEntries);
+
+    Future<void> performUnclaimCompensation() async {
+      await lease.barrier.runUnclaimTransaction(
+        db: targetDb,
+        action: (txn) async {
+          for (final snapshot in claimSnapshots) {
+            final claimId = claimIds[snapshot.operationId]!;
+            await outboxDao.transition(
+              operationId: snapshot.operationId,
+              fromStatus: 'PROCESSING',
+              fromDisposition: RemoteDisposition.ambiguous,
+              toStatus: snapshot.status,
+              toDisposition: snapshot.remoteDisposition,
+              attemptCount: snapshot.attemptCount,
+              lastAttemptAt: snapshot.lastAttemptAt,
+              clearLastAttemptAt: snapshot.lastAttemptAt == null,
+              nextRetryAt: snapshot.nextRetryAt,
+              clearNextRetryAt: snapshot.nextRetryAt == null,
+              lastError: snapshot.lastError,
+              clearLastError: snapshot.lastError == null,
+              clearClaimId: true,
+              expectedClaimId: claimId,
+              executor: txn,
+            );
+          }
+        },
+      );
+    }
+
+    // Pre-claim compensation reservation: keeps barrier in draining (not cancelled)
+    // if cancellation is requested before or during claim.
+    lease.barrier.reserveUnclaimCompensation();
+
     final nowIso = DateTime.now().toIso8601String();
-    await targetDb.transaction((txn) async {
-      for (final item in pendingEntries) {
-        await outboxDao.transition(
-          operationId: item.operationId,
-          fromStatus: item.status,
-          fromDisposition: item.remoteDisposition,
-          toStatus: 'PROCESSING',
-          toDisposition: RemoteDisposition.ambiguous,
-          attemptCount: item.attemptCount + 1,
-          lastAttemptAt: nowIso,
-          requireUnattempted: true,
-          executor: txn,
-        );
-      }
-    });
+    final attemptIdentities =
+        <String, ({int attemptCount, String lastAttemptAt, String claimId})>{};
+
+    try {
+      await _runLeasedTransaction(
+        db: targetDb,
+        lease: lease,
+        stage: 'push_claim',
+        action: (txn) async {
+          for (final item in pendingEntries) {
+            if (!lease.isStillValid) {
+              throw const SyncLeaseInvalidatedException('push_claim');
+            }
+            final attemptCount = item.attemptCount + 1;
+            final claimId = claimIds[item.operationId]!;
+            await outboxDao.transition(
+              operationId: item.operationId,
+              fromStatus: item.status,
+              fromDisposition: item.remoteDisposition,
+              toStatus: 'PROCESSING',
+              toDisposition: RemoteDisposition.ambiguous,
+              attemptCount: attemptCount,
+              lastAttemptAt: nowIso,
+              claimId: claimId,
+              requireUnattempted: true,
+              executor: txn,
+            );
+            attemptIdentities[item.operationId] = (
+              attemptCount: attemptCount,
+              lastAttemptAt: nowIso,
+              claimId: claimId,
+            );
+          }
+        },
+      );
+    } on SyncLeaseInvalidatedException {
+      // Claim transaction rolled back before commit. Clean reservation.
+      lease.barrier.releaseUnclaimReservation();
+      return const SyncPushSummary();
+    } catch (_) {
+      // The SQLite Future includes COMMIT. Reconcile by claim_id before
+      // releasing the reservation, since a driver error can surface at commit.
+      await performUnclaimCompensation();
+      rethrow;
+    }
+
+    await onAfterClaimCommit?.call();
 
     if (!lease.isStillValid) {
+      await performUnclaimCompensation();
       return const SyncPushSummary();
     }
 
@@ -338,21 +514,52 @@ class SyncEngine {
     int failed = 0;
     int conflict = 0;
 
+    SyncPushSummary cancelledSummary() => SyncPushSummary(
+          totalProcessed: pendingEntries.length,
+          syncedCount: 0,
+          failedCount: 0,
+          conflictCount: 0,
+        );
+
+    Future<bool> transitionClaimed({
+      required OutboxItem item,
+      required String toStatus,
+      required RemoteDisposition toDisposition,
+      String? lastError,
+      String? nextRetryAt,
+      required DatabaseExecutor executor,
+    }) {
+      final attempt = attemptIdentities[item.operationId]!;
+      return outboxDao.transition(
+        operationId: item.operationId,
+        fromStatus: 'PROCESSING',
+        fromDisposition: RemoteDisposition.ambiguous,
+        toStatus: toStatus,
+        toDisposition: toDisposition,
+        nextRetryAt: nextRetryAt,
+        lastError: lastError,
+        expectedAttemptCount: attempt.attemptCount,
+        expectedLastAttemptAt: attempt.lastAttemptAt,
+        expectedClaimId: attempt.claimId,
+        executor: executor,
+      );
+    }
+
     try {
-      final response = await apiClient.postBoundWithHeaders(
-        '/sync/push',
-        lease.credential,
-        body: payload,
-        headers: {'X-Sync-Bootstrap-Proof': proof},
-      ).timeout(const Duration(seconds: 15));
+      final response = await apiClient
+          .postBoundWithHeaders(
+            '/sync/push',
+            lease.credential,
+            body: payload,
+            headers: {'X-Sync-Bootstrap-Proof': proof},
+            lease: lease,
+            claimSnapshots: claimSnapshots,
+            claimIds: claimIds,
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (!lease.isStillValid) {
-        return SyncPushSummary(
-          totalProcessed: pendingEntries.length,
-          syncedCount: synced,
-          failedCount: failed,
-          conflictCount: conflict,
-        );
+        return cancelledSummary();
       }
 
       if (response.statusCode == 200) {
@@ -362,92 +569,107 @@ class SyncEngine {
             pendingEntries.map((entry) => entry.operationId).toSet();
         final completedIds = <String>{};
 
-        for (final res in results) {
-          if (res is! Map<String, dynamic>) continue;
-          final rawOpId = res['operationId'];
-          if (rawOpId is! String ||
-              !knownIds.contains(rawOpId) ||
-              !completedIds.add(rawOpId)) {
-            continue;
-          }
-          final opId = rawOpId;
-          final status = res['status'];
-          final error = res['error'];
+        var txSynced = 0;
+        var txFailed = 0;
+        var txConflict = 0;
 
-          if (status == 'SYNCED' && error == null) {
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: 'SYNCED',
-              toDisposition: RemoteDisposition.confirmed,
-              executor: targetDb,
-            );
-            synced++;
-          } else if (status == 'FAILED' &&
-              (error is String && error.isNotEmpty)) {
-            // The v2 backend emits per-entry FAILED only for checks performed
-            // before mutation or for domain failures caught after the
-            // transaction rollback. Infrastructure failures escape the
-            // handler as batch HTTP errors and remain AMBIGUOUS below.
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: 'FAILED_FATAL',
-              toDisposition: RemoteDisposition.confirmed,
-              nextRetryAt: null,
-              lastError: error,
-              executor: targetDb,
-            );
-            failed++;
-          } else if (status == 'CONFLICT' &&
-              (error is String && error.isNotEmpty)) {
-            // These explicit codes cover every unresolved idempotency result
-            // in the current backend contract. Unknown conflict codes remain
-            // quarantined below; none is promoted to CONFIRMED by status alone.
-            final unresolved = _unresolvedSyncConflictCodes.contains(error);
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: unresolved ? 'CONFLICT' : 'REQUIRES_ATTENTION',
-              toDisposition: RemoteDisposition.ambiguous,
-              lastError: unresolved ? error : 'SYNC_CONFLICT_UNKNOWN:$error',
-              executor: targetDb,
-            );
-            if (unresolved) {
-              conflict++;
-            } else {
-              failed++;
+        await _runLeasedTransaction(
+          db: targetDb,
+          lease: lease,
+          stage: 'push_http_200',
+          action: (txn) async {
+            for (final res in results) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException('push_http_200');
+              }
+              if (res is! Map<String, dynamic>) continue;
+              final rawOpId = res['operationId'];
+              if (rawOpId is! String ||
+                  !knownIds.contains(rawOpId) ||
+                  !completedIds.add(rawOpId)) {
+                continue;
+              }
+              final item = pendingEntries
+                  .firstWhere((entry) => entry.operationId == rawOpId);
+              final status = res['status'];
+              final error = res['error'];
+
+              if (status == 'SYNCED' && error == null) {
+                if (await transitionClaimed(
+                  item: item,
+                  toStatus: 'SYNCED',
+                  toDisposition: RemoteDisposition.confirmed,
+                  executor: txn,
+                )) {
+                  txSynced++;
+                }
+              } else if (status == 'FAILED' &&
+                  (error is String && error.isNotEmpty)) {
+                // The v2 backend emits per-entry FAILED only for checks performed
+                // before mutation or for domain failures caught after the
+                // transaction rollback. Infrastructure failures escape the
+                // handler as batch HTTP errors and remain AMBIGUOUS below.
+                if (await transitionClaimed(
+                  item: item,
+                  toStatus: 'FAILED_FATAL',
+                  toDisposition: RemoteDisposition.confirmed,
+                  lastError: error,
+                  executor: txn,
+                )) {
+                  txFailed++;
+                }
+              } else if (status == 'CONFLICT' &&
+                  (error is String && error.isNotEmpty)) {
+                // These explicit codes cover every unresolved idempotency result
+                // in the current backend contract. Unknown conflict codes remain
+                // quarantined below; none is promoted to CONFIRMED by status alone.
+                final unresolved = _unresolvedSyncConflictCodes.contains(error);
+                if (await transitionClaimed(
+                  item: item,
+                  toStatus: unresolved ? 'CONFLICT' : 'REQUIRES_ATTENTION',
+                  toDisposition: RemoteDisposition.ambiguous,
+                  lastError:
+                      unresolved ? error : 'SYNC_CONFLICT_UNKNOWN:$error',
+                  executor: txn,
+                )) {
+                  if (unresolved) {
+                    txConflict++;
+                  } else {
+                    txFailed++;
+                  }
+                }
+              } else {
+                await transitionClaimed(
+                  item: item,
+                  toStatus: 'REQUIRES_ATTENTION',
+                  toDisposition: RemoteDisposition.ambiguous,
+                  lastError: 'SYNC_RESULT_UNKNOWN',
+                  executor: txn,
+                );
+              }
             }
-          } else {
-            await outboxDao.transition(
-              operationId: opId,
-              fromStatus: 'PROCESSING',
-              fromDisposition: RemoteDisposition.ambiguous,
-              toStatus: 'REQUIRES_ATTENTION',
-              toDisposition: RemoteDisposition.ambiguous,
-              lastError: 'SYNC_RESULT_UNKNOWN',
-              executor: targetDb,
-            );
-          }
-        }
-        // Missing or malformed result entries remain ambiguous and are
-        // quarantined for reconciliation; they are never implicitly retried.
-        for (final item in pendingEntries.where(
-          (entry) => !completedIds.contains(entry.operationId),
-        )) {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: 'SYNC_RESULT_MISSING',
-            executor: targetDb,
-          );
-        }
+            // Missing or malformed result entries remain ambiguous and are
+            // quarantined for reconciliation; they are never implicitly retried.
+            for (final item in pendingEntries.where(
+              (entry) => !completedIds.contains(entry.operationId),
+            )) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException('push_http_200');
+              }
+              await transitionClaimed(
+                item: item,
+                toStatus: 'REQUIRES_ATTENTION',
+                toDisposition: RemoteDisposition.ambiguous,
+                lastError: 'SYNC_RESULT_MISSING',
+                executor: txn,
+              );
+            }
+          },
+        );
+
+        synced = txSynced;
+        failed = txFailed;
+        conflict = txConflict;
       } else {
         // Batch HTTP classification rationale: backend 400 body validation,
         // 401 authentication, and 403/409 bootstrap-proof failures are request
@@ -455,43 +677,68 @@ class SyncEngine {
         // The Sync route has no 429 handler, while 408/5xx may follow applied
         // work. Since a client cannot prove the response source or bind a
         // batch status to every operation, every non-200 remains ambiguous.
-        for (final item in pendingEntries) {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: 'HTTP ${response.statusCode}: ${response.body}',
-            executor: targetDb,
-          );
-        }
+        await _runLeasedTransaction(
+          db: targetDb,
+          lease: lease,
+          stage: 'push_http_non_200',
+          action: (txn) async {
+            for (final item in pendingEntries) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException('push_http_non_200');
+              }
+              await transitionClaimed(
+                item: item,
+                toStatus: 'REQUIRES_ATTENTION',
+                toDisposition: RemoteDisposition.ambiguous,
+                lastError: 'HTTP ${response.statusCode}: ${response.body}',
+                executor: txn,
+              );
+            }
+          },
+        );
+        if (!lease.isStillValid) return cancelledSummary();
         throw SyncHttpException(
           statusCode: response.statusCode,
           operation: 'push',
           responseBody: response.body,
         );
       }
+    } on SyncDispatchBlockedException {
+      // Proven that client.send() was not executed. Compensate via Unclaim CAS.
+      await performUnclaimCompensation();
+      return cancelledSummary();
     } catch (e) {
-      for (final item in pendingEntries) {
-        final current = await targetDb.query(
-          'outbox',
-          columns: ['status', 'remote_disposition'],
-          where: 'operation_id = ?',
-          whereArgs: [item.operationId],
-          limit: 1,
+      // A stale cycle must stop before touching its database or publishing an
+      // error. The coordinator will discard this neutral summary on cancel.
+      if (!lease.isStillValid || e is SyncLeaseInvalidatedException) {
+        return cancelledSummary();
+      }
+      try {
+        await _runLeasedTransaction(
+          db: targetDb,
+          lease: lease,
+          stage: 'push_catch_recovery',
+          action: (txn) async {
+            for (final item in pendingEntries) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException(
+                    'push_catch_recovery');
+              }
+              await transitionClaimed(
+                item: item,
+                toStatus: 'REQUIRES_ATTENTION',
+                toDisposition: RemoteDisposition.ambiguous,
+                lastError: e.toString(),
+                executor: txn,
+              );
+            }
+          },
         );
-        if (current.length == 1 && current.single['status'] == 'PROCESSING') {
-          await outboxDao.transition(
-            operationId: item.operationId,
-            fromStatus: 'PROCESSING',
-            fromDisposition: RemoteDisposition.ambiguous,
-            toStatus: 'REQUIRES_ATTENTION',
-            toDisposition: RemoteDisposition.ambiguous,
-            lastError: e.toString(),
-            executor: targetDb,
-          );
-        }
+      } on SyncLeaseInvalidatedException {
+        return cancelledSummary();
+      }
+      if (!lease.isStillValid) {
+        return cancelledSummary();
       }
       rethrow;
     }
@@ -552,11 +799,14 @@ class SyncEngine {
       final cursorParam =
           '?contractVersion=2&cursor=$latestCursor&limit=$pullPageSize';
 
-      final response = await apiClient.getBoundWithHeaders(
-        '/sync/changes$cursorParam',
-        lease.credential,
-        headers: {'X-Sync-Bootstrap-Proof': proof},
-      ).timeout(const Duration(seconds: 15));
+      final response = await apiClient
+          .getBoundWithHeaders(
+            '/sync/changes$cursorParam',
+            lease.credential,
+            headers: {'X-Sync-Bootstrap-Proof': proof},
+            lease: lease,
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (!lease.isStillValid) {
         break;
@@ -566,7 +816,7 @@ class SyncEngine {
         if (response.statusCode == 409 &&
             (response.body.contains('SYNC_V2_REFRESH_REQUIRED') ||
                 response.body.contains('SYNC_V2_BOOTSTRAP_REQUIRED'))) {
-          await _invalidateV2Bootstrap(targetDb);
+          await _invalidateV2Bootstrap(targetDb, lease);
         }
         throw SyncHttpException(
           statusCode: response.statusCode,
@@ -598,25 +848,37 @@ class SyncEngine {
       pageCount++;
 
       // BEGIN ATOMIC TRANSACTION (Changes + Cursor) bound to targetDb
-      await targetDb.transaction((txn) async {
-        for (final change in changes) {
-          await SyncProjectionApplier.applyChange(
-            txn,
-            Map<String, dynamic>.from(change as Map),
-          );
-        }
+      try {
+        await _runLeasedTransaction(
+          db: targetDb,
+          lease: lease,
+          stage: 'pull_apply_page',
+          action: (txn) async {
+            for (final change in changes) {
+              if (!lease.isStillValid) {
+                throw const SyncLeaseInvalidatedException('pull_apply_page');
+              }
+              await SyncProjectionApplier.applyChange(
+                txn,
+                Map<String, dynamic>.from(change as Map),
+              );
+            }
 
-        // Persist nextCursor atomically inside the transaction
-        if (nextCursorText != null) {
-          await txn.insert(
-            'sync_metadata',
-            {'key': 'last_cursor', 'value': nextCursorText},
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
-        }
-      });
+            if (nextCursorText != null) {
+              await txn.insert(
+                'sync_metadata',
+                {'key': 'last_cursor', 'value': nextCursorText},
+                conflictAlgorithm: ConflictAlgorithm.replace,
+              );
+            }
+          },
+        );
+      } on SyncLeaseInvalidatedException {
+        break;
+      }
 
       totalPulled += changes.length;
+      await onAfterPullPageCommit?.call();
 
       // Cursor-progress termination:
       // Stop when cursor did not advance (stabilised) or server sent no cursor.

@@ -85,31 +85,6 @@ class FakeOutboxDao extends OutboxDao {
       pendingItems;
 }
 
-class _ConcurrentOutboxMutationDao extends OutboxDao {
-  final Database db;
-  final String operationId;
-
-  _ConcurrentOutboxMutationDao(this.db, this.operationId);
-
-  @override
-  Future<List<OutboxItem>> getPendingEntries({
-    int limit = 20,
-    DatabaseExecutor? executor,
-  }) async {
-    final entries = await super.getPendingEntries(
-      limit: limit,
-      executor: executor,
-    );
-    await db.update(
-      'outbox',
-      {'attempt_count': 1},
-      where: 'operation_id = ?',
-      whereArgs: [operationId],
-    );
-    return entries;
-  }
-}
-
 class FakeSyncEngine extends SyncEngine {
   int pushCount = 0;
   int pullCount = 0;
@@ -2689,8 +2664,15 @@ void main() {
           return http.Response('unexpected', 500);
         }),
       ),
-      outboxDao: _ConcurrentOutboxMutationDao(db, operationId),
     );
+    engine.onAfterCandidateSelection = () async {
+      await db.update(
+        'outbox',
+        {'attempt_count': 1},
+        where: 'operation_id = ?',
+        whereArgs: [operationId],
+      );
+    };
 
     await expectLater(
       engine.pushPendingOutbox(lease: _testLease(db)),

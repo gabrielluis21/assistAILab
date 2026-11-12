@@ -493,7 +493,7 @@ Future<void> _schema(Database db) async {
     operation_type TEXT NOT NULL, payload TEXT NOT NULL,
     created_at TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TEXT, next_retry_at TEXT, last_error TEXT,
-    status TEXT NOT NULL, remote_disposition TEXT NOT NULL)''');
+    status TEXT NOT NULL, remote_disposition TEXT NOT NULL, claim_id TEXT)''');
   await db.execute('CREATE TABLE customers (id TEXT PRIMARY KEY, name TEXT)');
   await db.execute(
       'CREATE TABLE equipments (id TEXT PRIMARY KEY, customer_id TEXT)');

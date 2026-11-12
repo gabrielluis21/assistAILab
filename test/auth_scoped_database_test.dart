@@ -9,6 +9,7 @@ import 'package:assistailab/core/database/sqlite_database.dart';
 import 'package:assistailab/core/database/outbox_dao.dart';
 import 'package:assistailab/core/sync/sync_engine.dart';
 import 'package:assistailab/core/network/api_client.dart';
+import 'package:assistailab/core/sync/sync_lease.dart';
 
 class _FakeApiClient extends ApiClient {
   _FakeApiClient() : super(baseUrl: 'http://fake.api');
@@ -126,7 +127,14 @@ void main() {
         scopeFA,
         sessionGeneration: nextSessionGeneration(),
       );
-      await syncEngine.saveLocalCursor('100');
+      await syncEngine.saveLocalCursor(
+        '100',
+        lease: SyncLease(
+          db: await SqliteDatabase.instance,
+          credential: BoundCredential.explicit('TOKEN_A'),
+          isCancelled: () => false,
+        ),
+      );
       expect(await syncEngine.getLocalCursor(), equals('100'));
 
       // Switch to Scope B
@@ -134,7 +142,14 @@ void main() {
         scopeFB,
         sessionGeneration: nextSessionGeneration(),
       );
-      await syncEngine.saveLocalCursor('900');
+      await syncEngine.saveLocalCursor(
+        '900',
+        lease: SyncLease(
+          db: await SqliteDatabase.instance,
+          credential: BoundCredential.explicit('TOKEN_B'),
+          isCancelled: () => false,
+        ),
+      );
       expect(await syncEngine.getLocalCursor(), equals('900'));
 
       // Reactivate Scope A

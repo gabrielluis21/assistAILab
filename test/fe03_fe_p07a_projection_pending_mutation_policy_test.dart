@@ -568,7 +568,8 @@ Future<void> _createSchema(Database db) async {
       next_retry_at TEXT,
       last_error TEXT,
       remote_disposition TEXT NOT NULL DEFAULT 'UNSENT',
-      status TEXT NOT NULL
+      status TEXT NOT NULL,
+      claim_id TEXT
     )
   ''');
   await db.execute('''
