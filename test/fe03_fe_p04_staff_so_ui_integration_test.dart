@@ -10,7 +10,7 @@ import 'package:assistailab/features/service_orders/service_order_details_provid
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_order_item_entity.dart';
 import 'package:assistailab/features/service_orders/staff_so_commands_provider.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 

@@ -16,7 +16,7 @@ import 'package:assistailab/features/customers/customer_entity.dart';
 import 'package:assistailab/features/customers/customer_repository.dart';
 import 'package:assistailab/features/customers/customers_page.dart';
 import 'package:assistailab/features/customers/customers_provider.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

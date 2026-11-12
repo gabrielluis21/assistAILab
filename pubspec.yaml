@@ -28,6 +28,7 @@ dependencies:
   crypto: ^3.0.3
   flutter_secure_storage: 10.3.2
 
+  material_ui: any
 dev_dependencies:
   flutter_test:
     sdk: flutter

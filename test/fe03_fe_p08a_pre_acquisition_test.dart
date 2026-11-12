@@ -19,7 +19,7 @@ import 'package:assistailab/features/equipment/pre_acquisitions_page.dart';
 import 'package:assistailab/features/equipment/pre_acquisitions_provider.dart';
 import 'package:assistailab/features/service_orders/service_order_entity.dart';
 import 'package:assistailab/features/service_orders/service_orders_provider.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
