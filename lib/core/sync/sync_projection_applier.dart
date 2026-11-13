@@ -38,7 +38,12 @@ abstract final class SyncProjectionApplier {
       identityColumn: 'id',
       protectedIds: policy.serviceOrderIds,
     );
-    await db.delete('payments');
+    await _deleteBootstrapRowsExcept(
+      db,
+      table: 'payments',
+      identityColumn: 'id',
+      protectedIds: policy.paymentIds,
+    );
     await _deleteBootstrapRowsExcept(
       db,
       table: 'equipments',
@@ -403,11 +408,13 @@ final class _ProjectionPendingMutationPolicy {
   final Set<String> customerIds;
   final Set<String> equipmentIds;
   final Set<String> serviceOrderIds;
+  final Set<String> paymentIds;
 
   const _ProjectionPendingMutationPolicy({
     required this.customerIds,
     required this.equipmentIds,
     required this.serviceOrderIds,
+    required this.paymentIds,
   });
 
   static Future<_ProjectionPendingMutationPolicy> forBootstrap(
@@ -418,6 +425,7 @@ final class _ProjectionPendingMutationPolicy {
       includeCustomer: true,
       includeEquipment: true,
       includeServiceOrder: true,
+      includePayment: true,
     );
   }
 
@@ -430,6 +438,7 @@ final class _ProjectionPendingMutationPolicy {
       includeCustomer: entityType == 'CUSTOMER',
       includeEquipment: entityType == 'EQUIPMENT',
       includeServiceOrder: entityType == 'SERVICE_ORDER',
+      includePayment: false,
     );
   }
 
@@ -438,17 +447,20 @@ final class _ProjectionPendingMutationPolicy {
     required bool includeCustomer,
     required bool includeEquipment,
     required bool includeServiceOrder,
+    required bool includePayment,
   }) async {
     final includedTypes = <String>[
       if (includeCustomer) 'CUSTOMER',
       if (includeEquipment) 'EQUIPMENT',
       if (includeServiceOrder) ...['SERVICE_ORDER', 'SERVICE_ORDER_ITEM'],
+      if (includePayment) 'PAYMENT',
     ];
     if (includedTypes.isEmpty) {
       return const _ProjectionPendingMutationPolicy(
         customerIds: {},
         equipmentIds: {},
         serviceOrderIds: {},
+        paymentIds: {},
       );
     }
 
@@ -462,6 +474,7 @@ final class _ProjectionPendingMutationPolicy {
     final customerIds = <String>{};
     final equipmentIds = <String>{};
     final serviceOrderIds = <String>{};
+    final paymentIds = <String>{};
     for (final row in rows) {
       final rawType = row['entity_type'];
       final entityId = row['entity_id'];
@@ -477,12 +490,15 @@ final class _ProjectionPendingMutationPolicy {
           serviceOrderIds.add(entityId);
         case 'SERVICE_ORDER_ITEM':
           serviceOrderIds.add(_serviceOrderParentId(row['payload']));
+        case 'PAYMENT':
+          paymentIds.add(entityId);
       }
     }
     return _ProjectionPendingMutationPolicy(
       customerIds: customerIds,
       equipmentIds: equipmentIds,
       serviceOrderIds: serviceOrderIds,
+      paymentIds: paymentIds,
     );
   }
 
@@ -491,6 +507,7 @@ final class _ProjectionPendingMutationPolicy {
       'CUSTOMER' => customerIds.contains(entityId),
       'EQUIPMENT' => equipmentIds.contains(entityId),
       'SERVICE_ORDER' => serviceOrderIds.contains(entityId),
+      'PAYMENT' => paymentIds.contains(entityId),
       _ => false,
     };
   }

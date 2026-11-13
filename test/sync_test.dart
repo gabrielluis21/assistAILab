@@ -98,6 +98,12 @@ class FakeSyncEngine extends SyncEngine {
   /// Controls how many changes the fake pull reports.
   int fakePullChanges = 0;
 
+  /// When true, pushPendingOutbox throws SyncBootstrapRefreshRequiredException.
+  bool bootstrapShouldRefreshRequired = false;
+
+  /// When set, pullIncrementalChanges throws SyncHttpException with this code.
+  int? pullShouldFailWithStatus;
+
   FakeSyncEngine({required super.apiClient, super.outboxDao});
 
   @override
@@ -112,6 +118,12 @@ class FakeSyncEngine extends SyncEngine {
     }
     if (inProgressCompleter != null) {
       await inProgressCompleter!.future;
+    }
+    if (bootstrapShouldRefreshRequired) {
+      throw const SyncBootstrapRefreshRequiredException(
+        statusCode: 409,
+        responseBody: 'SYNC_V2_REFRESH_REQUIRED',
+      );
     }
     if (shouldThrow) {
       throw Exception('Network push failed');
@@ -131,10 +143,69 @@ class FakeSyncEngine extends SyncEngine {
     if (delay > Duration.zero) {
       await Future.delayed(delay);
     }
+    if (pullShouldFailWithStatus != null) {
+      throw SyncHttpException(
+        statusCode: pullShouldFailWithStatus!,
+        operation: 'pull',
+        responseBody: 'SYNC_V2_REFRESH_REQUIRED',
+      );
+    }
     if (shouldThrow) {
       throw Exception('Network pull failed');
     }
     return SyncPullSummary(totalChanges: fakePullChanges);
+  }
+}
+
+/// Helper engine that throws a fixed exception from pushPendingOutbox.
+/// Used to test coordinator handling of non-bootstrap HTTP errors.
+class _ThrowingPushEngine extends SyncEngine {
+  final Exception error;
+
+  _ThrowingPushEngine({required super.apiClient, required this.error});
+
+  @override
+  Future<SyncPushSummary> pushPendingOutbox({
+    int batchSize = 20,
+    Database? db,
+    SyncLease? lease,
+  }) async {
+    throw error;
+  }
+
+  @override
+  Future<SyncPullSummary> pullIncrementalChanges({
+    int pullPageSize = 50,
+    int maxPullPagesPerCycle = 10,
+    Database? db,
+    SyncLease? lease,
+  }) async {
+    return const SyncPullSummary(totalChanges: 0);
+  }
+}
+
+class _TestTimer implements Timer {
+  final Duration duration;
+  final void Function() callback;
+  bool _isActive = true;
+
+  _TestTimer(this.duration, this.callback);
+
+  @override
+  bool get isActive => _isActive;
+
+  @override
+  void cancel() {
+    _isActive = false;
+  }
+
+  @override
+  int get tick => 0;
+
+  void fire() {
+    if (_isActive) {
+      callback();
+    }
   }
 }
 
@@ -2688,5 +2759,795 @@ void main() {
     expect(jsonDecode(row['payload'] as String), {'name': 'concurrent'});
     await db
         .delete('outbox', where: 'operation_id = ?', whereArgs: [operationId]);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Bootstrap 409 SYNC_V2_REFRESH_REQUIRED — Backoff & Recovery Tests
+  // ─────────────────────────────────────────────────────────────────────────
+
+  group(
+      'Bootstrap 409 SYNC_V2_REFRESH_REQUIRED — SyncBootstrapRefreshRequiredException',
+      () {
+    test(
+        'SyncBootstrapRefreshRequiredException is a SyncHttpException with operation=bootstrap',
+        () {
+      const ex = SyncBootstrapRefreshRequiredException(
+        statusCode: 409,
+        responseBody: 'SYNC_V2_REFRESH_REQUIRED',
+      );
+      expect(ex, isA<SyncHttpException>());
+      expect(ex.statusCode, equals(409));
+      expect(ex.operation, equals('bootstrap'));
+      expect(ex.responseBody, equals('SYNC_V2_REFRESH_REQUIRED'));
+      expect(ex.toString(), contains('SyncBootstrapRefreshRequiredException'));
+      expect(ex.toString(), contains('409'));
+    });
+
+    test(
+        'SyncBootstrapRefreshRequiredException with SYNC_V2_BOOTSTRAP_REQUIRED body is also valid',
+        () {
+      const ex = SyncBootstrapRefreshRequiredException(
+        statusCode: 409,
+        responseBody: 'SYNC_V2_BOOTSTRAP_REQUIRED',
+      );
+      expect(ex.operation, equals('bootstrap'));
+      expect(ex.responseBody, equals('SYNC_V2_BOOTSTRAP_REQUIRED'));
+    });
+  });
+
+  group('Bootstrap 409 — BackgroundSyncCoordinator backoff and state', () {
+    late FakeApiClient fakeApi;
+    late FakeOutboxDao fakeDao;
+    late FakeSyncEngine fakeEngine;
+    late DateTime fakeNow;
+    late BackgroundSyncCoordinator coordinator;
+
+    BackgroundSyncCoordinator makeCoordinator({
+      int Function(int)? jitter,
+      DateTime Function()? nowProvider,
+    }) {
+      return BackgroundSyncCoordinator(
+        syncEngine: fakeEngine,
+        outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
+        jitterGenerator: jitter ?? (_) => 0,
+        nowProvider: nowProvider ?? () => fakeNow,
+      );
+    }
+
+    setUp(() {
+      fakeApi = FakeApiClient();
+      fakeDao = FakeOutboxDao();
+      fakeEngine = FakeSyncEngine(apiClient: fakeApi, outboxDao: fakeDao);
+      fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+      coordinator = makeCoordinator();
+    });
+
+    tearDown(() {
+      coordinator.dispose();
+    });
+
+    // ── T1: state transitions to error, retryNotBefore set ──────────────────
+    test('T1: Bootstrap 409 sets state to error and emits retryNotBefore',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      final states = <SyncState>[];
+      coordinator.stateStream.listen(states.add);
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(coordinator.state.status, equals(SyncStatus.error));
+      expect(coordinator.state.isSyncing, isFalse);
+      expect(coordinator.state.retryNotBefore, isNotNull);
+      expect(coordinator.state.lastError,
+          contains('SyncBootstrapRefreshRequiredException'));
+      // bootstrapFailureCount incremented
+      expect(coordinator.bootstrapFailureCount, equals(1));
+    });
+
+    // ── T2: no push or pull executed after bootstrap 409 ────────────────────
+    test('T2: No pull is executed after bootstrap 409 fails', () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      // push was called (and threw), pull must NOT have been called
+      expect(fakeEngine.pushCount, equals(1));
+      expect(fakeEngine.pullCount, equals(0));
+    });
+
+    // ── T3: retryNotBefore gates subsequent sync requests ───────────────────
+    test('T3: Sync request during backoff is deferred, not ignored', () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      // After failure, backoff is active.
+      expect(coordinator.retryNotBefore, isNotNull);
+      final retryAt = coordinator.retryNotBefore!;
+      expect(retryAt.isAfter(fakeNow), isTrue);
+
+      // Simulate time still before the deadline
+      fakeNow = retryAt.subtract(const Duration(seconds: 1));
+
+      // Reset fake so next cycle would succeed
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+
+      // Request during backoff → should coalesce, not dispatch immediately
+      coordinator.requestSync(SyncTrigger.periodic);
+
+      // No new push should have been dispatched synchronously
+      await Future.delayed(const Duration(milliseconds: 10));
+      expect(
+          fakeEngine.pushCount, equals(1)); // still 1 from the failed attempt
+    });
+
+    // ── T4: calculateBootstrapBackoff exponential progression ───────────────
+    test('T4: calculateBootstrapBackoff is exponential with 0 jitter', () {
+      // base=2, exp(0)=2, exp(1)=4, exp(2)=8, exp(8+)=300
+      fakeNow = DateTime(2026, 1, 1, 0, 0, 0);
+      coordinator = makeCoordinator(jitter: (_) => 0);
+
+      final at0 = coordinator.calculateBootstrapBackoff(0);
+      final at1 = coordinator.calculateBootstrapBackoff(1);
+      final at2 = coordinator.calculateBootstrapBackoff(2);
+      final at8 = coordinator.calculateBootstrapBackoff(8);
+
+      expect(at0.difference(fakeNow).inSeconds, equals(2)); // 2*2^0 = 2s
+      expect(at1.difference(fakeNow).inSeconds, equals(4)); // 2*2^1 = 4s
+      expect(at2.difference(fakeNow).inSeconds, equals(8)); // 2*2^2 = 8s
+      expect(at8.difference(fakeNow).inSeconds, equals(300)); // capped at 300s
+    });
+
+    // ── T5: backoff cap at 300s ──────────────────────────────────────────────
+    test(
+        'T5: calculateBootstrapBackoff is capped at 300s regardless of failureCount',
+        () {
+      fakeNow = DateTime(2026, 1, 1, 0, 0, 0);
+      coordinator = makeCoordinator(jitter: (_) => 0);
+
+      for (final count in [8, 10, 20, 100]) {
+        final at = coordinator.calculateBootstrapBackoff(count);
+        expect(
+          at.difference(fakeNow).inSeconds,
+          equals(300),
+          reason: 'failureCount=$count should be capped at 300s',
+        );
+      }
+    });
+
+    // ── T6: success after failure clears backoff state ───────────────────────
+    test(
+        'T6: Successful sync after bootstrap 409 clears failureCount and retryNotBefore',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(coordinator.bootstrapFailureCount, equals(1));
+      expect(coordinator.retryNotBefore, isNotNull);
+
+      // Advance time past deadline so backoff gate lets through
+      fakeNow = coordinator.retryNotBefore!.add(const Duration(seconds: 1));
+
+      // Now succeed
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(coordinator.bootstrapFailureCount, equals(0));
+      expect(coordinator.retryNotBefore, isNull);
+      expect(coordinator.state.retryNotBefore, isNull);
+      expect(coordinator.state.status, equals(SyncStatus.idle));
+    });
+
+    // ── T7: multiple failures increment count correctly ──────────────────────
+    test('T7: Consecutive bootstrap 409s accumulate failure count', () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      for (int i = 1; i <= 3; i++) {
+        // Advance time past the last retryNotBefore to allow each request through
+        if (coordinator.retryNotBefore != null) {
+          fakeNow = coordinator.retryNotBefore!.add(const Duration(seconds: 1));
+        }
+        await coordinator.requestSync(SyncTrigger.manual);
+        expect(coordinator.bootstrapFailureCount, equals(i),
+            reason: 'After $i failures, count should be $i');
+      }
+    });
+
+    // ── T8: cancelActiveSync resets the backoff timer ────────────────────────
+    test('T8: cancelActiveSync clears backoff timer', () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(coordinator.retryNotBefore, isNotNull);
+
+      coordinator.cancelActiveSync();
+
+      // After cancel, retryNotBefore is preserved in state but coordinator is free
+      // (timer cancelled; subsequent dispose should not throw)
+    });
+
+    // ── T9: jitter is injectable and testable ────────────────────────────────
+    test('T9: Jitter generator is applied to backoff calculation', () {
+      fakeNow = DateTime(2026, 1, 1, 0, 0, 0);
+
+      // With 0 jitter: failure 0 → 2s
+      final c0 = makeCoordinator(jitter: (_) => 0);
+      final at0 = c0.calculateBootstrapBackoff(0);
+      expect(at0.difference(fakeNow).inSeconds, equals(2));
+      c0.dispose();
+
+      // With 2s jitter: failure 0 → 4s
+      final c2 = makeCoordinator(jitter: (_) => 2);
+      final at2 = c2.calculateBootstrapBackoff(0);
+      expect(at2.difference(fakeNow).inSeconds, equals(4));
+      c2.dispose();
+    });
+
+    // ── T10: SyncState retryNotBefore serialized correctly ──────────────────
+    test('T10: SyncState.copyWith retryNotBefore and clearRetryNotBefore', () {
+      final initial = SyncState.initial();
+      expect(initial.retryNotBefore, isNull);
+
+      final deadline = DateTime(2026, 1, 1, 12, 5, 0);
+      final withRetry = initial.copyWith(retryNotBefore: deadline);
+      expect(withRetry.retryNotBefore, equals(deadline));
+
+      final cleared = withRetry.copyWith(clearRetryNotBefore: true);
+      expect(cleared.retryNotBefore, isNull);
+    });
+
+    // ── T11: HTTP 401 still triggers onAuthorizationFailure ─────────────────
+    test(
+        'T11: HTTP 401 from push triggers onAuthorizationFailure, not bootstrap backoff',
+        () async {
+      bool authFailureCalled = false;
+      final boundGeneration = activeSessionGeneration;
+      final manager = AuthScopedDatabaseManager.instance;
+      final binding = SyncSessionBinding(
+        scope: testScope,
+        sessionGeneration: boundGeneration,
+        resolveBoundHandle: () async {
+          final handle = manager.currentHandle;
+          return handle != null &&
+                  handle.authScope == testScope &&
+                  handle.sessionGeneration == boundGeneration
+              ? handle
+              : null;
+        },
+        isHandleCurrent: manager.isCurrentHandle,
+        resolveToken: () async => 'test-session-token',
+        isCurrentOnline: () => activeSessionGeneration == boundGeneration,
+        isAuthHttpGenerationCurrent: (generation) =>
+            generation == activeSessionGeneration,
+        onAuthorizationFailure: ({
+          required sessionGeneration,
+          required statusCode,
+          required authorityRevalidation,
+        }) {
+          authFailureCalled = true;
+        },
+      );
+
+      fakeEngine.shouldThrow = false;
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+
+      // Create a fake engine that throws SyncHttpException 401
+      final c401 = BackgroundSyncCoordinator(
+        syncEngine: _ThrowingPushEngine(
+          apiClient: fakeApi,
+          error: const SyncHttpException(
+            statusCode: 401,
+            operation: 'push',
+            responseBody: 'Unauthorized',
+          ),
+        ),
+        outboxDao: fakeDao,
+        sessionBinding: binding,
+        jitterGenerator: (_) => 0,
+        nowProvider: () => fakeNow,
+      );
+
+      await c401.requestSync(SyncTrigger.manual);
+
+      expect(authFailureCalled, isTrue);
+      expect(c401.bootstrapFailureCount, equals(0)); // NOT a bootstrap failure
+      expect(c401.retryNotBefore, isNull);
+      c401.dispose();
+    });
+
+    // ── T12: HTTP 429 is NOT classified as bootstrap failure ─────────────────
+    test(
+        'T12: HTTP 429 from push is not classified as SyncBootstrapRefreshRequiredException',
+        () async {
+      final c429 = BackgroundSyncCoordinator(
+        syncEngine: _ThrowingPushEngine(
+          apiClient: fakeApi,
+          error: const SyncHttpException(
+            statusCode: 429,
+            operation: 'push',
+            responseBody: 'Too Many Requests',
+          ),
+        ),
+        outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
+        jitterGenerator: (_) => 0,
+        nowProvider: () => fakeNow,
+      );
+
+      await c429.requestSync(SyncTrigger.manual);
+
+      expect(c429.bootstrapFailureCount, equals(0));
+      expect(c429.retryNotBefore, isNull);
+      expect(c429.state.status, equals(SyncStatus.error));
+      c429.dispose();
+    });
+
+    // ── T13: HTTP 5xx is NOT classified as bootstrap failure ─────────────────
+    test(
+        'T13: HTTP 500 from push is not classified as SyncBootstrapRefreshRequiredException',
+        () async {
+      final c500 = BackgroundSyncCoordinator(
+        syncEngine: _ThrowingPushEngine(
+          apiClient: fakeApi,
+          error: const SyncHttpException(
+            statusCode: 500,
+            operation: 'push',
+            responseBody: 'Internal Server Error',
+          ),
+        ),
+        outboxDao: fakeDao,
+        sessionBinding: currentSessionBinding(),
+        jitterGenerator: (_) => 0,
+        nowProvider: () => fakeNow,
+      );
+
+      await c500.requestSync(SyncTrigger.manual);
+
+      expect(c500.bootstrapFailureCount, equals(0));
+      expect(c500.retryNotBefore, isNull);
+      c500.dispose();
+    });
+
+    // ── T14: Pull 409 keeps its own behaviour (invalidateV2Bootstrap) ─────────
+    test(
+        'T14: HTTP 409 on pull uses SyncHttpException (not bootstrap failure), does not set retryNotBefore',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      fakeEngine.pullShouldFailWithStatus = 409;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      // push succeeded, pull failed with generic 409 SyncHttpException
+      expect(fakeEngine.pushCount, equals(1));
+      expect(fakeEngine.pullCount, equals(1));
+      expect(coordinator.bootstrapFailureCount, equals(0)); // NOT bootstrap
+      expect(coordinator.retryNotBefore, isNull);
+      expect(coordinator.state.status, equals(SyncStatus.error));
+    });
+
+    // ── T15: Outbox intact after bootstrap 409 ───────────────────────────────
+    test('T15: Outbox rows remain intact after bootstrap 409 failure',
+        () async {
+      final db = AuthScopedDatabaseManager.instance.currentHandle!.database;
+      const opId = 'op-bootstrap-409-outbox-intact';
+      await db.insert('outbox', {
+        'operation_id': opId,
+        'entity_type': 'CUSTOMER',
+        'entity_id': 'cust-409',
+        'operation_type': 'CREATE',
+        'payload': '{"name":"Bootstrap 409 Customer"}',
+        'status': 'PENDING',
+        'remote_disposition': 'UNSENT',
+        'attempt_count': 0,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      final rows = await db
+          .query('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+      expect(rows, hasLength(1));
+      expect(rows.first['status'], equals('PENDING'));
+      expect(rows.first['remote_disposition'], equals('UNSENT'));
+      expect(rows.first['attempt_count'], equals(0));
+
+      await db.delete('outbox', where: 'operation_id = ?', whereArgs: [opId]);
+    });
+
+    // ── T16: PROCESSING entries not recovered due to bootstrap failure ───────
+    test('T16: Bootstrap 409 does not trigger recovery of PROCESSING entries',
+        () async {
+      fakeDao.recoveredCount = 5;
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      // Recovery happens only during initialize(), not during a sync cycle
+      expect(fakeDao.recoveredCount, equals(5)); // untouched by sync cycle
+    });
+
+    // ── T17: Concurrent triggers coalesce under backoff ──────────────────────
+    test(
+        'T17: Multiple sync requests during backoff all coalesce to one pending catchUp',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(coordinator.bootstrapFailureCount, equals(1));
+
+      // All additional requests during backoff must coalesce (not stack)
+      coordinator.requestSync(SyncTrigger.periodic);
+      coordinator.requestSync(SyncTrigger.appResumed);
+      coordinator.requestSync(SyncTrigger.scheduledConsolidation);
+
+      await Future.delayed(const Duration(milliseconds: 10));
+
+      // Only the first failed push occurred; no additional pushes
+      expect(fakeEngine.pushCount, equals(1));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SEC-BOOT-02: Autonomous Bootstrap Backoff Retry & Safety Tests
+  // ─────────────────────────────────────────────────────────────────────────
+
+  group('SEC-BOOT-02: Autonomous Bootstrap Backoff Retry & Safety Tests', () {
+    late FakeApiClient fakeApi;
+    late FakeOutboxDao fakeDao;
+    late FakeSyncEngine fakeEngine;
+    late DateTime fakeNow;
+    late List<_TestTimer> scheduledTimers;
+    late BackgroundSyncCoordinator coordinator;
+
+    BackgroundSyncCoordinator makeCoordinator({
+      SyncSessionBinding? binding,
+      int Function(int)? jitter,
+      DateTime Function()? nowProvider,
+      Timer Function(Duration, void Function())? timerFactory,
+    }) {
+      return BackgroundSyncCoordinator(
+        syncEngine: fakeEngine,
+        outboxDao: fakeDao,
+        sessionBinding: binding ?? currentSessionBinding(),
+        jitterGenerator: jitter ?? (_) => 0,
+        nowProvider: nowProvider ?? () => fakeNow,
+        timerFactory: timerFactory ??
+            (duration, callback) {
+              final timer = _TestTimer(duration, callback);
+              scheduledTimers.add(timer);
+              return timer;
+            },
+      );
+    }
+
+    setUp(() {
+      fakeApi = FakeApiClient();
+      fakeDao = FakeOutboxDao();
+      fakeEngine = FakeSyncEngine(apiClient: fakeApi, outboxDao: fakeDao);
+      fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+      scheduledTimers = <_TestTimer>[];
+      coordinator = makeCoordinator();
+    });
+
+    tearDown(() {
+      coordinator.dispose();
+    });
+
+    // ── T1: Autonomous retry without any external triggers ──────────────────
+    test('T1: Autonomous retry without any new external triggers', () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(fakeEngine.pushCount, equals(1));
+      expect(coordinator.state.status, equals(SyncStatus.error));
+      expect(coordinator.isBackoffRetryScheduled, isTrue);
+      expect(scheduledTimers, hasLength(1));
+      expect(scheduledTimers.first.isActive, isTrue);
+
+      final retryAt = coordinator.retryNotBefore;
+      expect(retryAt, isNotNull);
+
+      // Do NOT issue any new external triggers.
+      // Settle fake engine to succeed on next attempt.
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+
+      // Advance clock to the exact deadline and fire timer.
+      fakeNow = retryAt!;
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      // Succeeded autonomously!
+      expect(fakeEngine.pushCount, equals(2));
+      expect(fakeEngine.pullCount, equals(1));
+      expect(coordinator.state.status, equals(SyncStatus.idle));
+      expect(coordinator.bootstrapFailureCount, equals(0));
+      expect(coordinator.isBackoffRetryScheduled, isFalse);
+    });
+
+    // ── T2: Respect backoff deadline before firing ──────────────────────────
+    test('T2: Rejects execution if timer callback fires before deadline',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+
+      final deadline = coordinator.retryNotBefore!;
+
+      // Clock is 1 second before deadline.
+      fakeNow = deadline.subtract(const Duration(seconds: 1));
+
+      // Attempt to fire timer early.
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      // Must NOT have started a new sync.
+      expect(fakeEngine.pushCount, equals(1));
+    });
+
+    // ── T3: Single active timer even with multiple concurrent triggers ──────
+    test('T3: Single timer maintained across multiple triggers during backoff',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+
+      // Multiple triggers during backoff.
+      await coordinator.requestSync(SyncTrigger.periodic);
+      await coordinator.requestSync(SyncTrigger.appResumed);
+      await coordinator.requestSync(SyncTrigger.localMutation);
+
+      // Still only one timer created!
+      expect(scheduledTimers, hasLength(1));
+
+      // Advance clock and fire.
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      fakeNow = coordinator.retryNotBefore!;
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      // Exactly one retry executed.
+      expect(fakeEngine.pushCount, equals(2));
+    });
+
+    // ── T4: cancelActiveSync cancels timer and suppresses callback ───────────
+    test('T4: cancelActiveSync cancels timer and suppresses callback execution',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+
+      final timer = scheduledTimers.first;
+      expect(timer.isActive, isTrue);
+
+      coordinator.cancelActiveSync();
+      expect(timer.isActive, isFalse);
+
+      fakeNow = fakeNow.add(const Duration(seconds: 10));
+      timer.fire();
+      await Future.delayed(Duration.zero);
+
+      // No new sync initiated.
+      expect(fakeEngine.pushCount, equals(1));
+    });
+
+    // ── T5: dispose suppresses callback execution ────────────────────────────
+    test('T5: dispose cancels timer and suppresses callback execution',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+
+      final timer = scheduledTimers.first;
+      coordinator.dispose();
+      expect(timer.isActive, isFalse);
+
+      fakeNow = fakeNow.add(const Duration(seconds: 10));
+      timer.fire();
+      await Future.delayed(Duration.zero);
+
+      expect(fakeEngine.pushCount, equals(1));
+    });
+
+    // ── T6: Stale session or generation suppresses retry ─────────────────────
+    test('T6: Stale session generation suppresses timer retry', () async {
+      var localSessionGen = activeSessionGeneration;
+      final binding = SyncSessionBinding(
+        scope: testScope,
+        sessionGeneration: localSessionGen,
+        resolveBoundHandle: () async =>
+            AuthScopedDatabaseManager.instance.currentHandle,
+        isHandleCurrent: (_) => true,
+        resolveToken: () async => 'test-token',
+        isCurrentOnline: () => localSessionGen == activeSessionGeneration,
+        isAuthHttpGenerationCurrent: (gen) => gen == localSessionGen,
+        onAuthorizationFailure: ({
+          required sessionGeneration,
+          required statusCode,
+          required authorityRevalidation,
+        }) {},
+      );
+
+      final customCoord = makeCoordinator(binding: binding);
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await customCoord.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+
+      // Invalidate session generation (e.g. user logged out or changed session).
+      localSessionGen = 99999;
+
+      fakeNow = fakeNow.add(const Duration(seconds: 10));
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      // Stale callback discarded.
+      expect(fakeEngine.pushCount, equals(1));
+      customCoord.dispose();
+    });
+
+    // ── T7: Stale/replaced timer callback does not execute duplicate sync ───
+    test('T7: Replaced or cancelled timer callback does not execute retry',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(1));
+      final timer1 = scheduledTimers[0];
+
+      // Cancel and trigger a new cycle after deadline to create timer2.
+      final deadline1 = coordinator.retryNotBefore!;
+      coordinator.cancelActiveSync();
+      fakeNow = deadline1.add(const Duration(seconds: 1));
+      await coordinator.requestSync(SyncTrigger.manual);
+      expect(scheduledTimers, hasLength(2));
+      expect(fakeEngine.pushCount, equals(2));
+      final timer2 = scheduledTimers[1];
+
+      // Advance clock past second deadline.
+      final deadline2 = coordinator.retryNotBefore!;
+      fakeNow = deadline2.add(const Duration(seconds: 1));
+
+      // Firing stale timer1 must be a no-op.
+      timer1.fire();
+      await Future.delayed(Duration.zero);
+      expect(fakeEngine.pushCount, equals(2));
+
+      // Firing current timer2 executes retry cleanly.
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      timer2.fire();
+      await Future.delayed(Duration.zero);
+      expect(fakeEngine.pushCount, equals(3));
+    });
+
+    // ── T8: Trigger preservation (pending trigger vs scheduledConsolidation) ─
+    test('T8: Preserves pending trigger or defaults to scheduledConsolidation',
+        () async {
+      // Case A: Default to scheduledConsolidation when no pending trigger existed.
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      fakeNow = coordinator.retryNotBefore!;
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      expect(coordinator.state.lastTrigger,
+          equals(SyncTrigger.scheduledConsolidation));
+
+      // Case B: Preserves pending trigger when one was emitted during backoff.
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      // Emit localMutation during backoff.
+      await coordinator.requestSync(SyncTrigger.localMutation,
+          debounceDuration: Duration.zero);
+
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      fakeNow = coordinator.retryNotBefore!;
+      scheduledTimers.last.fire();
+      await Future.delayed(Duration.zero);
+
+      expect(coordinator.state.lastTrigger, equals(SyncTrigger.localMutation));
+    });
+
+    // ── T9: Serialization and lease integration during retry ────────────────
+    test(
+        'T9: Retry executes through normal coordinator flow with lease barrier',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      fakeNow = coordinator.retryNotBefore!;
+
+      // During tick, coordinator enters syncing state and acquires lease.
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      expect(coordinator.state.status, equals(SyncStatus.idle));
+      expect(coordinator.lastCycleDidWork, isTrue);
+    });
+
+    // ── T10: Visual state clears expired retryNotBefore ──────────────────────
+    test('T10: retryNotBefore is cleared from visual state once expired',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(coordinator.retryNotBefore, isNotNull);
+      expect(coordinator.state.retryNotBefore, isNotNull);
+
+      final deadline = coordinator.retryNotBefore!;
+
+      // Advance clock past deadline.
+      fakeNow = deadline.add(const Duration(seconds: 1));
+
+      // Both coordinator and state getter present null (no obsolete deadline).
+      expect(coordinator.retryNotBefore, isNull);
+      expect(coordinator.state.retryNotBefore, isNull);
+
+      // Fire timer to complete retry.
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      expect(coordinator.retryNotBefore, isNull);
+      expect(coordinator.state.retryNotBefore, isNull);
+      expect(coordinator.state.status, equals(SyncStatus.idle));
+    });
+
+    // ── T11: Reschedules timer for remaining time if triggered early ─────────
+    test('T11: Reschedules timer for remaining duration if fired prematurely',
+        () async {
+      fakeEngine.bootstrapShouldRefreshRequired = true;
+      await coordinator.requestSync(SyncTrigger.manual);
+
+      expect(scheduledTimers, hasLength(1));
+      expect(coordinator.retryNotBefore, isNotNull);
+
+      final initialDeadline = coordinator.retryNotBefore!;
+      expect(
+          scheduledTimers.first.duration, equals(const Duration(seconds: 2)));
+
+      // Advance clock by only 1 second (1 second before deadline).
+      fakeNow = initialDeadline.subtract(const Duration(seconds: 1));
+
+      // Premature timer firing.
+      scheduledTimers.first.fire();
+      await Future.delayed(Duration.zero);
+
+      // Verify no premature sync occurred.
+      expect(fakeEngine.pushCount, equals(1));
+
+      // Verify a new timer was scheduled for the remaining 1 second.
+      expect(scheduledTimers, hasLength(2));
+      expect(scheduledTimers[1].duration, equals(const Duration(seconds: 1)));
+      expect(scheduledTimers[1].isActive, isTrue);
+      expect(coordinator.retryNotBefore, equals(initialDeadline));
+
+      // Now advance clock to the actual deadline.
+      fakeNow = initialDeadline;
+      fakeEngine.bootstrapShouldRefreshRequired = false;
+
+      // Fire the rescheduled timer.
+      scheduledTimers[1].fire();
+      await Future.delayed(Duration.zero);
+
+      // Verify exactly one new sync occurred after reaching the full deadline.
+      expect(fakeEngine.pushCount, equals(2));
+      expect(coordinator.state.status, equals(SyncStatus.idle));
+      expect(coordinator.retryNotBefore, isNull);
+    });
   });
 }

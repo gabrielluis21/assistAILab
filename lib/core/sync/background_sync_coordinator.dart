@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
@@ -74,6 +75,14 @@ class BackgroundSyncCoordinator {
   bool _isDisposed = false;
   SyncLease? _activeLease;
 
+  int _bootstrapFailureCount = 0;
+  DateTime? _retryNotBefore;
+  Timer? _backoffRetryTimer;
+  final int Function(int max)? _jitterGenerator;
+  final DateTime Function()? _nowProvider;
+  final Timer Function(Duration duration, void Function() callback)?
+      _timerFactory;
+
   /// Whether the last completed sync cycle performed any real work.
   bool lastCycleDidWork = false;
 
@@ -81,6 +90,9 @@ class BackgroundSyncCoordinator {
     required this.syncEngine,
     OutboxDao? outboxDao,
     this.sessionBinding,
+    int Function(int max)? jitterGenerator,
+    DateTime Function()? nowProvider,
+    Timer Function(Duration duration, void Function() callback)? timerFactory,
     @Deprecated(
       'Use sessionBinding. Legacy resolvers do not provide scope/generation proof and are ignored.',
     )
@@ -89,7 +101,43 @@ class BackgroundSyncCoordinator {
       'Use sessionBinding. Legacy resolvers do not provide scope/generation proof and are ignored.',
     )
     Future<String?> Function()? tokenResolver,
-  }) : outboxDao = outboxDao ?? OutboxDao();
+  })  : outboxDao = outboxDao ?? OutboxDao(),
+        _jitterGenerator = jitterGenerator,
+        _nowProvider = nowProvider,
+        _timerFactory = timerFactory;
+
+  /// Current retryNotBefore restriction, if any.
+  DateTime? get retryNotBefore {
+    if (_retryNotBefore != null && !_now().isBefore(_retryNotBefore!)) {
+      return null;
+    }
+    return _retryNotBefore;
+  }
+
+  /// Whether a backoff retry timer is currently scheduled.
+  bool get isBackoffRetryScheduled =>
+      _backoffRetryTimer != null && _backoffRetryTimer!.isActive;
+
+  /// Number of consecutive bootstrap refresh failures recorded.
+  int get bootstrapFailureCount => _bootstrapFailureCount;
+
+  DateTime _now() => _nowProvider != null ? _nowProvider!() : DateTime.now();
+
+  /// Calculates next retry timestamp using exponential backoff with capped delay and jitter.
+  DateTime calculateBootstrapBackoff(int failureCount) {
+    const baseDelaySeconds = 2;
+    const maxDelaySeconds = 300; // 5 minutes max
+    final expDelay = failureCount >= 8
+        ? maxDelaySeconds
+        : baseDelaySeconds * pow(2, failureCount).toInt();
+    final cappedDelay = min(expDelay, maxDelaySeconds);
+    final jitter = _jitterGenerator != null
+        ? _jitterGenerator!(3)
+        : Random().nextInt(3); // 0-2 seconds jitter
+    return _now().add(
+      Duration(seconds: min(maxDelaySeconds, cappedDelay + jitter)),
+    );
+  }
 
   /// Cancels any active or scheduled sync cycle.
   void cancelActiveSync() {
@@ -98,6 +146,8 @@ class BackgroundSyncCoordinator {
     _hasPendingCatchUp = false;
     _pendingCatchUpTrigger = null;
     _debounceTimer?.cancel();
+    _backoffRetryTimer?.cancel();
+    _backoffRetryTimer = null;
     final lease = _activeLease;
     if (lease != null) {
       lease.barrier.requestCancellation();
@@ -106,7 +156,14 @@ class BackgroundSyncCoordinator {
   }
 
   /// Current synchronization state snapshot.
-  SyncState get state => _stateNotifier.value;
+  SyncState get state {
+    final current = _stateNotifier.value;
+    if (current.retryNotBefore != null &&
+        !_now().isBefore(current.retryNotBefore!)) {
+      return current.copyWith(clearRetryNotBefore: true);
+    }
+    return current;
+  }
 
   /// ValueListenable for UI components to listen directly.
   ValueListenable<SyncState> get stateListenable => _stateNotifier;
@@ -235,6 +292,23 @@ class BackgroundSyncCoordinator {
       return;
     }
 
+    // Check if we are currently barred by backoff (retryNotBefore).
+    if (_retryNotBefore != null) {
+      final now = _now();
+      if (now.isBefore(_retryNotBefore!)) {
+        _scheduleBackoffRetry(trigger: trigger);
+        return;
+      } else {
+        // Backoff deadline has passed; clear timer and expired visual restriction
+        _retryNotBefore = null;
+        _backoffRetryTimer?.cancel();
+        _backoffRetryTimer = null;
+        if (_stateNotifier.value.retryNotBefore != null) {
+          _emitState(state.copyWith(clearRetryNotBefore: true));
+        }
+      }
+    }
+
     final cycleGeneration = ++_currentGeneration;
     _isSyncing = true;
     lastCycleDidWork = false;
@@ -315,12 +389,18 @@ class BackgroundSyncCoordinator {
       );
       if (!lease.isStillValid) return;
 
+      _bootstrapFailureCount = 0;
+      _retryNotBefore = null;
+      _backoffRetryTimer?.cancel();
+      _backoffRetryTimer = null;
+
       _emitState(state.copyWith(
         status: SyncStatus.idle,
         isSyncing: false,
         lastSyncAt: DateTime.now(),
         pendingOutboxCount: remainingPending,
         clearLastError: true,
+        clearRetryNotBefore: true,
       ));
     } catch (error) {
       if (!lease.isStillValid) return;
@@ -337,6 +417,13 @@ class BackgroundSyncCoordinator {
         if (!lease.isStillValid) return;
       }
 
+      DateTime? nextRetry;
+      if (error is SyncBootstrapRefreshRequiredException) {
+        _bootstrapFailureCount++;
+        nextRetry = calculateBootstrapBackoff(_bootstrapFailureCount - 1);
+        _retryNotBefore = nextRetry;
+      }
+
       debugPrint('BackgroundSyncCoordinator Sync Error: $error');
       lastCycleDidWork = false;
       final remainingPending = await _getPendingOutboxCount(
@@ -350,6 +437,7 @@ class BackgroundSyncCoordinator {
         isSyncing: false,
         lastError: error.toString(),
         pendingOutboxCount: remainingPending,
+        retryNotBefore: nextRetry,
       ));
     } finally {
       if (identical(_activeLease, lease)) {
@@ -357,15 +445,104 @@ class BackgroundSyncCoordinator {
       }
       if (cycleGeneration == _currentGeneration) {
         _isSyncing = false;
-        if (_hasPendingCatchUp && !_isDisposed) {
-          final nextTrigger =
-              _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
-          _hasPendingCatchUp = false;
-          _pendingCatchUpTrigger = null;
-          scheduleMicrotask(() => _dispatchSync(nextTrigger));
+        if (!_isDisposed) {
+          if (_retryNotBefore != null && _now().isBefore(_retryNotBefore!)) {
+            _scheduleBackoffRetry(
+              trigger: _hasPendingCatchUp ? _pendingCatchUpTrigger : null,
+            );
+          } else if (_hasPendingCatchUp) {
+            final nextTrigger =
+                _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
+            _hasPendingCatchUp = false;
+            _pendingCatchUpTrigger = null;
+            scheduleMicrotask(() => _dispatchSync(nextTrigger));
+          }
         }
       }
     }
+  }
+
+  /// Centralized schedule routine for exponential backoff retry.
+  ///
+  /// Guarantees that:
+  /// - Only one retry timer is active per coordinator.
+  /// - The timer is armed even when no pending catch-up trigger exists (autonomous retry).
+  /// - Pending triggers are preserved, defaulting to [SyncTrigger.scheduledConsolidation].
+  /// - The callback validates disposal, timer identity, coordinator generation,
+  ///   session binding authority, and deadline expiration before dispatching.
+  void _scheduleBackoffRetry({SyncTrigger? trigger}) {
+    if (_isDisposed || _retryNotBefore == null) return;
+
+    final now = _now();
+    if (!now.isBefore(_retryNotBefore!)) {
+      _retryNotBefore = null;
+      _backoffRetryTimer?.cancel();
+      _backoffRetryTimer = null;
+      if (_stateNotifier.value.retryNotBefore != null) {
+        _emitState(state.copyWith(clearRetryNotBefore: true));
+      }
+      return;
+    }
+
+    if (trigger != null) {
+      _hasPendingCatchUp = true;
+      _pendingCatchUpTrigger = trigger;
+    } else if (!_hasPendingCatchUp) {
+      _hasPendingCatchUp = true;
+      _pendingCatchUpTrigger = SyncTrigger.scheduledConsolidation;
+    }
+
+    if (_backoffRetryTimer != null && _backoffRetryTimer!.isActive) {
+      return;
+    }
+
+    _backoffRetryTimer?.cancel();
+    final waitDuration = _retryNotBefore!.difference(now);
+    final scheduledGeneration = _currentGeneration;
+    final binding = sessionBinding;
+    final boundSessionGeneration = binding?.sessionGeneration;
+
+    Timer? timer;
+    void onTimerTick() {
+      if (_isDisposed) return;
+      if (!identical(_backoffRetryTimer, timer)) return;
+      if (_currentGeneration != scheduledGeneration) return;
+
+      if (binding != null) {
+        if (!identical(binding, sessionBinding)) return;
+        if (binding.sessionGeneration != boundSessionGeneration) return;
+        if (!_isBindingAuthorityCurrent(binding)) return;
+      }
+
+      final currentDeadline = _retryNotBefore;
+      if (currentDeadline != null && _now().isBefore(currentDeadline)) {
+        _backoffRetryTimer = null;
+        _scheduleBackoffRetry(
+          trigger: _pendingCatchUpTrigger,
+        );
+        return;
+      }
+
+      _backoffRetryTimer = null;
+      _retryNotBefore = null;
+
+      if (_stateNotifier.value.retryNotBefore != null) {
+        _emitState(state.copyWith(clearRetryNotBefore: true));
+      }
+
+      if (_hasPendingCatchUp) {
+        final next =
+            _pendingCatchUpTrigger ?? SyncTrigger.scheduledConsolidation;
+        _hasPendingCatchUp = false;
+        _pendingCatchUpTrigger = null;
+        _dispatchSync(next);
+      }
+    }
+
+    timer = _timerFactory != null
+        ? _timerFactory!(waitDuration, onTimerTick)
+        : Timer(waitDuration, onTimerTick);
+    _backoffRetryTimer = timer;
   }
 
   Future<BoundDatabaseHandle?> _resolveCurrentHandle(
@@ -461,6 +638,7 @@ class BackgroundSyncCoordinator {
   }
 
   void dispose() {
+    if (_isDisposed) return;
     _isDisposed = true;
     cancelActiveSync();
     _stateController.close();

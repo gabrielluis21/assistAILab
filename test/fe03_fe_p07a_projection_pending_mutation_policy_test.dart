@@ -45,6 +45,177 @@ void main() {
   tearDown(() => db.close());
 
   group('FE03-P07-A bootstrap pending-mutation policy', () {
+    test(
+        'bootstrap preserves a payment linked to unresolved PAYMENT Outbox and replaces other payments',
+        () async {
+      await _insertPayment(db, id: 'payment-protected', amountMinor: 1250);
+      await _insertPayment(db, id: 'payment-removed', amountMinor: 500);
+      await _insertPaymentOutbox(
+        db,
+        operationId: 'payment-op',
+        entityId: 'payment-protected',
+        status: 'PENDING',
+        disposition: 'UNSENT',
+      );
+      final beforeOutbox = await db.query('outbox', orderBy: 'operation_id');
+      final beforeProtected = (await db.query(
+        'payments',
+        where: 'id = ?',
+        whereArgs: ['payment-protected'],
+      )).single;
+
+      await SyncProjectionApplier.replaceBootstrap(db, [
+        _paymentRecord('payment-protected', amountMinor: 9000),
+        _paymentRecord('payment-remote', amountMinor: 2500),
+      ]);
+
+      final afterProtected = (await db.query(
+        'payments',
+        where: 'id = ?',
+        whereArgs: ['payment-protected'],
+      )).single;
+      expect(afterProtected, beforeProtected);
+      expect(await _paymentAmount(db, 'payment-removed'), isNull);
+      expect(await _paymentAmount(db, 'payment-remote'), 2500);
+      expect(await db.query('outbox', orderBy: 'operation_id'), beforeOutbox);
+    });
+
+    test('bootstrap protects every unresolved and ambiguous PAYMENT Outbox state',
+        () async {
+      const protectedStates = [
+        (
+          status: 'PENDING',
+          disposition: 'UNSENT',
+          attempts: 0,
+          lastAttemptAt: null,
+          claimId: null,
+        ),
+        (
+          status: 'PROCESSING',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:01:00.000Z',
+          claimId: 'claim-processing',
+        ),
+        (
+          status: 'FAILED_TRANSIENT',
+          disposition: 'UNSENT',
+          attempts: 0,
+          lastAttemptAt: null,
+          claimId: null,
+        ),
+        (
+          status: 'CONFLICT',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:02:00.000Z',
+          claimId: null,
+        ),
+        (
+          status: 'REQUIRES_ATTENTION',
+          disposition: 'UNSENT',
+          attempts: 0,
+          lastAttemptAt: null,
+          claimId: null,
+        ),
+        (
+          status: 'REQUIRES_ATTENTION',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:03:00.000Z',
+          claimId: null,
+        ),
+        (
+          status: 'SYNCED',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:04:00.000Z',
+          claimId: null,
+        ),
+        (
+          status: 'SUPERSEDED',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:05:00.000Z',
+          claimId: null,
+        ),
+        (
+          status: 'DISCARDED',
+          disposition: 'AMBIGUOUS',
+          attempts: 1,
+          lastAttemptAt: '2026-09-23T12:06:00.000Z',
+          claimId: null,
+        ),
+      ];
+
+      for (var index = 0; index < protectedStates.length; index++) {
+        final state = protectedStates[index];
+        final paymentId = 'payment-protected-$index';
+        await _insertPayment(db, id: paymentId, amountMinor: 1000 + index);
+        await _insertPaymentOutbox(
+          db,
+          operationId: 'payment-op-$index',
+          entityId: paymentId,
+          status: state.status,
+          disposition: state.disposition,
+          attemptCount: state.attempts,
+          lastAttemptAt: state.lastAttemptAt,
+          claimId: state.claimId,
+        );
+      }
+      final beforePayments = await db.query('payments', orderBy: 'id');
+      final beforeOutbox = await db.query('outbox', orderBy: 'operation_id');
+
+      await SyncProjectionApplier.replaceBootstrap(
+        db,
+        [
+          for (var index = 0; index < protectedStates.length; index++)
+            _paymentRecord(
+              'payment-protected-$index',
+              amountMinor: 9000 + index,
+            ),
+        ],
+      );
+
+      expect(await db.query('payments', orderBy: 'id'), beforePayments);
+      expect(await db.query('outbox', orderBy: 'operation_id'), beforeOutbox);
+    });
+
+    test('safe PAYMENT terminal states release bootstrap protection', () async {
+      const safeStates = [
+        (status: 'SYNCED', disposition: 'CONFIRMED'),
+        (status: 'SUPERSEDED', disposition: 'UNSENT'),
+        (status: 'SUPERSEDED', disposition: 'CONFIRMED'),
+        (status: 'DISCARDED', disposition: 'UNSENT'),
+        (status: 'DISCARDED', disposition: 'CONFIRMED'),
+      ];
+
+      for (var index = 0; index < safeStates.length; index++) {
+        final state = safeStates[index];
+        final paymentId = 'payment-terminal-$index';
+        await _insertPayment(db, id: paymentId, amountMinor: 1000 + index);
+        await _insertPaymentOutbox(
+          db,
+          operationId: 'payment-terminal-op-$index',
+          entityId: paymentId,
+          status: state.status,
+          disposition: state.disposition,
+        );
+      }
+
+      await SyncProjectionApplier.replaceBootstrap(
+        db,
+        [
+          for (var index = 0; index < safeStates.length; index++)
+            _paymentRecord('payment-terminal-$index', amountMinor: 9000 + index),
+        ],
+      );
+
+      for (var index = 0; index < safeStates.length; index++) {
+        expect(await _paymentAmount(db, 'payment-terminal-$index'), 9000 + index);
+      }
+    });
+
     test('bootstrap without pending mutations performs normal replacement',
         () async {
       await _insertCustomer(db, id: 'removed', name: 'Old local');
@@ -687,6 +858,64 @@ Future<void> _insertOutbox(
   });
 }
 
+Future<void> _insertPaymentOutbox(
+  Database db, {
+  required String operationId,
+  required String entityId,
+  required String status,
+  required String disposition,
+  int attemptCount = 0,
+  String? lastAttemptAt,
+  String? claimId,
+}) {
+  return db.insert('outbox', {
+    'operation_id': operationId,
+    'entity_type': 'PAYMENT',
+    'entity_id': entityId,
+    'operation_type': 'UPDATE',
+    'payload': jsonEncode({'id': entityId, 'note': 'immutable payload'}),
+    'created_at': '2026-09-23T12:00:00.000Z',
+    'attempt_count': attemptCount,
+    'last_attempt_at': lastAttemptAt,
+    'next_retry_at': '2026-09-23T12:10:00.000Z',
+    'last_error': 'preserve this history',
+    'remote_disposition': disposition,
+    'status': status,
+    'claim_id': claimId,
+  });
+}
+
+Future<void> _insertPayment(
+  Database db, {
+  required String id,
+  required int amountMinor,
+}) {
+  return db.insert('payments', {
+    'id': id,
+    'service_order_id': 'order-$id',
+    'customer_id': 'customer-$id',
+    'amount_minor': amountMinor,
+    'method': 'PIX',
+    'status': 'PENDING',
+    'notes': 'local snapshot',
+    'paid_at': null,
+    'created_at': '2026-09-23T12:00:00.000Z',
+    'updated_at': '2026-09-23T12:00:00.000Z',
+  });
+}
+
+Future<int?> _paymentAmount(Database db, String id) async {
+  final rows = await db.query(
+    'payments',
+    columns: ['amount_minor'],
+    where: 'id = ?',
+    whereArgs: [id],
+    limit: 1,
+  );
+  if (rows.isEmpty) return null;
+  return (rows.single['amount_minor'] as num).toInt();
+}
+
 Future<void> _insertCustomer(
   Database db, {
   required String id,
@@ -794,6 +1023,23 @@ Map<String, dynamic> _equipmentRecord(
         'model': model,
         'serialNumber': null,
         'notes': null,
+        'updatedAt': '2026-09-23T13:00:00.000Z',
+      },
+    };
+
+Map<String, dynamic> _paymentRecord(String id, {required int amountMinor}) => {
+      'entityType': 'PAYMENT',
+      'entityId': id,
+      'data': {
+        'id': id,
+        'serviceOrderId': 'order-$id',
+        'customerId': 'customer-$id',
+        'amountMinor': amountMinor,
+        'method': 'PIX',
+        'status': 'PENDING',
+        'notes': 'remote snapshot',
+        'paidAt': null,
+        'createdAt': '2026-09-23T13:00:00.000Z',
         'updatedAt': '2026-09-23T13:00:00.000Z',
       },
     };

@@ -17,6 +17,7 @@ class SyncState {
   final int pendingOutboxCount;
   final SyncTrigger? lastTrigger;
   final bool isSyncing;
+  final DateTime? retryNotBefore;
 
   const SyncState({
     this.status = SyncStatus.idle,
@@ -25,6 +26,7 @@ class SyncState {
     this.pendingOutboxCount = 0,
     this.lastTrigger,
     this.isSyncing = false,
+    this.retryNotBefore,
   });
 
   factory SyncState.initial() => const SyncState();
@@ -37,6 +39,8 @@ class SyncState {
     SyncTrigger? lastTrigger,
     bool? isSyncing,
     bool clearLastError = false,
+    DateTime? retryNotBefore,
+    bool clearRetryNotBefore = false,
   }) {
     return SyncState(
       status: status ?? this.status,
@@ -45,6 +49,8 @@ class SyncState {
       pendingOutboxCount: pendingOutboxCount ?? this.pendingOutboxCount,
       lastTrigger: lastTrigger ?? this.lastTrigger,
       isSyncing: isSyncing ?? this.isSyncing,
+      retryNotBefore:
+          clearRetryNotBefore ? null : (retryNotBefore ?? this.retryNotBefore),
     );
   }
 
@@ -53,7 +59,7 @@ class SyncState {
 
   @override
   String toString() {
-    return 'SyncState(status: $status, isSyncing: $isSyncing, pending: $pendingOutboxCount, lastSyncAt: $lastSyncAt, lastError: $lastError)';
+    return 'SyncState(status: $status, isSyncing: $isSyncing, pending: $pendingOutboxCount, lastSyncAt: $lastSyncAt, lastError: $lastError, retryNotBefore: $retryNotBefore)';
   }
 
   @override
@@ -65,7 +71,8 @@ class SyncState {
         other.lastError == lastError &&
         other.pendingOutboxCount == pendingOutboxCount &&
         other.lastTrigger == lastTrigger &&
-        other.isSyncing == isSyncing;
+        other.isSyncing == isSyncing &&
+        other.retryNotBefore == retryNotBefore;
   }
 
   @override
@@ -76,5 +83,6 @@ class SyncState {
         pendingOutboxCount,
         lastTrigger,
         isSyncing,
+        retryNotBefore,
       );
 }

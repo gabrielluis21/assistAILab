@@ -33,6 +33,20 @@ final class SyncHttpException implements Exception {
       'SyncHttpException($operation, HTTP $statusCode): $responseBody';
 }
 
+/// Thrown when /sync/bootstrap fails persistently with HTTP 409 SYNC_V2_REFRESH_REQUIRED
+/// or SYNC_V2_BOOTSTRAP_REQUIRED, indicating that the server cannot materialize the snapshot
+/// and repeated immediate requests will continue to fail.
+final class SyncBootstrapRefreshRequiredException extends SyncHttpException {
+  const SyncBootstrapRefreshRequiredException({
+    required super.statusCode,
+    required super.responseBody,
+  }) : super(operation: 'bootstrap');
+
+  @override
+  String toString() =>
+      'SyncBootstrapRefreshRequiredException(bootstrap, HTTP $statusCode): $responseBody';
+}
+
 class SyncPushSummary {
   final int totalProcessed;
   final int syncedCount;
@@ -164,6 +178,14 @@ class SyncEngine {
           .timeout(const Duration(seconds: 15));
       if (!lease.isStillValid) return;
       if (response.statusCode != 200) {
+        if (response.statusCode == 409 &&
+            (response.body.contains('SYNC_V2_REFRESH_REQUIRED') ||
+                response.body.contains('SYNC_V2_BOOTSTRAP_REQUIRED'))) {
+          throw SyncBootstrapRefreshRequiredException(
+            statusCode: response.statusCode,
+            responseBody: response.body,
+          );
+        }
         throw SyncHttpException(
           statusCode: response.statusCode,
           operation: 'bootstrap',
